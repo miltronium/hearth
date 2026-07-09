@@ -18,3 +18,30 @@ def test_models_list():
     assert "echo" in result.stdout
     assert default_id.split("/")[-1] in result.stdout
     assert "(default)" in result.stdout
+
+
+def test_help_lists_mcp_command():
+    result = runner.invoke(app, ["--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "mcp" in result.stdout
+
+
+def test_mcp_without_extra_prints_hint_and_exits_nonzero(monkeypatch):
+    """`hearth mcp` with the `mcp` SDK absent must fail loudly, not launch a server.
+
+    Force the import to fail regardless of whether the extra happens to be installed, so
+    this asserts the graceful-degradation path deterministically.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "hearth.mcp.server" or name.startswith("mcp"):
+            raise ModuleNotFoundError("No module named 'mcp'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    result = runner.invoke(app, ["mcp"], env={"COLUMNS": "200"})
+    assert result.exit_code == 1
+    assert "uv sync --extra mcp" in result.stdout

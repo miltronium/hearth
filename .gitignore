@@ -20,3 +20,8 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Swift package build artifacts
+swift/.build/
+.swiftpm/
+Package.resolved

@@ -50,6 +50,13 @@ embeddings = [
     "mlx-lm>=0.20",
     "transformers>=4.44,<5",
 ]
+# MCP server so agents (Claude Code) can offload subtasks to the local model (Phase 5,
+# ADR-010). Install with: uv sync --extra mcp. Imported lazily in mcp/server.py and the
+# `hearth mcp` CLI command, so core install/tests run without it — the tool LOGIC in
+# mcp/tools.py carries no MCP dependency and is tested on the echo backend.
+mcp = [
+    "mcp>=1.2",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

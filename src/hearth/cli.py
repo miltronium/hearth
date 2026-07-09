@@ -6,6 +6,7 @@ Phase 0/1 commands:
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
   * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm``
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
+  * ``hearth mcp``          — MCP server for agent offload (Phase 5, needs ``[mcp]`` extra)
   * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
   * ``hearth version``      — print version
 """
@@ -133,6 +134,32 @@ def run(
         allow_escalation=False,
     )
     console.print(routed.result.text, markup=False, highlight=False)
+
+
+@app.command()
+def mcp() -> None:
+    """Launch the HEARTH MCP server (stdio) so agents like Claude Code can offload subtasks.
+
+    Registers HEARTH as an MCP tool provider (summarize/classify/extract/draft/rag_query),
+    each running on the local model with escalation disabled — the delegated work never
+    spends the agent's frontier budget (ADR-010, docs/INTEGRATION.md). Requires the ``mcp``
+    extra; the tool logic itself lives in :mod:`hearth.mcp.tools` and needs no extras.
+    """
+    try:
+        from .mcp import server
+
+        server.run()
+    except ModuleNotFoundError as exc:
+        # The `mcp` SDK is an optional extra (server.py imports it lazily at run time, so
+        # the failure surfaces here rather than at import). Fail loudly with the fix instead
+        # of a bare traceback, and exit non-zero so callers/CI notice.
+        if "mcp" not in str(exc):
+            raise
+        console.print(
+            "[red]The MCP server requires the 'mcp' extra.[/red]\n"
+            "Install it with:  [cyan]uv sync --extra mcp[/cyan]"
+        )
+        raise typer.Exit(code=1) from None
 
 
 @app.command()
