@@ -107,6 +107,15 @@ drop in behind `VectorStore`.
 **Acceptance:** train an adapter on a domain task, eval shows a lift over base, promote it,
 and routed requests use it. A regression on the golden set blocks promotion.
 
+**Result (done).** Dataset builder (versioned JSONL + provenance), `hearth train` orchestrator
+wiring `mlx_lm.lora` behind `[mlx]` with an injectable runner, eval harness (exact-match/token-F1
++ judge hook) with a beats-incumbent promotion gate, adapter registry lifecycle
+(`candidate→promoted→retired`, gate-enforced promote, A/B flag), and per-request adapter
+hot-swap in `MLXProvider` (`GenRequest.adapter`, cached loads; router resolves id→path, degrades
+to base on failure). CLI: `hearth train`, `hearth adapters list|promote|retire`. Offline-safe
+(fakes; no real training run in tests). Real training needs `uv sync --extra mlx` + a cached
+base model + `HF_HUB_OFFLINE=1`.
+
 ---
 
 ## Phase 5 — Swift SDK + CAMBOT integration + MCP server → **Client-agnostic reuse (G5)**
@@ -135,6 +144,16 @@ to summarize/extract locally; conformance suite is green without CAMBOT.
 
 **Acceptance:** CAMBOT performs an on-device inference with networking disabled, no daemon
 running.
+
+**Result (done).** `HearthInference` protocol unifies HTTP (`HearthClient`) and on-device
+transports behind one interface. `FoundationModelsProvider` does fully-offline, no-daemon
+on-device inference via Apple FoundationModels (`SystemLanguageModel`/`LanguageModelSession`),
+`#if canImport` + `@available` guarded with a compiling fallback stub and `isAvailable`/
+`unavailableReason` probes (`HearthError.onDeviceUnavailable` otherwise); streaming diffs
+cumulative snapshots into deltas. Live-verified on macOS 26. **Open Question #3 resolved:**
+embedded mode is base-model-only in v1 — FoundationModels can't load MLX LoRA adapters (use
+the HTTP daemon when an adapter is needed); Core ML left as a marked extension point. See
+`swift/OFFLINE.md`.
 
 ---
 
