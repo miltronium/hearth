@@ -27,6 +27,10 @@ dependencies = [
 mlx = [
     "mlx>=0.21",
     "mlx-lm>=0.20",
+    # mlx-lm 0.31.x uses the transformers 4.x AutoTokenizer.register signature;
+    # transformers 5.x changed it and breaks mlx-lm at import. Pin below 5 until
+    # mlx-lm ships a 5.x-compatible release.
+    "transformers>=4.44,<5",
 ]
 dev = [
     "pytest>=8.3",
