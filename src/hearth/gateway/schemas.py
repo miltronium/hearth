@@ -110,6 +110,72 @@ class ChatCompletionChunk(BaseModel):
     hearth: HearthTelemetry | None = None
 
 
+class EmbeddingRequest(BaseModel):
+    """OpenAI-compatible embeddings request. ``input`` accepts a string or a list."""
+
+    model: str = "auto"
+    input: str | list[str]
+
+
+class EmbeddingData(BaseModel):
+    object: Literal["embedding"] = "embedding"
+    embedding: list[float]
+    index: int
+
+
+class EmbeddingUsage(BaseModel):
+    prompt_tokens: int = 0
+    total_tokens: int = 0
+
+
+class EmbeddingResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[EmbeddingData] = Field(default_factory=list)
+    model: str
+    usage: EmbeddingUsage
+
+
+class RagChunkSpec(BaseModel):
+    """Chunking controls for ingest (docs/API.md)."""
+
+    size: int = 800
+    overlap: int = 100
+
+
+class RagIngestRequest(BaseModel):
+    """Ingest one or more paths into a named collection (docs/API.md)."""
+
+    collection: str
+    paths: list[str]
+    chunk: RagChunkSpec = Field(default_factory=RagChunkSpec)
+
+
+class RagIngestResponse(BaseModel):
+    collection: str
+    files: int
+    chunks: int
+
+
+class RagQueryRequest(BaseModel):
+    """Query a collection; ``answer`` toggles retrieve-then-answer (docs/API.md)."""
+
+    collection: str
+    query: str
+    k: int = 6
+    answer: bool = False
+
+
+class RagChunk(BaseModel):
+    text: str
+    source: str
+    score: float
+
+
+class RagQueryResponse(BaseModel):
+    chunks: list[RagChunk] = Field(default_factory=list)
+    answer: str | None = None
+
+
 class RouteRequest(BaseModel):
     """Dry-run routing request for ``POST /v1/hearth/route``."""
 

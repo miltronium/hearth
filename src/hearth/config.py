@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     # Default local model id. In Phase 0 this is the single hardcoded MLX model.
     default_model: str = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 
+    # Embedding backend selection (Phase 3, ARCHITECTURE §6):
+    #   "hash" — offline, dependency-free hashing embedder (default; used by tests/skeleton).
+    #   "mlx"  — real local embeddings via the [embeddings] extra + a pre-pulled model.
+    embedder: str = "hash"
+    # Dimensionality for the offline hashing embedder.
+    embed_dim: int = 256
+    # Model id for the MLX embedder (only used when embedder="mlx").
+    embed_model: str = "mlx-community/bge-small-en-v1.5-mlx"
+
     # Root for runtime state (token, model cache, logs).
     home: Path = Path.home() / ".hearth"
 
@@ -44,6 +53,10 @@ class Settings(BaseSettings):
     @property
     def models_dir(self) -> Path:
         return self.home / "models"
+
+    @property
+    def rag_dir(self) -> Path:
+        return self.home / "rag"
 
 
 @lru_cache(maxsize=1)

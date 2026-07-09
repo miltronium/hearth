@@ -82,6 +82,16 @@ frontier calls. `hearth run "summarize" --file X` works.
 **Acceptance:** ingest a repo, query it, get relevant chunks in <1 s; a client uses
 retrieved context to answer without sending whole files to a frontier model.
 
+**Result (done).** Embedding provider protocol with a dependency-free `HashEmbedder`
+(default, offline, deterministic) and an optional `MLXEmbedder` behind a new `[embeddings]`
+extra (`HEARTH_EMBEDDER=hash|mlx`). `VectorStore` protocol + embedded `SQLiteVectorStore`
+(one file per collection under `~/.hearth/rag/`, brute-force cosine, numpy as an optional
+speedup). RAG layer: line-aware chunker, `ingest` (walks text files, skips binaries/vendor
+dirs), `query` with optional local-only `answer`. `/v1/embeddings` is now real
+(OpenAI-compatible); `/v1/hearth/rag/{ingest,query}` and `hearth rag {ingest,query}` shipped.
+Default path needs no extras and no network. Follow-up: a `sqlite-vec`/LanceDB backend can
+drop in behind `VectorStore`.
+
 ---
 
 ## Phase 4 — Fine-tuning + adapter registry + eval harness → **Improvement loop (G4)**

@@ -87,10 +87,24 @@ def test_chat_completion_streaming(client):
     assert last["hearth"]["estimated_frontier_tokens_saved"] > 0
 
 
-def test_embeddings_stub_501(client):
-    r = client.post("/v1/embeddings", json={"model": "auto", "input": "x"})
-    assert r.status_code == 501
-    assert r.json()["error"]["code"] == "hearth.embeddings.not_implemented"
+def test_embeddings_openai_shape(client):
+    r = client.post("/v1/embeddings", json={"model": "auto", "input": "hello world"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    assert len(body["data"]) == 1
+    item = body["data"][0]
+    assert item["object"] == "embedding"
+    assert item["index"] == 0
+    assert isinstance(item["embedding"], list) and len(item["embedding"]) > 0
+    assert body["usage"]["total_tokens"] >= 1
+
+
+def test_embeddings_batch_input(client):
+    r = client.post("/v1/embeddings", json={"model": "auto", "input": ["a", "b", "c"]})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert [d["index"] for d in data] == [0, 1, 2]
 
 
 def test_auth_enforced(tmp_path):

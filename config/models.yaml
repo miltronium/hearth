@@ -43,3 +43,14 @@ models:
     ram_gb: 0.0
     capabilities: [chat]
     source: ""
+
+  # Embedding model (Phase 3, ARCHITECTURE §6). Served by the optional MLX embedder
+  # (HEARTH_EMBEDDER=mlx + the [embeddings] extra + a pre-pulled model). The default
+  # embedder is the offline HashEmbedder, so nothing here needs downloading to run.
+  - id: mlx-community/bge-small-en-v1.5-mlx
+    backend: mlx
+    quant: none
+    context: 512
+    ram_gb: 0.2
+    capabilities: [embed]
+    source: mlx-community/bge-small-en-v1.5-mlx

@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..config import Settings, get_settings
+from ..memory import RagIndex, SQLiteVectorStore, select_embedder
 from ..observability.metrics import (
     MetricsStore,
     RequestRecord,
@@ -37,9 +38,18 @@ from .schemas import (
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EmbeddingData,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    EmbeddingUsage,
     HearthTelemetry,
     ModelCard,
     ModelList,
+    RagChunk,
+    RagIngestRequest,
+    RagIngestResponse,
+    RagQueryRequest,
+    RagQueryResponse,
     RouteRequest,
     RouteResponse,
     Usage,
@@ -52,6 +62,7 @@ def create_app(
     registry: Registry | None = None,
     router: Router | None = None,
     metrics: MetricsStore | None = None,
+    rag: RagIndex | None = None,
 ) -> FastAPI:
     """Build the HEARTH FastAPI app. Pass ``provider``/``router`` to inject stubs in tests."""
     settings = settings or get_settings()
@@ -59,6 +70,14 @@ def create_app(
     registry = registry or get_registry()
     metrics = metrics or get_metrics()
     router = router or Router(local_provider=provider, metrics=metrics)
+    # RAG defaults to the offline embedder + SQLite store (rooted at settings.home/rag so
+    # tests stay isolated); the index reuses the router so `answer=True` runs the local
+    # model (allow_escalation=False). Injectable for tests.
+    rag = rag or RagIndex(
+        embedder=select_embedder(settings),
+        store=SQLiteVectorStore(settings=settings),
+        router=router,
+    )
 
     app = FastAPI(title="HEARTH", version=__version__)
     app.state.provider = provider
@@ -66,6 +85,7 @@ def create_app(
     app.state.registry = registry
     app.state.router = router
     app.state.metrics = metrics
+    app.state.rag = rag
 
     # Auth gates everything except /v1/hearth/admin/health (declared without the dep).
     auth = Depends(require_token)
@@ -94,18 +114,18 @@ def create_app(
         )
 
     @app.post("/v1/embeddings", dependencies=[auth])
-    def embeddings() -> JSONResponse:
-        # Real implementation lands in Phase 3 (local embedder + vector store). The route
-        # exists so the surface is complete, but it is honestly not implemented yet.
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": {
-                    "message": "embeddings are not implemented yet (Phase 3)",
-                    "type": "not_implemented",
-                    "code": "hearth.embeddings.not_implemented",
-                }
-            },
+    def embeddings(req: EmbeddingRequest) -> EmbeddingResponse:
+        # OpenAI-compatible embeddings via the active EmbeddingProvider (Phase 3). The
+        # default is the offline hashing embedder, so this works with no extras/network.
+        texts = [req.input] if isinstance(req.input, str) else list(req.input)
+        vectors = rag.embedder.embed(texts)
+        prompt_tokens = sum(_approx_tokens(t) for t in texts)
+        return EmbeddingResponse(
+            data=[
+                EmbeddingData(embedding=vec, index=i) for i, vec in enumerate(vectors)
+            ],
+            model=rag.embedder.name,
+            usage=EmbeddingUsage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens),
         )
 
     @app.post("/v1/chat/completions", dependencies=[auth])
@@ -177,7 +197,34 @@ def create_app(
     def admin_metrics(since: str | None = Query(None)) -> dict:
         return metrics.rollup(since_s=_parse_since(since))
 
+    @app.post("/v1/hearth/rag/ingest", dependencies=[auth])
+    def rag_ingest(req: RagIngestRequest) -> RagIngestResponse:
+        files = 0
+        chunks = 0
+        for path in req.paths:
+            result = rag.ingest(
+                path, req.collection, size=req.chunk.size, overlap=req.chunk.overlap
+            )
+            files += result.files
+            chunks += result.chunks
+        return RagIngestResponse(collection=req.collection, files=files, chunks=chunks)
+
+    @app.post("/v1/hearth/rag/query", dependencies=[auth])
+    def rag_query(req: RagQueryRequest) -> RagQueryResponse:
+        result = rag.query(req.collection, req.query, k=req.k, answer=req.answer)
+        return RagQueryResponse(
+            chunks=[
+                RagChunk(text=c.text, source=c.source, score=c.score) for c in result.chunks
+            ],
+            answer=result.answer,
+        )
+
     return app
+
+
+def _approx_tokens(text: str) -> int:
+    """Cheap ~4-chars-per-token estimate for embeddings usage accounting."""
+    return max(1, len(text) // 4)
 
 
 def _budget_error(message: str) -> JSONResponse:

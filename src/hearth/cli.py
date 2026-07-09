@@ -5,6 +5,7 @@ Phase 0/1 commands:
   * ``hearth serve``        — start the OpenAI-compatible gateway
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
   * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm``
+  * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
   * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
   * ``hearth version``      — print version
 """
@@ -34,6 +35,8 @@ app = typer.Typer(
 )
 models_app = typer.Typer(help="Model registry: list, pull, and remove models.")
 app.add_typer(models_app, name="models")
+rag_app = typer.Typer(help="Local RAG: ingest paths into a collection and query them.")
+app.add_typer(rag_app, name="rag")
 console = Console()
 
 
@@ -234,6 +237,64 @@ def models_rm(model_id: str = typer.Argument(..., help="Registry model id to rem
         raise typer.Exit(code=1)
     shutil.rmtree(target)
     console.print(f"[green]Removed[/green] {target}")
+
+
+@rag_app.command("ingest")
+def rag_ingest(
+    path: Path = typer.Argument(..., help="File or directory to ingest."),
+    collection: str = typer.Option("default", "--collection", help="Target collection name."),
+    size: int = typer.Option(800, "--size", help="Chunk size in characters."),
+    overlap: int = typer.Option(100, "--overlap", help="Chunk overlap in characters."),
+) -> None:
+    """Chunk, embed, and store a path into a local RAG collection (ARCHITECTURE §6)."""
+    from .memory import RagIndex
+
+    index = RagIndex()
+    console.print(
+        f"Ingesting [cyan]{path}[/cyan] → collection [cyan]{collection}[/cyan] "
+        f"(embedder=[cyan]{index.embedder.name}[/cyan]) …"
+    )
+    result = index.ingest(path, collection, size=size, overlap=overlap)
+    console.print(
+        f"[green]Done.[/green] {result.files} file(s), {result.chunks} chunk(s) "
+        f"in collection [cyan]{result.collection}[/cyan]."
+    )
+
+
+@rag_app.command("query")
+def rag_query(
+    query: str = typer.Argument(..., help="Query text."),
+    collection: str = typer.Option("default", "--collection", help="Collection to search."),
+    k: int = typer.Option(6, "--k", help="Number of chunks to retrieve."),
+    answer: bool = typer.Option(
+        False, "--answer", help="Answer with the local model grounded in retrieved chunks."
+    ),
+) -> None:
+    """Retrieve the top-k chunks for a query; optionally answer locally (ARCHITECTURE §6)."""
+    from .memory import RagIndex
+
+    provider = select_provider(get_settings())
+    index = RagIndex(router=Router(local_provider=provider))
+    result = index.query(collection, query, k=k, answer=answer)
+
+    if not result.chunks:
+        console.print(f"[yellow]No chunks in collection[/yellow] {collection!r}.")
+        raise typer.Exit(code=0)
+
+    table = Table(title=f"rag query — {collection}", show_header=True, header_style="bold")
+    table.add_column("score", justify="right")
+    table.add_column("source")
+    table.add_column("text")
+    for c in result.chunks:
+        snippet = c.text.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "…"
+        table.add_row(f"{c.score:.3f}", c.source, snippet)
+    console.print(table)
+
+    if result.answer is not None:
+        console.print("\n[bold]answer[/bold]")
+        console.print(result.answer, markup=False, highlight=False)
 
 
 if __name__ == "__main__":

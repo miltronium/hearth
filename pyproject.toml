@@ -42,6 +42,14 @@ mlx = [
 remote = [
     "anthropic>=0.40",
 ]
+# Real local embeddings for RAG (Phase 3). Install with: uv sync --extra embeddings
+# Imported lazily in memory/embed.py so core install/tests don't need it — the default
+# embedder is the offline, dependency-free HashEmbedder. Reuses the mlx-lm stack.
+embeddings = [
+    "mlx>=0.21",
+    "mlx-lm>=0.20",
+    "transformers>=4.44,<5",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
