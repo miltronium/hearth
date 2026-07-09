@@ -139,8 +139,11 @@ Each phase ships something usable. Phase 1 alone already saves tokens.
 
 ## 10. Open questions (resolve during Phase 0)
 
-1. **Default coder model** — Qwen2.5-Coder-7B vs 14B at 32 GB? (Bench both in Phase 0.)
+1. **Default coder model** — ✅ **Resolved (Phase 0 bench, 36 GB M-series):** Qwen2.5-Coder-7B
+   4-bit is the default (26.1 tok/s, ~4.5 GB resident) vs 14B (12.4 tok/s, ~9 GB). 7B wins
+   on throughput for HEARTH's high-volume offload role; 14B stays in the registry as a
+   higher-quality `code`/`reason` tier.
 2. **Escalation target** — public frontier API, or route to an internal endpoint? (HEARTH stays agnostic; config decides.)
 3. **Adapter format portability** — do fine-tuned MLX adapters need a Core ML export path for the embedded Swift mode, or is embedded mode base-model-only in v1?
 4. **Process model** — always-on `launchd` LaunchAgent vs on-demand spawn? (Lean LaunchAgent for warm models.)
-5. **Repo home** — new standalone git repo under `apps/HEARTH` (recommended) vs monorepo.
+5. **Repo home** — ✅ standalone repo at `github.com/miltronium/hearth`.

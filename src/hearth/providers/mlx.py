@@ -61,6 +61,7 @@ class MLXProvider:
             max_tokens=req.max_tokens,
             verbose=False,
         )
+        text = self._strip_terminators(text)
         return GenResult(
             text=text.strip(),
             model=self.model_id,
@@ -72,6 +73,21 @@ class MLXProvider:
     def footprint(self, model_id: str) -> ResourceEstimate:
         # Refined later from the registry; a 7B 4-bit model is ~4.5 GB resident.
         return ResourceEstimate(ram_gb=4.5)
+
+    def _strip_terminators(self, text: str) -> str:
+        """Remove a trailing chat end-of-turn / EOS token the decoder may emit verbatim.
+
+        Some chat templates decode the terminator (e.g. ``<|im_end|>``) into the output
+        string instead of stopping before it; trim it so callers get clean text.
+        """
+        markers = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
+        eos = getattr(self._tokenizer, "eos_token", None)
+        if eos:
+            markers.append(eos)
+        for m in markers:
+            if m and text.rstrip().endswith(m):
+                text = text.rstrip()[: -len(m)]
+        return text
 
     def _format_prompt(self, messages: list) -> str:
         """Render messages via the tokenizer's chat template when available."""

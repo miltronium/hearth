@@ -26,6 +26,17 @@ broken again.
 **Acceptance:** `curl` a chat completion and get a coherent local response. Latency numbers
 recorded for candidate models.
 
+**Result (done).** Bench on a 36 GB M-series: Qwen2.5-Coder **7B** 4-bit = 26.1 tok/s
+(~4.5 GB resident), **14B** 4-bit = 12.4 tok/s (~9 GB). **7B chosen as `default_model`**;
+14B kept in the registry for a higher-quality tier. `MLXProvider` validated end-to-end
+against the real 7B weights.
+
+> **Locked-down networks:** the public model host (`huggingface.co`) may be proxy-blocked.
+> Weights are cached under `~/.cache/huggingface` after the first pull, so set
+> `HF_HUB_OFFLINE=1` (and `TRANSFORMERS_OFFLINE=1`) to load from cache with no network.
+> Pre-warm the cache once from an unrestricted terminal, then run offline. An internal
+> `HF_ENDPOINT` mirror also works with no code change. (Phase 1 registry formalizes this.)
+
 ---
 
 ## Phase 1 — Gateway + MLX + registry + CLI → **Offload (G1)**
