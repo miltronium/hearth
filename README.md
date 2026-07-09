@@ -47,8 +47,24 @@ and improvable.
 
 ## Status
 
-📄 **Proposal / pre-implementation.** This repo currently contains design docs only.
-See the roadmap for the build sequence.
+🟢 **Phase 0 complete — walking skeleton runs.** A request goes end-to-end
+(client → gateway → provider → response) on the `echo` fallback backend, with no model
+downloaded. MLX is wired as the real backend behind an optional extra. Next: Phase 1
+(productionize MLX + registry + streaming). See [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Run it now
+
+```bash
+uv sync --extra dev            # install (core + test deps; no MLX needed)
+uv run pytest -q               # 9 passing
+uv run hearth doctor           # environment preflight
+uv run hearth run "hello"      # one-shot (echo backend until MLX is installed)
+uv run hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080
+
+# real Apple Silicon inference:
+uv sync --extra mlx            # pulls mlx + mlx-lm
+HEARTH_BACKEND=mlx uv run hearth serve
+```
 
 ## Documentation map
 
