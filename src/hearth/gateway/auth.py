@@ -7,6 +7,8 @@ keeps this low-stakes, but the token stops other local users from driving the da
 
 from __future__ import annotations
 
+import secrets
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -28,7 +30,7 @@ def require_token(
     if not settings.require_auth:
         return
     expected = get_or_create_token(settings)
-    if credentials is None or credentials.credentials != expected:
+    if credentials is None or not secrets.compare_digest(credentials.credentials, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
