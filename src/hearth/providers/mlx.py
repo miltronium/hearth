@@ -27,8 +27,10 @@ class MLXProvider:
     """Loads a single model via ``mlx-lm`` and serves streaming/non-streaming completions.
 
     The model is loaded lazily on first use and cached for the process lifetime (Phase 0
-    keeps exactly one resident model; ADR-003). An optional LoRA ``adapter`` path is wired
-    through :meth:`load` for Phase 4; it is ``None`` (base weights only) by default.
+    keeps exactly one resident base model; ADR-003). LoRA adapters are hot-swappable per
+    request (Phase 4): :meth:`generate`/:meth:`stream` accept an optional ``adapter`` path
+    that layers over the base weights; each distinct adapter path is loaded once and cached
+    alongside the base so switching between them is cheap (ARCHITECTURE §5).
     """
 
     name = "mlx"
@@ -38,26 +40,40 @@ class MLXProvider:
         self.adapter = adapter
         self._model = None
         self._tokenizer = None
+        # adapter path -> (model, tokenizer); the base (no adapter) is keyed by "".
+        self._cache: dict[str, tuple[object, object]] = {}
 
     def capabilities(self) -> Capabilities:
         return Capabilities(chat=True, embed=False, stream=True, adapters=True)
 
-    def _ensure_loaded(self) -> None:
-        if self._model is not None:
-            return
+    def _load_variant(self, adapter: str | None):
+        """Load (and cache) the (model, tokenizer) for ``adapter`` (``None`` = base weights).
+
+        A distinct ``adapter_path`` layers a LoRA adapter over the base; loaded once per
+        path and cached so per-request hot-swap is a dict lookup after the first use.
+        """
+        key = adapter or ""
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         if not mlx_available():
             raise MLXUnavailableError(
                 "mlx-lm is not installed. Install the backend with: uv sync --extra mlx"
             )
         from mlx_lm import load  # deferred heavy import
 
-        # ``adapter_path`` layers a LoRA adapter over the base weights when provided;
-        # unused by default (Phase 4 populates it from the adapter registry).
-        kwargs = {"adapter_path": self.adapter} if self.adapter else {}
-        self._model, self._tokenizer = load(self.model_id, **kwargs)
+        kwargs = {"adapter_path": adapter} if adapter else {}
+        loaded = load(self.model_id, **kwargs)
+        self._cache[key] = loaded
+        return loaded
+
+    def _ensure_loaded(self, adapter: str | None = None) -> None:
+        """Ensure the variant for ``adapter`` (or the provider default) is the active one."""
+        selected = adapter if adapter is not None else self.adapter
+        self._model, self._tokenizer = self._load_variant(selected)
 
     def generate(self, req: GenRequest) -> GenResult:
-        self._ensure_loaded()
+        self._ensure_loaded(req.adapter)
         from mlx_lm import generate as mlx_generate
 
         prompt = self._format_prompt(req.messages)
@@ -83,7 +99,7 @@ class MLXProvider:
         A trailing chat terminator (e.g. ``<|im_end|>``) is buffered and stripped so it
         never reaches the client — matching :meth:`generate`'s terminator handling.
         """
-        self._ensure_loaded()
+        self._ensure_loaded(req.adapter)
         from mlx_lm import stream_generate
 
         prompt = self._format_prompt(req.messages)

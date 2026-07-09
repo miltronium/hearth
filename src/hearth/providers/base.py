@@ -29,6 +29,10 @@ class GenRequest:
     model: str
     max_tokens: int = 512
     temperature: float = 0.7
+    # Resolved LoRA adapter path to layer over the base weights for this request, or None
+    # for base weights. The router resolves an adapter *id* to this path (Phase 4); a
+    # provider without adapter support ignores it.
+    adapter: str | None = None
 
 
 @dataclass(frozen=True)

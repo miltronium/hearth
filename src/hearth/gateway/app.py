@@ -289,11 +289,19 @@ def _stream_sse(
         yield _sse("[DONE]")
         return
 
+    # Adapters layer over the local backend only; resolve the requested id (or the task's
+    # promoted default) to a concrete path so streaming hot-swaps like non-streaming does.
+    adapter_path = (
+        None
+        if decision.would_escalate
+        else router._resolve_adapter(adapter, decision.task_class)
+    )
     stream_req = GenRequest(
         messages=gen_req.messages,
         model=decision.model,
         max_tokens=gen_req.max_tokens,
         temperature=gen_req.temperature,
+        adapter=adapter_path,
     )
 
     # First chunk announces the assistant role (OpenAI convention).

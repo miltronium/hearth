@@ -6,6 +6,8 @@ Phase 0/1 commands:
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
   * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm``
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
+  * ``hearth train …``      — LoRA fine-tune → register a candidate adapter (Phase 4)
+  * ``hearth adapters …``   — adapter registry: ``list`` / ``promote`` / ``retire`` (Phase 4)
   * ``hearth mcp``          — MCP server for agent offload (Phase 5, needs ``[mcp]`` extra)
   * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
   * ``hearth version``      — print version
@@ -38,7 +40,21 @@ models_app = typer.Typer(help="Model registry: list, pull, and remove models.")
 app.add_typer(models_app, name="models")
 rag_app = typer.Typer(help="Local RAG: ingest paths into a collection and query them.")
 app.add_typer(rag_app, name="rag")
+adapters_app = typer.Typer(help="LoRA adapter registry: list, promote, and retire adapters.")
+app.add_typer(adapters_app, name="adapters")
 console = Console()
+
+
+def _adapter_store():
+    """Build an :class:`AdapterStore` under the current ``HEARTH_HOME``.
+
+    Reads a fresh :class:`Settings` (not the process-cached one) so a caller/test that
+    sets ``HEARTH_HOME`` for a single invocation gets an isolated store.
+    """
+    from .config import Settings
+    from .registry import AdapterStore
+
+    return AdapterStore(settings=Settings())
 
 
 @app.command()
@@ -322,6 +338,172 @@ def rag_query(
     if result.answer is not None:
         console.print("\n[bold]answer[/bold]")
         console.print(result.answer, markup=False, highlight=False)
+
+
+@app.command()
+def train(
+    task: str = typer.Option(..., "--task", help="Task class the adapter targets (e.g. extract)."),
+    base: str = typer.Option(..., "--base", help="Base model id to fine-tune (LoRA)."),
+    data: Path = typer.Option(..., "--data", help="Dataset JSONL (see hearth.training.dataset)."),
+    out: Path = typer.Option(
+        None, "--out", help="Output dir for the run (default: ~/.hearth/train/<run-id>)."
+    ),
+    iters: int = typer.Option(200, "--iters", help="Training iterations."),
+    register: bool = typer.Option(
+        True, "--register/--no-register", help="Register the result as a candidate adapter."
+    ),
+) -> None:
+    """Train a LoRA adapter and register it as a *candidate* (ARCHITECTURE §7, ADR-006).
+
+    Real training needs the ``[mlx]`` extra, a cached base model, and offline HF:
+
+        uv sync --extra mlx
+        HF_HUB_OFFLINE=1 hearth train --task extract --base <id> --data data.jsonl
+
+    Training is eval-gated: a candidate must beat the incumbent on a golden set before it
+    can be promoted (``hearth adapters promote``). This command only *produces a
+    candidate*; promotion is a separate, deliberate step.
+    """
+    from datetime import UTC, datetime
+
+    from .config import Settings
+    from .registry import AdapterError
+    from .training import LoRAConfig, load_dataset
+    from .training import train as run_train
+
+    try:
+        dataset = load_dataset(data)
+    except Exception as exc:  # dataset validation errors -> clean message, non-zero exit
+        console.print(f"[red]Dataset error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = out or (Settings().home / "train" / run_id)
+    config = LoRAConfig(
+        base_model=base, task=task, dataset=dataset, output_dir=out_dir, iters=iters
+    )
+    console.print(
+        f"Training [cyan]{task}[/cyan] adapter on [cyan]{base}[/cyan] "
+        f"({len(dataset)} records) -> {out_dir}"
+    )
+    try:
+        outcome = run_train(config, train_run_id=run_id)
+    except RuntimeError as exc:
+        # The real runner raises with the fix hint when the [mlx] extra is missing.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    console.print(f"[green]Trained.[/green] adapter -> {outcome.adapter_path}")
+    if not register:
+        return
+    adapter_id = f"{task}-{run_id}"
+    try:
+        _adapter_store().register(
+            adapter_id,
+            base_model=base,
+            task=task,
+            train_run_id=run_id,
+            adapter_path=str(outcome.adapter_path),
+        )
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(
+        f"Registered candidate [cyan]{adapter_id}[/cyan]. "
+        "Eval it, then [bold]hearth adapters promote[/bold] to serve it."
+    )
+
+
+@adapters_app.command("list")
+def adapters_list(
+    task: str = typer.Option(None, "--task", help="Filter by task class."),
+    status: str = typer.Option(None, "--status", help="Filter by status."),
+) -> None:
+    """List adapters in the registry (candidate/promoted/retired)."""
+    from .registry import AdapterError
+
+    try:
+        entries = _adapter_store().list(task=task, status=status)
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    table = Table(title="hearth adapters", show_header=True, header_style="bold")
+    table.add_column("id")
+    table.add_column("task")
+    table.add_column("base_model")
+    table.add_column("status")
+    table.add_column("eval")
+    for e in entries:
+        color = {"promoted": "green", "candidate": "yellow", "retired": "dim"}.get(
+            e.status, "white"
+        )
+        scores = ", ".join(f"{k}={v:g}" for k, v in e.eval_scores.items())
+        table.add_row(
+            e.id, e.task, e.base_model, f"[{color}]{e.status}[/{color}]", scores or "-"
+        )
+    console.print(table)
+
+
+@adapters_app.command("promote")
+def adapters_promote(
+    adapter_id: str = typer.Argument(..., help="Adapter id to promote."),
+    candidate_score: float = typer.Option(
+        None, "--candidate-score", help="Candidate eval score (proves it beat the incumbent)."
+    ),
+    incumbent_score: float = typer.Option(
+        None, "--incumbent-score", help="Incumbent eval score (omit if no incumbent)."
+    ),
+) -> None:
+    """Promote a candidate — refused unless the eval gate passed (ARCHITECTURE §7, ADR-006).
+
+    Promotion requires proof the candidate beat the incumbent. Supply ``--candidate-score``
+    (and ``--incumbent-score`` when one exists); the gate (``beats_incumbent``) must pass or
+    this refuses. This is the safety guarantee: a bare "promote" never wins.
+    """
+    from .registry import AdapterError, GateNotPassedError
+    from .training.eval import EvalReport, beats_incumbent
+
+    if candidate_score is None:
+        console.print("[red]--candidate-score is required to prove the eval gate passed.[/red]")
+        raise typer.Exit(code=1)
+
+    candidate = EvalReport(task="", metric="cli", score=candidate_score)
+    incumbent = (
+        EvalReport(task="", metric="cli", score=incumbent_score)
+        if incumbent_score is not None
+        else None
+    )
+    gate_passed = beats_incumbent(candidate, incumbent)
+    proof = {
+        "candidate_score": candidate_score,
+        "incumbent_score": incumbent_score,
+        "gate_passed": gate_passed,
+    }
+    try:
+        _adapter_store().promote(adapter_id, gate_passed=gate_passed, proof=proof)
+    except GateNotPassedError as exc:
+        console.print(f"[red]Promotion refused:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Promoted[/green] {adapter_id} (gate passed).")
+
+
+@adapters_app.command("retire")
+def adapters_retire(
+    adapter_id: str = typer.Argument(..., help="Adapter id to retire."),
+) -> None:
+    """Retire an adapter so it no longer serves."""
+    from .registry import AdapterError
+
+    try:
+        _adapter_store().retire(adapter_id)
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Retired[/green] {adapter_id}.")
 
 
 if __name__ == "__main__":

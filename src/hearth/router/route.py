@@ -79,6 +79,7 @@ class Router:
         budget: BudgetAccountant | None = None,
         metrics: MetricsStore | None = None,
         remote_factory=None,
+        adapters=None,
     ) -> None:
         self.local = local_provider
         self.policy = policy or get_policy()
@@ -87,6 +88,10 @@ class Router:
         # Injectable so tests supply a fake remote without importing the anthropic SDK.
         # Default resolves lazily to avoid a providers<->router import cycle.
         self._remote_factory = remote_factory
+        # Adapter registry for resolving a requested adapter id -> on-disk path (Phase 4).
+        # Optional/lazy so the router works with no adapters (the echo skeleton) and tests
+        # can inject a fake store.
+        self._adapters = adapters
 
     def _make_remote(self, config) -> ModelProvider:
         """Build a remote provider from config (lazy import breaks the providers cycle)."""
@@ -195,12 +200,19 @@ class Router:
         else:
             provider = self.local
 
+        # Adapters only layer over the LOCAL backend; resolve the id -> path here so the
+        # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
+        adapter_path = None
+        if not decision.would_escalate:
+            adapter_path = self._resolve_adapter(adapter, decision.task_class)
+
         started = time.perf_counter()
         result = provider.generate(GenRequest(
             messages=req.messages,
             model=decision.model,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
+            adapter=adapter_path,
         ))
         latency_ms = (time.perf_counter() - started) * 1000.0
 
@@ -248,6 +260,43 @@ class Router:
     def _remote_model(self) -> str:
         cfg = self.policy.remote_for()
         return cfg.model if cfg else self.policy.defaults.remote
+
+    def _resolve_adapter(self, requested: str | None, task_class: str) -> str | None:
+        """Resolve the adapter to actually load for a local request → an on-disk path.
+
+        Resolution:
+          * an explicit ``requested`` id (``hearth.adapter``) wins — served behind the A/B
+            flag even if it's still a candidate (ARCHITECTURE §5);
+          * otherwise the promoted adapter for the task class serves by default, if any;
+          * else ``None`` (base weights).
+
+        Returns ``None`` (and never raises) when there's no adapter store or the requested
+        id can't be resolved — routing must not fail because an adapter is missing; it
+        degrades to the base model.
+        """
+        store = self._adapter_store()
+        if store is None:
+            return None
+        try:
+            if requested:
+                return store.resolve_path(requested, allow_candidate=True)
+            promoted = store.promoted_for(task_class)
+            return store.resolve_path(promoted.id) if promoted else None
+        except Exception:  # noqa: BLE001 — degrade to base weights; never fail the request
+            logger.warning("adapter %r unresolved; serving base weights", requested)
+            return None
+
+    def _adapter_store(self):
+        """The adapter store (injected, or lazily the default). ``None`` if unavailable."""
+        if self._adapters is not None:
+            return self._adapters
+        try:
+            from ..registry import AdapterStore
+
+            self._adapters = AdapterStore()
+        except Exception:  # noqa: BLE001 — no store ⇒ no adapters, base weights only
+            return None
+        return self._adapters
 
 
 def _confidence(req: GenRequest, task_class: str) -> float:

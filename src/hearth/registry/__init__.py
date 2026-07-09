@@ -95,4 +95,21 @@ def get_registry() -> Registry:
     return load_registry()
 
 
-__all__ = ["ModelEntry", "Registry", "load_registry", "get_registry", "default_registry_path"]
+from .adapters import (  # noqa: E402  (re-export after the model-registry core above)
+    AdapterEntry,
+    AdapterError,
+    AdapterStore,
+    GateNotPassedError,
+)
+
+__all__ = [
+    "ModelEntry",
+    "Registry",
+    "load_registry",
+    "get_registry",
+    "default_registry_path",
+    "AdapterEntry",
+    "AdapterStore",
+    "AdapterError",
+    "GateNotPassedError",
+]
