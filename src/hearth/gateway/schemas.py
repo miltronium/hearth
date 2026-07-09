@@ -76,8 +76,35 @@ class ModelCard(BaseModel):
     id: str
     object: Literal["model"] = "model"
     owned_by: str = "hearth"
+    backend: str | None = None
+    context: int | None = None
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class ModelList(BaseModel):
     object: Literal["list"] = "list"
     data: list[ModelCard] = Field(default_factory=list)
+
+
+class ChatChunkDelta(BaseModel):
+    """A streamed delta. ``role`` appears only on the first chunk (OpenAI convention)."""
+
+    role: Literal["assistant"] | None = None
+    content: str | None = None
+
+
+class ChatChunkChoice(BaseModel):
+    index: int = 0
+    delta: ChatChunkDelta = Field(default_factory=ChatChunkDelta)
+    finish_reason: str | None = None
+
+
+class ChatCompletionChunk(BaseModel):
+    """One ``chat.completion.chunk`` SSE event. The final chunk carries ``hearth``."""
+
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[ChatChunkChoice]
+    hearth: HearthTelemetry | None = None

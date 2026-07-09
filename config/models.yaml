@@ -1,0 +1,45 @@
+# HEARTH model registry — the source of truth for what can be served.
+#
+# Registry is *data, not code* (see docs/ARCHITECTURE.md §5): edit this file to add,
+# retier, or retire models without touching the gateway. `hearth models pull|list|rm`
+# and `/v1/models` read from here.
+#
+# Fields per entry:
+#   id           servable model id (also the mlx-lm / HF repo path for the `mlx` backend)
+#   backend      which provider serves it: mlx | echo
+#   quant        quantization label (e.g. 4bit) or "none"
+#   context      context window in tokens
+#   ram_gb       approximate resident footprint (unified memory)
+#   capabilities list of: chat | embed
+#   source       Hugging Face repo id to pull weights from (respects HF_ENDPOINT mirror)
+
+default: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+
+models:
+  # Default tier — benched at 26.1 tok/s / ~4.5 GB on a 36 GB M-series (Phase 0).
+  - id: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    backend: mlx
+    quant: 4bit
+    context: 32768
+    ram_gb: 4.5
+    capabilities: [chat]
+    source: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+
+  # Higher-quality tier — benched at 12.4 tok/s / ~9 GB (Phase 0).
+  - id: mlx-community/Qwen2.5-Coder-14B-Instruct-4bit
+    backend: mlx
+    quant: 4bit
+    context: 32768
+    ram_gb: 9.0
+    capabilities: [chat]
+    source: mlx-community/Qwen2.5-Coder-14B-Instruct-4bit
+
+  # Deterministic pseudo-model — the echo backend. No weights, always available; keeps
+  # the walking skeleton servable with no MLX installed and nothing downloaded.
+  - id: echo
+    backend: echo
+    quant: none
+    context: 8192
+    ram_gb: 0.0
+    capabilities: [chat]
+    source: ""

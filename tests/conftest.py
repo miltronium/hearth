@@ -12,8 +12,9 @@ from hearth.providers.echo import EchoProvider
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    # Force the echo backend and an isolated home so tests never touch ~/.hearth or MLX.
-    return Settings(backend="echo", home=tmp_path / ".hearth")
+    # Force the echo backend, an isolated home, and no auth so tests never touch
+    # ~/.hearth, MLX, or need a bearer token. Auth is exercised explicitly elsewhere.
+    return Settings(backend="echo", home=tmp_path / ".hearth", require_auth=False)
 
 
 @pytest.fixture

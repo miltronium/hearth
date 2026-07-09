@@ -8,6 +8,7 @@ and :mod:`hearth.providers.mlx` (real Apple Silicon inference).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -75,6 +76,10 @@ class ModelProvider(Protocol):
 
     def generate(self, req: GenRequest) -> GenResult:
         """Run a (non-streaming) chat completion."""
+        ...
+
+    def stream(self, req: GenRequest) -> Iterator[str]:
+        """Yield generated text incrementally (one delta per chunk)."""
         ...
 
     def footprint(self, model_id: str) -> ResourceEstimate:

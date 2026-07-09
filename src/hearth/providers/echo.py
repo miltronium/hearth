@@ -7,6 +7,8 @@ unavailable. It never touches the network or the GPU; it echoes a summary of the
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from .base import Capabilities, GenRequest, GenResult, ResourceEstimate
 
 
@@ -16,7 +18,7 @@ class EchoProvider:
     name = "echo"
 
     def capabilities(self) -> Capabilities:
-        return Capabilities(chat=True, embed=False, stream=False, adapters=False)
+        return Capabilities(chat=True, embed=False, stream=True, adapters=False)
 
     def generate(self, req: GenRequest) -> GenResult:
         last_user = next(
@@ -31,6 +33,13 @@ class EchoProvider:
             prompt_tokens=_approx_tokens(last_user),
             completion_tokens=_approx_tokens(text),
         )
+
+    def stream(self, req: GenRequest) -> Iterator[str]:
+        """Yield the echoed text word-by-word (whitespace re-attached to each word)."""
+        result = self.generate(req)
+        words = result.text.split(" ")
+        for i, word in enumerate(words):
+            yield word if i == 0 else " " + word
 
     def footprint(self, model_id: str) -> ResourceEstimate:
         return ResourceEstimate(ram_gb=0.0)

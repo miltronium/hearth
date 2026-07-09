@@ -20,6 +20,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     "typer>=0.15",
     "rich>=13.9",
+    "pyyaml>=6.0",
+    "huggingface-hub>=0.26",
 ]
 
 [project.optional-dependencies]
@@ -63,3 +65,12 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer/FastAPI use call expressions in argument defaults by design (Option/Argument/
+# Depends). These are the framework's declaration API, not mutable-default footguns.
+extend-immutable-calls = [
+    "typer.Option",
+    "typer.Argument",
+    "fastapi.Depends",
+]

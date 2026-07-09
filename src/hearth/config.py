@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # "mlx" forces the real backend; "echo" forces the deterministic stub.
     backend: str = "auto"
 
+    # Require a bearer token on all routes except /v1/hearth/admin/health. Tests set
+    # this False (or pass the token); production keeps it on even on loopback.
+    require_auth: bool = True
+
     # Default local model id. In Phase 0 this is the single hardcoded MLX model.
     default_model: str = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 
