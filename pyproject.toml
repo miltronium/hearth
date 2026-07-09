@@ -1,0 +1,61 @@
+# HEARTH project configuration.
+# Build/deps managed with uv (https://docs.astral.sh/uv/). See docs/ROADMAP.md Phase 0.
+
+[project]
+name = "hearth"
+version = "0.0.1"
+description = "On-device intelligence layer: a local-first, OpenAI-compatible model gateway for Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "miltronium" }]
+keywords = ["llm", "mlx", "apple-silicon", "local-llm", "gateway", "openai-compatible"]
+
+# Core deps are intentionally light. The heavy inference stack (mlx-lm) is an optional
+# extra so the gateway, CLI, and test suite install and run without it (echo backend).
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+# Real Apple Silicon inference. Install with:  uv sync --extra mlx
+mlx = [
+    "mlx>=0.21",
+    "mlx-lm>=0.20",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+hearth = "hearth.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/miltronium/hearth"
+Repository = "https://github.com/miltronium/hearth.git"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hearth"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

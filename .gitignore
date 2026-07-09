@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# HEARTH runtime state (models, token, logs) live in ~/.hearth by default,
+# but ignore any local copies checked into the tree.
+.hearth/
+models/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
