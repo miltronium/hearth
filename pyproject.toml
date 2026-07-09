@@ -22,6 +22,9 @@ dependencies = [
     "rich>=13.9",
     "pyyaml>=6.0",
     "huggingface-hub>=0.26",
+    # httpx powers the generic OpenAI-compatible remote protocol (providers/remote.py)
+    # and FastAPI's TestClient. Core so LAN/OpenAI escalation works without extras.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,11 @@ mlx = [
     # transformers 5.x changed it and breaks mlx-lm at import. Pin below 5 until
     # mlx-lm ships a 5.x-compatible release.
     "transformers>=4.44,<5",
+]
+# Anthropic (Claude) escalation via the official SDK. Install with: uv sync --extra remote
+# Imported lazily in providers/remote.py so core install/tests don't need it.
+remote = [
+    "anthropic>=0.40",
 ]
 dev = [
     "pytest>=8.3",

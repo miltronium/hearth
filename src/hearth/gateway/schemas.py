@@ -108,3 +108,25 @@ class ChatCompletionChunk(BaseModel):
     model: str
     choices: list[ChatChunkChoice]
     hearth: HearthTelemetry | None = None
+
+
+class RouteRequest(BaseModel):
+    """Dry-run routing request for ``POST /v1/hearth/route``."""
+
+    messages: list[ChatMessage]
+    intent: str | None = None
+    allow_escalation: bool = True
+
+
+class RouteResponse(BaseModel):
+    """What the router *would* do, without executing (docs/API.md)."""
+
+    task_class: str = Field(alias="class")
+    method: str
+    backend: str
+    model: str
+    would_escalate: bool
+    reason: str
+    confidence: float | None = None
+
+    model_config = {"populate_by_name": True}

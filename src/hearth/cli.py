@@ -5,6 +5,7 @@ Phase 0/1 commands:
   * ``hearth serve``        — start the OpenAI-compatible gateway
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
   * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm``
+  * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
   * ``hearth version``      — print version
 """
 
@@ -23,6 +24,7 @@ from .doctor import all_fatal_passed, run_checks
 from .providers import select_provider
 from .providers.base import GenRequest, Message
 from .registry import get_registry
+from .router import Router
 
 app = typer.Typer(
     name="hearth",
@@ -115,14 +117,51 @@ def run(
     # that consumes it arrives in Phase 2. Surface it so `--intent` is observably wired.
     if intent:
         console.print(f"[dim]intent={intent}[/dim]")
-    result = provider.generate(
+    router = Router(local_provider=provider)
+    routed = router.route(
         GenRequest(
             messages=[Message(role="user", content=text)],
             model=get_registry().default_id,
             max_tokens=max_tokens,
-        )
+        ),
+        intent=intent,
+        # A one-shot CLI stays local unless a daemon/policy escalates; keep it hard-local
+        # so `hearth run` never makes a surprise remote call from a script.
+        allow_escalation=False,
     )
-    console.print(result.text, markup=False, highlight=False)
+    console.print(routed.result.text, markup=False, highlight=False)
+
+
+@app.command()
+def stats(
+    since: str = typer.Option(
+        None, "--since", help="Rollup window, e.g. 7d / 24h / 30m (default: all)."
+    ),
+) -> None:
+    """Show token-savings and escalation rollups (ARCHITECTURE §8).
+
+    Phase 2 keeps metrics in-memory per process, so a fresh CLI invocation reports an
+    empty store; the numbers accumulate within a running ``hearth serve`` daemon. A future
+    phase persists records to JSONL so the CLI can roll up across restarts.
+    """
+    from .gateway.app import _parse_since
+    from .observability import get_metrics
+
+    roll = get_metrics().rollup(since_s=_parse_since(since))
+    table = Table(title="hearth stats", show_header=True, header_style="bold")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("requests", str(roll["requests"]))
+    table.add_row("estimated frontier tokens saved", str(roll["estimated_frontier_tokens_saved"]))
+    table.add_row("escalations", str(roll["escalations"]))
+    table.add_row("escalation rate", f"{roll['escalation_rate']:.2%}")
+    backend_mix = ", ".join(f"{k}={v}" for k, v in roll["backend_mix"].items())
+    class_mix = ", ".join(f"{k}={v}" for k, v in roll["class_mix"].items())
+    table.add_row("backend mix", backend_mix or "-")
+    table.add_row("class mix", class_mix or "-")
+    table.add_row("latency p50 (ms)", f"{roll['latency_ms']['p50']:g}")
+    table.add_row("latency p95 (ms)", f"{roll['latency_ms']['p95']:g}")
+    console.print(table)
 
 
 @models_app.command("list")
