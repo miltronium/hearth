@@ -10,6 +10,7 @@ liveness probe ``/v1/hearth/admin/health``.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 
@@ -18,7 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..config import Settings, get_settings
-from ..memory import RagIndex, SQLiteVectorStore, select_embedder
+from ..memory import RagIndex, select_embedder, select_vector_store
 from ..observability.metrics import (
     MetricsStore,
     RequestRecord,
@@ -28,7 +29,8 @@ from ..observability.metrics import (
 from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider
 from ..registry import Registry, get_registry
-from ..router import BudgetExhaustedError, Router
+from ..router import BudgetExhaustedError, ProviderError, Router
+from ..serving import ModelManager
 from .auth import require_token
 from .schemas import (
     ChatChoice,
@@ -55,6 +57,8 @@ from .schemas import (
     Usage,
 )
 
+logger = logging.getLogger("hearth.gateway")
+
 
 def create_app(
     provider: ModelProvider | None = None,
@@ -63,6 +67,7 @@ def create_app(
     router: Router | None = None,
     metrics: MetricsStore | None = None,
     rag: RagIndex | None = None,
+    manager: ModelManager | None = None,
 ) -> FastAPI:
     """Build the HEARTH FastAPI app. Pass ``provider``/``router`` to inject stubs in tests."""
     settings = settings or get_settings()
@@ -75,8 +80,15 @@ def create_app(
     # model (allow_escalation=False). Injectable for tests.
     rag = rag or RagIndex(
         embedder=select_embedder(settings),
-        store=SQLiteVectorStore(settings=settings),
+        store=select_vector_store(settings),
         router=router,
+    )
+    # Memory-aware residency (Phase 7): the manager owns which models are loaded within the
+    # RAM ceiling. Its factory returns the app's local provider for any model id — a single
+    # backend serving multiple ids — so warmup/readiness go through one place. Injectable so
+    # tests supply a manager over fake providers.
+    manager = manager or ModelManager(
+        factory=lambda _model_id: provider, ram_ceiling_gb=settings.ram_ceiling_gb
     )
 
     app = FastAPI(title="HEARTH", version=__version__)
@@ -86,8 +98,14 @@ def create_app(
     app.state.router = router
     app.state.metrics = metrics
     app.state.rag = rag
+    app.state.manager = manager
 
-    # Auth gates everything except /v1/hearth/admin/health (declared without the dep).
+    # Warm the default model so the first request is fast and /ready flips to 200. Never
+    # fatal: a failed warmup logs and leaves the server up in degraded mode (not ready).
+    if settings.warmup and provider.name != "echo":
+        _warmup(manager, registry.default_id)
+
+    # Auth gates everything except the health/ready liveness+readiness probes.
     auth = Depends(require_token)
 
     @app.get("/v1/hearth/admin/health")
@@ -98,6 +116,25 @@ def create_app(
             "backend": provider.name,
             "model": registry.default_id,
         }
+
+    @app.get("/v1/hearth/admin/ready")
+    def ready():
+        """Readiness probe (distinct from liveness /health).
+
+        Returns 200 only once the default/warm model is resident in the manager; 503
+        otherwise. Deployment (launchd/k8s) gates traffic on this so requests don't hit a
+        server whose model hasn't loaded yet (ARCHITECTURE §9). The echo backend is always
+        ready (nothing to load).
+        """
+        default_id = registry.default_id
+        model_ready = provider.name == "echo" or manager.is_resident(default_id)
+        payload = {
+            "status": "ready" if model_ready else "loading",
+            "backend": provider.name,
+            "model": default_id,
+            "resident": manager.resident_ids(),
+        }
+        return JSONResponse(status_code=200 if model_ready else 503, content=payload)
 
     @app.get("/v1/models", dependencies=[auth])
     def list_models() -> ModelList:
@@ -152,6 +189,8 @@ def create_app(
             )
         except BudgetExhaustedError as exc:
             return _budget_error(str(exc))
+        except ProviderError as exc:
+            return _provider_error(str(exc))
 
         result = routed.result
         rec = routed.record
@@ -227,6 +266,22 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _warmup(manager: ModelManager, model_id: str) -> bool:
+    """Pre-load ``model_id`` via the manager; degrade (log, don't crash) on failure.
+
+    Returns whether warmup succeeded. A failed load (missing weights, MLX not installed)
+    must not take the server down — `hearth serve` stays up in degraded mode and `/ready`
+    reports 503 until a model actually loads (Phase 7 graceful degradation).
+    """
+    try:
+        manager.get(model_id)
+        logger.info("warmed default model %s", model_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 — warmup is best-effort; never fatal
+        logger.warning("warmup of %s failed; serving in degraded mode: %s", model_id, exc)
+        return False
+
+
 def _budget_error(message: str) -> JSONResponse:
     """OpenAI-style error envelope for the budget-exhausted case (docs/API.md)."""
     return JSONResponse(
@@ -236,6 +291,24 @@ def _budget_error(message: str) -> JSONResponse:
                 "message": message,
                 "type": "budget_exhausted",
                 "code": "hearth.budget.exhausted",
+            }
+        },
+    )
+
+
+def _provider_error(message: str) -> JSONResponse:
+    """OpenAI-style 503 envelope for a provider load/generate failure (Phase 7).
+
+    The provider degraded (bad adapter → base retry) but still failed; return a clean,
+    retryable 503 rather than a 500 traceback so clients can back off or escalate.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "message": message,
+                "type": "provider_unavailable",
+                "code": "hearth.provider.unavailable",
             }
         },
     )

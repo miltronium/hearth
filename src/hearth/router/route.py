@@ -47,6 +47,16 @@ class BudgetExhaustedError(RuntimeError):
     """
 
 
+class ProviderError(RuntimeError):
+    """Raised when the chosen provider fails to load or generate (Phase 7 hardening).
+
+    A provider raising (missing weights, backend crash, remote unreachable) is turned into
+    this clean error rather than a bare traceback, so the gateway can return a tidy 503
+    envelope instead of a 500. The router first attempts a local degrade (see
+    :meth:`Router.route`); this surfaces only when even that fails.
+    """
+
+
 @dataclass(frozen=True)
 class RouteDecision:
     """What the router decided (before execution). Surfaced by ``POST /v1/hearth/route``."""
@@ -207,13 +217,7 @@ class Router:
             adapter_path = self._resolve_adapter(adapter, decision.task_class)
 
         started = time.perf_counter()
-        result = provider.generate(GenRequest(
-            messages=req.messages,
-            model=decision.model,
-            max_tokens=req.max_tokens,
-            temperature=req.temperature,
-            adapter=adapter_path,
-        ))
+        result = self._generate(provider, decision, req, adapter_path)
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         served_by = "remote" if decision.would_escalate else "local"
@@ -242,6 +246,48 @@ class Router:
         return RouteResult(result=result, decision=decision, record=record)
 
     # -- helpers ----------------------------------------------------------------------
+
+    def _generate(
+        self,
+        provider: ModelProvider,
+        decision: RouteDecision,
+        req: GenRequest,
+        adapter_path: str | None,
+    ) -> GenResult:
+        """Run ``provider.generate`` with graceful degradation (Phase 7 hardening).
+
+        If generation fails *with* an adapter, retry once on base weights — a bad adapter
+        must not sink an otherwise-servable request. If it still fails, wrap the error as a
+        :class:`ProviderError` so the gateway returns a clean 503 rather than a 500.
+        """
+        gen = GenRequest(
+            messages=req.messages,
+            model=decision.model,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            adapter=adapter_path,
+        )
+        try:
+            return provider.generate(gen)
+        except Exception as exc:  # noqa: BLE001 — degrade rather than 500 the request
+            if adapter_path is not None:
+                logger.warning(
+                    "generate failed with adapter; retrying on base weights: %s", exc
+                )
+                try:
+                    return provider.generate(
+                        GenRequest(
+                            messages=req.messages,
+                            model=decision.model,
+                            max_tokens=req.max_tokens,
+                            temperature=req.temperature,
+                            adapter=None,
+                        )
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
+                    exc = retry_exc
+            logger.error("provider %s failed to generate: %s", provider.name, exc)
+            raise ProviderError(f"provider {provider.name!r} failed: {exc}") from exc
 
     def _local_model(self, req: GenRequest) -> str:
         """Local model to serve with: an explicit non-'auto' request model wins over policy.
@@ -320,4 +366,4 @@ def _estimate_remote_cost(req: GenRequest) -> int:
     return max(1, prompt_chars // 4) + req.max_tokens
 
 
-__all__ = ["Router", "RouteDecision", "RouteResult", "BudgetExhaustedError"]
+__all__ = ["Router", "RouteDecision", "RouteResult", "BudgetExhaustedError", "ProviderError"]

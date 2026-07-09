@@ -1,8 +1,11 @@
 """Provider registry and selection.
 
-Selection logic: honor ``HEARTH_BACKEND`` (``auto`` | ``mlx`` | ``echo``). ``auto``
-prefers MLX when importable and falls back to the echo stub otherwise, so the server
-always starts. The model id comes from the model registry's default (ARCHITECTURE §5).
+Selection logic: honor ``HEARTH_BACKEND`` (``auto`` | ``mlx`` | ``echo`` | a plugin name).
+``auto`` prefers MLX when importable and falls back to the echo stub otherwise, so the
+server always starts. The model id comes from the model registry's default (ARCHITECTURE
+§5). Any other value is resolved against the ``hearth.providers`` plugin entry-point group
+(Phase 7), so a third-party backend serves via ``HEARTH_BACKEND=<plugin-name>`` with zero
+core edits.
 """
 
 from __future__ import annotations
@@ -26,7 +29,18 @@ def select_provider(settings: Settings | None = None) -> ModelProvider:
         return MLXProvider(default_model)
     if choice == "auto":
         return MLXProvider(default_model) if mlx_available() else EchoProvider()
-    raise ValueError(f"Unknown HEARTH_BACKEND: {settings.backend!r} (use auto|mlx|echo)")
+
+    # Fall through to a plugin-provided backend registered under `hearth.providers`.
+    # Match the entry-point name as configured (case-sensitive), not the lowercased form.
+    from ..plugins import PROVIDER_GROUP, load_plugin
+
+    plugin = load_plugin(PROVIDER_GROUP, settings.backend)
+    if plugin is not None:
+        return plugin
+    raise ValueError(
+        f"Unknown HEARTH_BACKEND: {settings.backend!r} "
+        "(use auto|mlx|echo, or install a plugin registering this name under hearth.providers)"
+    )
 
 
 __all__ = ["select_provider", "EchoProvider", "MLXProvider", "ModelProvider"]

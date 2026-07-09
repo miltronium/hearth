@@ -43,6 +43,22 @@ class Settings(BaseSettings):
     # Model id for the MLX embedder (only used when embedder="mlx").
     embed_model: str = "mlx-community/bge-small-en-v1.5-mlx"
 
+    # Vector-store backend selection (Phase 7, ADR-008):
+    #   "sqlite" — the embedded, file-based default (no extras, no service).
+    #   any other value resolves a plugin registered under the `hearth.vector_stores`
+    #   entry-point group, so a third-party store drops in with zero core edits.
+    vector_store: str = "sqlite"
+
+    # Multi-model serving (Phase 7, ARCHITECTURE §5). Total RAM (GB) budget for resident
+    # models held by the ModelManager; a new load evicts the LRU model to stay under this.
+    # Default leaves headroom for the OS + gateway on a 36 GB machine.
+    ram_ceiling_gb: float = 24.0
+
+    # Pre-load the default model on `hearth serve` start so the first request is warm
+    # (Phase 7 hardening). Default on for the real backends, no-op for echo. A failed
+    # warmup logs and continues in degraded mode — serve never blocks forever on it.
+    warmup: bool = True
+
     # Root for runtime state (token, model cache, logs).
     home: Path = Path.home() / ".hearth"
 

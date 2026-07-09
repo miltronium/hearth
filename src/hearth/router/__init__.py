@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .classify import TASK_CLASSES, classify
 from .policy import RoutingPolicy, load_policy
-from .route import BudgetExhaustedError, RouteDecision, Router, RouteResult
+from .route import BudgetExhaustedError, ProviderError, RouteDecision, Router, RouteResult
 
 __all__ = [
     "TASK_CLASSES",
@@ -20,4 +20,5 @@ __all__ = [
     "RouteDecision",
     "RouteResult",
     "BudgetExhaustedError",
+    "ProviderError",
 ]

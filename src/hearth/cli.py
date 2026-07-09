@@ -4,10 +4,11 @@ Phase 0/1 commands:
   * ``hearth doctor``       — environment preflight
   * ``hearth serve``        — start the OpenAI-compatible gateway
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
-  * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm``
+  * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm`` / ``convert``
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
   * ``hearth train …``      — LoRA fine-tune → register a candidate adapter (Phase 4)
   * ``hearth adapters …``   — adapter registry: ``list`` / ``promote`` / ``retire`` (Phase 4)
+  * ``hearth plugins list`` — third-party plugins discovered via entry points (Phase 7)
   * ``hearth mcp``          — MCP server for agent offload (Phase 5, needs ``[mcp]`` extra)
   * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
   * ``hearth version``      — print version
@@ -36,12 +37,14 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-models_app = typer.Typer(help="Model registry: list, pull, and remove models.")
+models_app = typer.Typer(help="Model registry: list, pull, remove, and convert models.")
 app.add_typer(models_app, name="models")
 rag_app = typer.Typer(help="Local RAG: ingest paths into a collection and query them.")
 app.add_typer(rag_app, name="rag")
 adapters_app = typer.Typer(help="LoRA adapter registry: list, promote, and retire adapters.")
 app.add_typer(adapters_app, name="adapters")
+plugins_app = typer.Typer(help="Third-party plugins discovered via entry points (Phase 7).")
+app.add_typer(plugins_app, name="plugins")
 console = Console()
 
 
@@ -282,6 +285,50 @@ def models_rm(model_id: str = typer.Argument(..., help="Registry model id to rem
     console.print(f"[green]Removed[/green] {target}")
 
 
+@models_app.command("convert")
+def models_convert(
+    source: str = typer.Option(
+        ..., "--source", help="Source checkpoint: HF repo id or local path to convert."
+    ),
+    out: Path = typer.Option(..., "--out", help="Output dir for the MLX-format model."),
+    quantize: bool = typer.Option(
+        True, "--quantize/--no-quantize", help="Quantize the model (else format-convert only)."
+    ),
+    q_bits: int = typer.Option(4, "--q-bits", help="Quantization bit width (2/3/4/6/8)."),
+    q_group_size: int = typer.Option(64, "--q-group-size", help="Quantization group size."),
+) -> None:
+    """Quantize/convert a checkpoint into an MLX-servable model (ARCHITECTURE §5, Phase 7).
+
+    Real conversion needs the ``[mlx]`` extra, source weights, and (for cached inputs)
+    offline HF:
+
+        uv sync --extra mlx
+        HF_HUB_OFFLINE=1 hearth models convert --source <id> --out ~/.hearth/models/<id> -q 4
+
+    Add the produced model to ``config/models.yaml`` to serve it (registry is data, §5).
+    """
+    from .convert import ConvertConfig, ConvertUnavailableError
+    from .convert import convert as run_convert
+
+    config = ConvertConfig(
+        source=source, output_dir=out, quantize=quantize, q_bits=q_bits, q_group_size=q_group_size
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        console.print(f"[red]Invalid conversion config:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    label = f"{q_bits}-bit" if quantize else "no quantization"
+    console.print(f"Converting [cyan]{source}[/cyan] ({label}) -> {out} …")
+    try:
+        outcome = run_convert(config)
+    except ConvertUnavailableError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Converted.[/green] model -> {outcome.output_dir}")
+
+
 @rag_app.command("ingest")
 def rag_ingest(
     path: Path = typer.Argument(..., help="File or directory to ingest."),
@@ -504,6 +551,31 @@ def adapters_retire(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]Retired[/green] {adapter_id}.")
+
+
+@plugins_app.command("list")
+def plugins_list() -> None:
+    """List third-party plugins discovered via entry points (Phase 7, docs/PLUGINS.md).
+
+    Shows every entry point registered in the ``hearth.providers`` /
+    ``hearth.vector_stores`` / ``hearth.embedders`` groups, with its status: ``ok`` if it
+    imported and satisfied the group's Protocol, else why it was skipped. A broken plugin
+    is reported here rather than crashing the server.
+    """
+    from .plugins import discover_all
+
+    found = discover_all()
+    table = Table(title="hearth plugins", show_header=True, header_style="bold")
+    table.add_column("name")
+    table.add_column("group")
+    table.add_column("target")
+    table.add_column("status")
+    for p in found:
+        status = "[green]ok[/green]" if p.ok else f"[red]skipped[/red] — {p.detail}"
+        table.add_row(p.name, p.group, p.value, status)
+    console.print(table)
+    if not found:
+        console.print("[dim]No plugins installed. See docs/PLUGINS.md to write one.[/dim]")
 
 
 if __name__ == "__main__":

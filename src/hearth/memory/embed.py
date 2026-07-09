@@ -160,7 +160,9 @@ def select_embedder(settings: Settings | None = None) -> EmbeddingProvider:
 
     ``hash`` (default) is the offline dependency-free embedder; ``mlx`` is the real model.
     The MLX model id comes from settings (``HEARTH_EMBED_MODEL``), matching how the model
-    registry supplies the default coder model.
+    registry supplies the default coder model. Any other value resolves against the
+    ``hearth.embedders`` plugin entry-point group (Phase 7), so a third-party embedder
+    serves via ``HEARTH_EMBEDDER=<plugin-name>`` with zero core edits.
     """
     settings = settings or get_settings()
     choice = settings.embedder.lower()
@@ -168,7 +170,17 @@ def select_embedder(settings: Settings | None = None) -> EmbeddingProvider:
         return HashEmbedder(dim=settings.embed_dim)
     if choice == "mlx":
         return MLXEmbedder(settings.embed_model)
-    raise ValueError(f"Unknown HEARTH_EMBEDDER: {settings.embedder!r} (use hash|mlx)")
+
+    # Fall through to a plugin-provided embedder registered under `hearth.embedders`.
+    from ..plugins import EMBEDDER_GROUP, load_plugin
+
+    plugin = load_plugin(EMBEDDER_GROUP, settings.embedder)
+    if plugin is not None:
+        return plugin
+    raise ValueError(
+        f"Unknown HEARTH_EMBEDDER: {settings.embedder!r} "
+        "(use hash|mlx, or install a plugin registering this name under hearth.embedders)"
+    )
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:

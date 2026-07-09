@@ -169,6 +169,25 @@ the HTTP daemon when an adapter is needed); Core ML left as a marked extension p
 **Acceptance:** a third-party backend loads as a plugin with zero core edits; two models
 serve concurrently within the RAM ceiling.
 
+**Result (done).** Entry-point plugin API (`src/hearth/plugins.py`) discovers backends in
+three groups — `hearth.providers`, `hearth.vector_stores`, `hearth.embedders` — imports and
+Protocol-validates them, and registers them by name so `select_provider` /
+`select_vector_store` / `select_embedder` resolve `HEARTH_BACKEND=<plugin>` (etc.) with zero
+core edits; a broken plugin logs a warning and is skipped, never crashing startup.
+`hearth plugins list` shows discovered plugins + group + status. In-repo example
+(`examples/plugin/`, own `pyproject.toml` + trivial `ModelProvider`) verified live — installs,
+lists `ok`, serves via `HEARTH_BACKEND=hello` unchanged — plus `docs/PLUGINS.md`. Multi-model
+serving: `ModelManager` (`src/hearth/serving/manager.py`) holds resident models within
+`HEARTH_RAM_CEILING_GB` using each provider's `footprint().ram_gb`, lazy-loads on demand, and
+thread-safely LRU-evicts to make room (two models serve concurrently within the ceiling).
+Quant/conversion pipeline: `hearth models convert` → `mlx_lm.convert` behind `[mlx]` with an
+injectable runner (fake in tests). Hardening: `GET /v1/hearth/admin/ready` (200 only once the
+warm model is resident, else 503), default-model warmup on `hearth serve` (config flag, on for
+mlx / no-op for echo; a failed warmup logs and continues in degraded mode), and graceful
+provider degradation (bad adapter → base-weights retry; a raising provider → clean 503
+`hearth.provider.unavailable`, never a 500). Offline-safe (fakes/simulated entry points; no
+real models or conversions in tests). 138 → 175 Python tests, all green; echo skeleton intact.
+
 ---
 
 ## Sequencing notes

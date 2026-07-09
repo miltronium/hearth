@@ -15,7 +15,7 @@ from .embed import (
     select_embedder,
 )
 from .rag import IngestResult, QueryResult, RagIndex, chunk_text
-from .store import Chunk, SQLiteVectorStore, VectorStore
+from .store import Chunk, SQLiteVectorStore, VectorStore, select_vector_store
 
 __all__ = [
     "EmbeddingProvider",
@@ -26,6 +26,7 @@ __all__ = [
     "Chunk",
     "VectorStore",
     "SQLiteVectorStore",
+    "select_vector_store",
     "RagIndex",
     "IngestResult",
     "QueryResult",

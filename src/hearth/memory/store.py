@@ -178,4 +178,28 @@ def _safe_collection(name: str) -> str:
     return safe or "default"
 
 
-__all__ = ["Chunk", "VectorStore", "SQLiteVectorStore"]
+def select_vector_store(settings: Settings | None = None) -> VectorStore:
+    """Return the active vector store based on ``HEARTH_VECTOR_STORE`` config (Phase 7).
+
+    ``sqlite`` (default) is the embedded, file-based store (ADR-008). Any other value
+    resolves against the ``hearth.vector_stores`` plugin entry-point group, so a
+    third-party store (e.g. sqlite-vec, LanceDB) serves via ``HEARTH_VECTOR_STORE=<name>``
+    with zero core edits. Mirrors :func:`~hearth.providers.select_provider`.
+    """
+    settings = settings or get_settings()
+    choice = settings.vector_store.lower()
+    if choice == "sqlite":
+        return SQLiteVectorStore(settings=settings)
+
+    from ..plugins import VECTOR_STORE_GROUP, load_plugin
+
+    plugin = load_plugin(VECTOR_STORE_GROUP, settings.vector_store)
+    if plugin is not None:
+        return plugin
+    raise ValueError(
+        f"Unknown HEARTH_VECTOR_STORE: {settings.vector_store!r} "
+        "(use sqlite, or install a plugin registering this name under hearth.vector_stores)"
+    )
+
+
+__all__ = ["Chunk", "VectorStore", "SQLiteVectorStore", "select_vector_store"]
