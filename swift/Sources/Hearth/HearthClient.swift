@@ -19,6 +19,10 @@ public enum HearthError: Error, Sendable {
     case decoding(String)
     /// A streaming response emitted a malformed event.
     case malformedStream(String)
+    /// On-device inference (``FoundationModelsProvider``) is unavailable on this platform —
+    /// either the FoundationModels framework isn't present at build time, or Apple Intelligence
+    /// is off / the OS is too old / the model isn't ready. Carries a human-readable reason.
+    case onDeviceUnavailable(String)
 }
 
 // MARK: - Wire types (mirror src/hearth/gateway/schemas.py)

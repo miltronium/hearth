@@ -51,6 +51,40 @@ let hits = try await hearth.ragQuery(collection: "mydocs", query: "where is auth
 dependencies. Method shapes mirror the Python client (`src/hearth/client.py`) so both SDKs
 stay at parity against the same endpoints.
 
+## Embedded / offline mode (no daemon, no network)
+
+For fully offline on-device inference, use `FoundationModelsProvider` — it runs Apple's
+built-in on-device model in-process via the FoundationModels framework, with no daemon and no
+network. Both it and `HearthClient` conform to one interface, `HearthInference`, so an app can
+swap "call the daemon over HTTP" for "run on-device" behind a single type (ADR-009):
+
+```swift
+import Hearth
+
+// Pick a transport once; downstream code takes `any HearthInference`.
+let engine: any HearthInference = FoundationModelsProvider.isAvailable
+    ? try FoundationModelsProvider(instructions: "You are a terse assistant.")
+    : HearthClient(baseURL: URL(string: "http://127.0.0.1:8080")!, token: token)
+
+let reply = try await engine.generate(
+    messages: [ChatMessage(role: "user", content: "Summarize: …")],
+    options: InferenceOptions(temperature: 0.3, maxTokens: 200)
+)
+for try await delta in engine.generateStream(messages: msgs, options: .default) {
+    print(delta, terminator: "")
+}
+```
+
+**Availability:** the embedded path needs a FoundationModels-capable toolchain and, at
+runtime, **macOS 26+ / iOS 26+ / visionOS 26+** with Apple Intelligence enabled and the model
+downloaded. The package still **builds and tests on any toolchain** — the implementation is
+behind `#if canImport(FoundationModels)` + `@available`, and every unavailable case throws a
+clear `HearthError.onDeviceUnavailable(reason)` (probe with `FoundationModelsProvider.isAvailable`).
+
+See **[OFFLINE.md](OFFLINE.md)** for the full requirements, the Open-Question-#3 decision
+(embedded mode is base-model-only in v1 — MLX LoRA adapters are not portable to the
+FoundationModels path), and the Core ML extension point.
+
 ## Build & test
 
 ```bash
