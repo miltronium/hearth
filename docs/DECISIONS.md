@@ -185,28 +185,40 @@ a library). The Swift package deliberately carries **zero SwiftPM dependencies**
    — single-token `input_ids` + position input, per-layer KV read/write states, `logits`
    output pinned by name — so decode is O(1)/token instead of re-running a padded 512-window
    each step (O(n²)).
-2. **Tokenizer = swift-transformers.** Add `huggingface/swift-transformers` as the package's
-   first dependency; use its `Tokenizers` to read the exported `tokenizer.json` (byte-level BPE,
-   merges, added/special tokens) and lean on its Core ML LM/generation layer as the stateful
-   decode reference. We spend the zero-dep principle specifically to make the single most
+2. **Tokenizer = swift-transformers.** Add `huggingface/swift-transformers` (resolves to 1.3.3)
+   as a dependency; use its `Tokenizers` module to read the exported `tokenizer.json` (byte-level
+   BPE, merges, added/special tokens) and lean on its `Generation`/`Models` Core ML layer as the
+   stateful decode reference. We spend the zero-dep principle specifically to make the single most
    error-prone, hardest-to-verify-offline piece (tokenization) boring and correct.
-3. **Platform floor → macOS 15 / iOS 18.** The States API requires it. The real path is gated
-   `@available(macOS 15, iOS 18, *)`; the existing fallback stub keeps older toolchains and
-   Core-ML-less builds compiling, so `swift build`/`swift test` stay green everywhere.
-4. **Model contract via sidecar.** Export writes `hearth-coreml.json` (eos token ids — including
-   the Finding-2b terminator set — bos, vocab size, max_seq_len, input/output names, chat
-   template id) + a copy of `tokenizer.json` next to the `.mlpackage`. `CoreMLProvider` loads
-   both at init and falls back to `onDeviceUnavailable` when the sidecar is absent.
+3. **Quarantine the dependency in an opt-in `HearthCoreML` product; keep the core zero-dep at
+   macOS 13.** swift-transformers drags a heavy transitive tree (swift-nio, swift-crypto,
+   swift-asn1, swift-collections, swift-atomics, swift-system, yyjson, EventSource, jinja,
+   huggingface). Rather than burden every HTTP-only consumer, the Swift package now ships **two
+   products**: `Hearth` (HTTP client + `HearthInference` + FoundationModels — zero external deps,
+   macOS 13) and `HearthCoreML` (the offline loop; depends on `Hearth` + swift-transformers).
+   `CoreMLProvider` moved to the `HearthCoreML` target. The package platform **stays macOS 13 /
+   `swift-tools-version: 5.9`** — we do *not* raise it (that would need tools 6.0 and break the
+   HTTP path on macOS 13/14 and older toolchains); the KV-cache code is `@available(macOS 15,
+   iOS 18, *)`-gated instead. (One transitive pin: swift-collections held `<1.6.0`, a workaround
+   for a pre-release Swift 6.3 that rejects its `@inline(always)`; remove once the toolchain
+   stabilizes.)
+4. **Model contract via sidecar.** Export writes `<stem>.hearth-coreml.json` (eos token ids —
+   including the Finding-2b terminator set — bos, vocab size, max_seq_len, input/output names,
+   chat template id) + copies of `tokenizer.json` / `tokenizer_config.json` next to the
+   `.mlpackage` (stem-prefixed siblings; see `coreml.sidecar_paths`). `CoreMLProvider` loads
+   these at init and falls back to `onDeviceUnavailable` when the sidecar is absent.
 
 **Consequences.** Fully-offline generation finally works end-to-end, and it's fast (KV-cached)
-rather than a toy. Costs: the export rewrite is model-specific (layer/head plumbing) and is the
-tall pole; the OS floor rises (accepted — Apple Silicon target); the package gains a dependency
-and its transitive deps (tracked, ADR-worthy precisely because it breaks the zero-dep stance).
-Sampling/stop and manifest parsing are pure, offline-testable functions; the stateful loop
-itself is hardware-gated and validated via `HANDOFF.md` Task C (greedy-parity vs. the mlx
-daemon). ChatML/Qwen framing ships first (the model already validated in RESULTS), manifest-
-driven so other templates extend cleanly.
+rather than a toy — *without* imposing swift-transformers on daemon-only consumers (they import
+`Hearth` and inherit nothing). Costs: the export rewrite is model-specific (layer/head plumbing)
+and is the tall pole; `HearthCoreML` needs macOS 15 at runtime and a Swift 6 toolchain to build;
+the SwiftPM surface gains a second product. The sidecar/manifest wiring and sampling/stop are
+pure, offline-testable functions (Python suite 219 → green; Swift package builds + tests green
+on real Apple Silicon); the stateful loop itself is hardware-gated and validated via
+`HANDOFF.md` Task C (greedy-parity vs. the mlx daemon). ChatML/Qwen framing ships first (the
+model already validated in RESULTS), manifest-driven so other templates extend cleanly.
 
 **Revisit if.** swift-transformers stalls or its API churns painfully → vendor a minimal
 tokenizer. Or Apple ships a higher-level on-device LLM generation API that subsumes the
-hand-built stateful loop → adopt it and keep the `HearthInference` seam.
+hand-built stateful loop → adopt it and keep the `HearthInference` seam. Or the two-product
+split proves unnecessary (core consumers all want Core ML anyway) → collapse back to one target.

@@ -106,8 +106,12 @@ runner, so the module imports with no extras installed.
 
 ### Construct the provider
 
+`CoreMLProvider` lives in the **opt-in `HearthCoreML` product** (ADR-011), so daemon-only
+consumers of `Hearth` never pull swift-transformers or its transitive deps:
+
 ```swift
-import Hearth
+import Hearth        // the `HearthInference` protocol + core types
+import HearthCoreML  // the offline Core ML provider
 
 let url = URL(fileURLWithPath: "…/my-model.mlpackage")   // or a compiled .mlmodelc
 if CoreMLProvider.isAvailable {

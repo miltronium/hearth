@@ -125,8 +125,8 @@ confirm **greedy parity** against the mlx daemon for a fixed prompt.
 
 **Decision record:** [DECISIONS.md](DECISIONS.md) → ADR-011.
 **Export:** `hearth models export-coreml` (`src/hearth/coreml.py`, stateful KV-cache export).
-**Provider:** `swift/Sources/Hearth/CoreMLProvider.swift` + the generation loop
-(swift-transformers tokenizer, `@available(macOS 15, iOS 18, *)`).
+**Provider:** `swift/Sources/HearthCoreML/CoreMLProvider.swift` + the generation loop
+(swift-transformers tokenizer, opt-in `HearthCoreML` product, `@available(macOS 15, iOS 18, *)`).
 
 ```sh
 # 1. Export a stateful Core ML model + sidecar (needs the [coreml] extra + cached source):

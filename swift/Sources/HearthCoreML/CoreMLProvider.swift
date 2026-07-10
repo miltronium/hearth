@@ -19,6 +19,7 @@
 // load, protocol conformance) is real and compiles. See swift/OFFLINE.md.
 
 import Foundation
+import Hearth
 
 #if canImport(CoreML)
 

@@ -3,7 +3,8 @@
 // present (or no model is exported) we assert the *unavailable* contract instead.
 
 import XCTest
-@testable import Hearth
+import Hearth
+@testable import HearthCoreML
 
 #if canImport(CoreML)
 import CoreML
