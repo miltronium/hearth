@@ -140,10 +140,22 @@ named `<task>-<run-id>` (`hearth.cli:train`).
 
 ## 4. Evaluate the candidate *(hardware)*
 
-Score the candidate against your golden set. Wire the candidate adapter into a generate
-function and use `score_candidate`. Serving a candidate adapter requires the A/B flag — see
-`AdapterStore.resolve_path(adapter_id, allow_candidate=True)` — and the per-request adapter
-hot-swap in `MLXProvider` (`GenRequest.adapter`). Sketch:
+Score the candidate against your golden set. The one-command path is **`hearth eval`**,
+which wires the candidate through `MLXProvider`'s per-request adapter slot
+(`GenRequest.adapter`, via `AdapterStore.resolve_path(..., allow_candidate=True)`), scores it
+with the objective metric, compares against the currently-promoted adapter for the task (the
+incumbent), and prints the gate result:
+
+```sh
+HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run hearth eval extract-<run-id> \
+    --golden data/extract_golden.jsonl --metric exact \
+    --system "Reply with only the answer, nothing else."
+# add --promote to promote in one step when the gate passes (same gate as `adapters promote`).
+```
+
+The golden set is a JSONL of `{"prompt", "expected"}` rows (a `hearth.dataset` header line
+is skipped if present). Under the hood it uses the same `hearth.training.eval` API, so you
+can also script it directly:
 
 ```python
 from hearth.training.eval import score_candidate, beats_incumbent, EvalReport
@@ -228,9 +240,10 @@ HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run hearth serve
 | 6 promote lifecycle | ⚠️ | Gate/lifecycle logic is CI-safe with supplied scores; promoting a *real* trained adapter is hardware. |
 | 7 serve with adapter | ❌ | Needs the MLX backend + real weights. |
 
-## Prerequisites not yet in the codebase
+## Notes
 
-- There is **no** `hearth eval` CLI command. Step 4 uses the `hearth.training.eval` Python
-  API (`score_candidate` / `beats_incumbent`) directly; wire the candidate through the
-  MLX provider's per-request adapter slot yourself. If you want a one-command eval, that is
-  a genuine follow-up to add, not something to invoke as if it exists.
+- **`hearth eval` now exists** (step 4) — a one-command wrapper over the
+  `hearth.training.eval` API (`score_candidate` / `beats_incumbent`) that resolves the
+  candidate through the MLX provider's per-request adapter slot, scores it against a golden
+  set, compares to the incumbent, and (with `--promote`) promotes through the same gate. The
+  underlying Python API is still available for scripted/custom scoring.

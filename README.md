@@ -86,7 +86,7 @@ the core install uses the offline `echo` backend and a dependency-free vector st
 
 ## CLI surface
 
-`hearth doctor · serve · run · mcp · stats · train · models (list/pull/rm/convert/export-coreml) · rag (ingest/query) · adapters (list/promote/retire) · plugins`
+`hearth doctor · serve · run · mcp · stats · train · eval · models (list/pull/rm/convert/export-coreml) · rag (ingest/query) · adapters (list/promote/retire) · plugins`
 
 ## Documentation map
 
