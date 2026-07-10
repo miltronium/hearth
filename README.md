@@ -55,10 +55,12 @@ server, an offline embedded Swift path (Foundation Models, with a Core ML seam),
 API, and multi-model serving + a quantization/export pipeline.
 
 **190 Python tests + a Swift package, all green** on the `echo` backend with no model
-downloaded. What remains is not code — it's two validations that need real hardware / a
-live consumer: an end-to-end LoRA training run on real weights, and live CAMBOT / Claude
-Code wiring to prove the token-savings numbers. Both have runnable harnesses and runbooks
-(see the doc map). See [docs/ROADMAP.md](docs/ROADMAP.md) for the phase-by-phase result log.
+downloaded. The two validations that needed real hardware / a live consumer are **now done
+on Apple Silicon** (Apple M3 Pro / 36 GB): an end-to-end LoRA training run on real 7B weights
+(train → eval gate both directions → promote → live serving) and live CAMBOT / Claude Code /
+Swift wiring showing **2,210 estimated frontier tokens saved** over an all-local session. Full
+evidence: [docs/RESULTS.md](docs/RESULTS.md). See [docs/ROADMAP.md](docs/ROADMAP.md) for the
+phase-by-phase result log.
 
 ## Run it now
 
@@ -100,6 +102,7 @@ the core install uses the offline `echo` backend and a dependency-free vector st
 | [docs/RUNBOOK_training.md](docs/RUNBOOK_training.md) | Validate the LoRA path end-to-end on real weights (Apple Silicon). |
 | [docs/RUNBOOK_consumer_wiring.md](docs/RUNBOOK_consumer_wiring.md) | Wire CAMBOT + Claude Code to a live HEARTH and read the token-savings numbers. |
 | [docs/HANDOFF.md](docs/HANDOFF.md) | For a Claude Code running on real hardware: how to pick up the two hardware-blocked follow-ups and partner back. |
+| [docs/RESULTS.md](docs/RESULTS.md) | Real-hardware validation results (Apple M3 Pro): the LoRA train→gate→promote→serve run and live consumer token-savings numbers. |
 | [examples/](examples/) | Runnable consumer examples: CAMBOT offload (Python + Swift), Claude Code MCP registration. |
 
 ## Stack (see ARCHITECTURE for rationale)
