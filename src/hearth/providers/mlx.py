@@ -132,15 +132,23 @@ class MLXProvider:
         return markers
 
     def _strip_terminators(self, text: str) -> str:
-        """Remove a trailing chat end-of-turn / EOS token the decoder may emit verbatim.
+        """Cut the output at the first chat end-of-turn / EOS token emitted verbatim.
 
         Some chat templates decode the terminator (e.g. ``<|im_end|>``) into the output
-        string instead of stopping before it; trim it so callers get clean text.
+        string instead of stopping before it. A base model usually stops at the real EOS
+        token, but a LoRA-tuned model can emit the *literal* marker mid-stream and then
+        ramble (``QX-2<|im_end|> !<|im_end|> ...``). Truncating at the earliest marker
+        returns the clean answer in both cases (a bare trailing marker is just the special
+        case where the cut is at the end).
         """
+        cut = len(text)
         for m in self._terminator_markers():
-            if m and text.rstrip().endswith(m):
-                text = text.rstrip()[: -len(m)]
-        return text
+            if not m:
+                continue
+            idx = text.find(m)
+            if idx != -1:
+                cut = min(cut, idx)
+        return text[:cut]
 
     def _format_prompt(self, messages: list) -> str:
         """Render messages via the tokenizer's chat template when available."""
