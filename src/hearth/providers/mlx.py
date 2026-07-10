@@ -7,7 +7,7 @@ Install it with: ``uv sync --extra mlx``.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from .base import Capabilities, GenRequest, GenResult, ResourceEstimate
 
@@ -96,29 +96,51 @@ class MLXProvider:
     def stream(self, req: GenRequest) -> Iterator[str]:
         """Yield decoded text deltas as ``mlx_lm.stream_generate`` produces them.
 
-        A trailing chat terminator (e.g. ``<|im_end|>``) is buffered and stripped so it
-        never reaches the client — matching :meth:`generate`'s terminator handling.
+        Chat terminators are handled exactly as in :meth:`generate`: streaming stops at the
+        first terminator marker and never leaks it — a LoRA-tuned model that fails to stop at
+        EOS can emit the literal marker mid-stream (see :meth:`_clean_stream`).
         """
         self._ensure_loaded(req.adapter)
         from mlx_lm import stream_generate
 
         prompt = self._format_prompt(req.messages)
+        chunks = (
+            response.text
+            for response in stream_generate(
+                self._model,
+                self._tokenizer,
+                prompt=prompt,
+                max_tokens=req.max_tokens,
+            )
+        )
+        yield from self._clean_stream(chunks)
+
+    def _clean_stream(self, chunks: Iterable[str]) -> Iterator[str]:
+        """Yield cleaned text deltas from raw model ``chunks`` (pure; no model needed).
+
+        Two jobs, mirroring :meth:`generate`'s cut-at-first-marker: (1) hold back a tail that
+        could be the *start* of a terminator so a marker split across chunk boundaries is
+        never leaked, and (2) stop emitting at the first *complete* terminator — a LoRA-tuned
+        model that fails to stop at EOS emits the literal marker mid-stream and then rambles
+        (``QX-2<|im_end|> !<|im_end|> ...``), and streaming clients must not see that.
+        """
         pending = ""
-        markers = self._terminator_markers()
-        max_marker = max((len(m) for m in markers), default=0)
-        for response in stream_generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=req.max_tokens,
-        ):
-            pending += response.text
-            # Emit everything except a tail that could still be the start of a marker.
+        max_marker = max((len(m) for m in self._terminator_markers() if m), default=0)
+        for chunk in chunks:
+            pending += chunk
+            cut = self._first_terminator(pending)
+            if cut is not None:
+                if cut > 0:
+                    yield pending[:cut]
+                return
+            # No complete marker yet: emit all but a tail that could still start one.
             safe = len(pending) - max_marker
             if safe > 0:
                 yield pending[:safe]
                 pending = pending[safe:]
-        yield self._strip_terminators(pending)
+        tail = self._strip_terminators(pending)
+        if tail:
+            yield tail
 
     def footprint(self, model_id: str) -> ResourceEstimate:
         # Refined later from the registry; a 7B 4-bit model is ~4.5 GB resident.
@@ -131,6 +153,17 @@ class MLXProvider:
             markers.append(eos)
         return markers
 
+    def _first_terminator(self, text: str) -> int | None:
+        """Index of the earliest terminator marker in ``text``, or ``None`` if none appear."""
+        cut: int | None = None
+        for m in self._terminator_markers():
+            if not m:
+                continue
+            idx = text.find(m)
+            if idx != -1:
+                cut = idx if cut is None else min(cut, idx)
+        return cut
+
     def _strip_terminators(self, text: str) -> str:
         """Cut the output at the first chat end-of-turn / EOS token emitted verbatim.
 
@@ -141,14 +174,8 @@ class MLXProvider:
         returns the clean answer in both cases (a bare trailing marker is just the special
         case where the cut is at the end).
         """
-        cut = len(text)
-        for m in self._terminator_markers():
-            if not m:
-                continue
-            idx = text.find(m)
-            if idx != -1:
-                cut = min(cut, idx)
-        return text[:cut]
+        cut = self._first_terminator(text)
+        return text if cut is None else text[:cut]
 
     def _format_prompt(self, messages: list) -> str:
         """Render messages via the tokenizer's chat template when available."""
