@@ -60,6 +60,32 @@ def _adapter_store():
     return AdapterStore(settings=Settings())
 
 
+def _load_golden_set(path: Path, task: str):
+    """Load a golden set from a JSONL file of ``{"prompt", "expected"}`` rows.
+
+    An optional leading dataset header line (``kind == hearth.dataset.header``) is skipped,
+    so a file produced by ``hearth.training.dataset`` and a bare hand-written list both work.
+    """
+    import json
+
+    from .training.eval import GoldenExample, GoldenSet
+
+    examples = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if obj.get("kind") == "hearth.dataset.header":
+            continue
+        if "prompt" not in obj or "expected" not in obj:
+            raise ValueError('each golden row needs "prompt" and "expected" fields')
+        examples.append(GoldenExample(prompt=obj["prompt"], expected=obj["expected"]))
+    if not examples:
+        raise ValueError("golden set is empty")
+    return GoldenSet(task=task, examples=examples)
+
+
 @app.command()
 def version() -> None:
     """Print the HEARTH version."""
@@ -513,6 +539,134 @@ def train(
     console.print(
         f"Registered candidate [cyan]{adapter_id}[/cyan]. "
         "Eval it, then [bold]hearth adapters promote[/bold] to serve it."
+    )
+
+
+@app.command("eval")
+def eval_adapter(
+    adapter_id: str = typer.Argument(..., help="Candidate adapter id to score."),
+    golden: Path = typer.Option(
+        ..., "--golden", help='Golden set JSONL ({"prompt","expected"} per line).'
+    ),
+    metric: str = typer.Option("f1", "--metric", help="Objective metric: 'f1' or 'exact'."),
+    system: str = typer.Option(
+        None, "--system", help="Optional system prompt sent with every example."
+    ),
+    max_tokens: int = typer.Option(64, "--max-tokens", help="Max tokens per generation."),
+    base: str = typer.Option(
+        None, "--base", help="Base model id (default: the adapter's recorded base_model)."
+    ),
+    promote: bool = typer.Option(
+        False, "--promote", help="Promote the candidate if it beats the incumbent (eval-gated)."
+    ),
+) -> None:
+    """Score a candidate adapter against a golden set and (optionally) promote it (ADR-006).
+
+    Wires the candidate through the provider's per-request adapter slot (``GenRequest.adapter``),
+    scores it with the objective metric, compares against the currently-promoted adapter for
+    the task (the incumbent), and prints both scores plus the gate result. With ``--promote``
+    a candidate that beats the incumbent is promoted through the same gate as
+    ``hearth adapters promote`` — so a bare "eval --promote" never wins on a regression.
+
+    Real scoring needs the MLX backend (``HEARTH_BACKEND=mlx``) + a cached base model; the
+    echo backend runs the plumbing offline but won't produce meaningful scores.
+    """
+    from .config import Settings
+    from .registry import AdapterError
+    from .training.eval import beats_incumbent, score_candidate
+
+    store = _adapter_store()
+    entry = store.get(adapter_id)
+    if entry is None:
+        console.print(f"[red]Unknown adapter:[/red] {adapter_id!r}")
+        raise typer.Exit(code=1)
+    try:
+        candidate_path = store.resolve_path(adapter_id, allow_candidate=True)
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    try:
+        golden_set = _load_golden_set(golden, task=entry.task)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]Golden set error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    base_model = base or entry.base_model
+    # Fresh Settings() (not the lru_cached get_settings) so HEARTH_BACKEND is read per call.
+    provider = select_provider(Settings())
+
+    def _generate_with(adapter_path: str):
+        def _gen(prompt: str) -> str:
+            messages = []
+            if system:
+                messages.append(Message(role="system", content=system))
+            messages.append(Message(role="user", content=prompt))
+            req = GenRequest(
+                messages=messages, model=base_model, max_tokens=max_tokens, adapter=adapter_path
+            )
+            return provider.generate(req).text
+
+        return _gen
+
+    try:
+        candidate = score_candidate(golden_set, _generate_with(candidate_path), metric=metric)
+    except ValueError as exc:  # unknown metric
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    # Score the incumbent (the promoted adapter for this task, if any and not the candidate).
+    incumbent = None
+    incumbent_entry = store.promoted_for(entry.task)
+    if incumbent_entry is not None and incumbent_entry.id != adapter_id:
+        incumbent_path = store.resolve_path(incumbent_entry.id)
+        incumbent = score_candidate(
+            golden_set, _generate_with(incumbent_path), metric=metric
+        )
+
+    passed = beats_incumbent(candidate, incumbent)
+
+    table = Table(title=f"hearth eval — {entry.task}", show_header=True, header_style="bold")
+    table.add_column("adapter")
+    table.add_column("role")
+    table.add_column(f"{candidate.metric} score")
+    table.add_row(adapter_id, "candidate", f"{candidate.score:.4f}")
+    if incumbent is not None:
+        table.add_row(incumbent_entry.id, "incumbent", f"{incumbent.score:.4f}")
+    else:
+        table.add_row("—", "incumbent", "none")
+    console.print(table)
+    console.print(
+        f"gate: [{'green' if passed else 'red'}]{'PASS' if passed else 'FAIL'}[/] "
+        f"(n={candidate.n})"
+    )
+
+    if not promote:
+        if passed:
+            inc = f" --incumbent-score {incumbent.score:g}" if incumbent is not None else ""
+            console.print(
+                f"[dim]promote with:[/dim] hearth adapters promote {adapter_id} "
+                f"--candidate-score {candidate.score:g}{inc}"
+            )
+        return
+
+    if not passed:
+        console.print(
+            "[red]Promotion refused:[/red] candidate did not beat the incumbent."
+        )
+        raise typer.Exit(code=1)
+    proof = {
+        "candidate_score": candidate.score,
+        "incumbent_score": incumbent.score if incumbent is not None else None,
+        "gate_passed": True,
+    }
+    try:
+        store.promote(adapter_id, gate_passed=True, proof=proof)
+    except AdapterError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(
+        f"[green]Promoted[/green] {adapter_id} (gate passed, candidate={candidate.score:.4f})."
     )
 
 
