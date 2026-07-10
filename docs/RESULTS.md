@@ -161,11 +161,10 @@ output locally. Selected results:
 ```
 - **`estimated_frontier_tokens_saved: 2210`** over a real session — non-trivial ✅.
 - **`backend_mix: {local: 19}`**, **`class_mix`** spans four task classes ✅.
-- **`escalation_rate: 0.0`** — honest: every offload was deliberately hard-local
-  (`allow_escalation=False`) and no `RemoteProvider` is configured, so nothing escalated.
-  That is the *ideal* token-savings outcome, not a gap. A live non-zero escalation demo
-  needs `uv sync --extra remote` + an Anthropic key + escalation-eligible tasks (optional
-  follow-up; the escalation *logic* is already covered by `test_router_gateway.py`).
+- **`escalation_rate: 0.0`** in *this* session — honest: every offload was deliberately
+  hard-local (`allow_escalation=False`), so nothing escalated. That is the *ideal*
+  token-savings outcome for those requests. A separate escalation demo (below) drives the
+  escalation path live and shows a non-zero rate.
 - The high `p95` (23.8 s) coincided with a second concurrent MLX process (the MCP validation
   running a separate 7B) contending for the GPU; `p50` (1.86 s) reflects uncontended offloads.
 
@@ -173,6 +172,36 @@ output locally. Selected results:
 requests — because `hearth stats` is a fresh, per-process CLI with its own in-memory metrics.
 For the live daemon you **must** use the auth-gated `/v1/hearth/admin/metrics` endpoint, exactly
 as HANDOFF.md warns.
+
+### Live escalation demo (non-zero `escalation_rate`) ✅
+No Anthropic key was available, so instead of a real frontier call I pointed the escalation
+target at a **local OpenAI-compatible stub** (`scripts/frontier_stub.py`, port 8099) via a demo
+routing config (`config/routing.escalation-demo.yaml`, `remotes.default` → `protocol: openai`).
+This exercises the **real** escalation path — classifier → policy (`reason` = `backend: remote,
+escalate: always`) → `RemoteProvider` (openai `httpx` path) → budget accountant → metrics — with
+**no external call and no cost**. Reproduce:
+```sh
+uv run python scripts/frontier_stub.py &                       # local "frontier" stub on :8099
+HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx \
+  HEARTH_ROUTING_YAML=config/routing.escalation-demo.yaml uv run hearth serve &
+# drive 4 `reason` (escalate) + 4 local requests via /v1/chat/completions (hearth.intent), then:
+curl -s -H "Authorization: Bearer $(cat ~/.hearth/token)" \
+  "http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h" | jq
+```
+Each `reason` request came back `served_by=remote backend=remote escalated=True`; the locals stayed
+`served_by=local backend=mlx`. Metrics over the mixed session:
+```json
+{
+  "requests": 8, "escalations": 4, "escalation_rate": 0.5,
+  "backend_mix": { "remote": 4, "local": 4 },
+  "class_mix": { "reason": 4, "classify": 2, "summarize": 1, "extract": 1 },
+  "estimated_frontier_tokens_saved": 378
+}
+```
+So `escalation_rate` (0.5) and a mixed `backend_mix` are proven live. The only thing the stub
+doesn't exercise is a *real* frontier response — swap `base_url` for a real endpoint, or set
+`remotes.default.protocol: anthropic` + `ANTHROPIC_API_KEY` (`uv sync --extra remote`), and the
+same path calls Claude.
 
 ### MCP server (Claude Code offload) ✅
 Exercised the HEARTH MCP server over **stdio JSON-RPC 2.0** (newline-delimited framing; the
@@ -228,7 +257,7 @@ Confirms the Swift SDK talks to the running HEARTH over HTTP. No shipped Swift s
 | CAMBOT offloads real tasks locally (no frontier call) | ✅ `cambot_offload.py --live` + 10-task workload |
 | Claude Code offloads via MCP | ✅ real `hearth_summarize` over stdio JSON-RPC, local-only |
 | `/admin/metrics` non-trivial `estimated_frontier_tokens_saved` | ✅ 2210 |
-| credible `escalation_rate` / `backend_mix` / `class_mix` | ✅ 0.0 (all-local) / {local:19} / 4 classes |
+| credible `escalation_rate` / `backend_mix` / `class_mix` | ✅ all-local session {local:19}/4 classes; **escalation demo** shows rate 0.5, backend_mix {remote:4,local:4} |
 
 ---
 
@@ -282,4 +311,6 @@ commits, with offline tests; suite stays green (now 202 passed, 1 skipped).
     `scripts/eval_candidate.py` as the stand-in).
   - Consider training short-answer adapters in a way that teaches EOS (or post-processing at
     the trainer), so adapters don't rely on the serving-layer strip.
-  - A live escalation demo (non-zero `escalation_rate`) needs `[remote]` + an Anthropic key.
+  - A live escalation demo now exists (`scripts/frontier_stub.py` +
+    `config/routing.escalation-demo.yaml`) proving the path with a local stub; a *real*
+    frontier escalation still needs `[remote]` + an Anthropic key (or a real endpoint).
