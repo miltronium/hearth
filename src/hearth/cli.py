@@ -4,7 +4,7 @@ Phase 0/1 commands:
   * ``hearth doctor``       — environment preflight
   * ``hearth serve``        — start the OpenAI-compatible gateway
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
-  * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm`` / ``convert``
+  * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm`` / ``convert`` / export-coreml
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
   * ``hearth train …``      — LoRA fine-tune → register a candidate adapter (Phase 4)
   * ``hearth adapters …``   — adapter registry: ``list`` / ``promote`` / ``retire`` (Phase 4)
@@ -327,6 +327,61 @@ def models_convert(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]Converted.[/green] model -> {outcome.output_dir}")
+
+
+@models_app.command("export-coreml")
+def models_export_coreml(
+    source: str = typer.Option(
+        ..., "--source", help="Source checkpoint: HF repo id or local path to export."
+    ),
+    out: Path = typer.Option(..., "--out", help="Output .mlpackage dir for the Core ML model."),
+    compute_units: str = typer.Option(
+        "cpuAndNeuralEngine",
+        "--compute-units",
+        help="Runtime placement: all / cpuAndNeuralEngine / cpuAndGPU / cpuOnly.",
+    ),
+    precision: str = typer.Option(
+        "float16", "--precision", help="Weight precision: float16 / float32 / int8."
+    ),
+    max_seq_len: int = typer.Option(
+        512, "--max-seq-len", help="Fixed sequence length to trace/export at (Core ML is static)."
+    ),
+) -> None:
+    """Export a checkpoint to a Core ML ``.mlpackage`` for the on-device Swift path (Phase 6).
+
+    The produced ``.mlpackage`` is loaded by the Swift ``CoreMLProvider`` (see swift/OFFLINE.md)
+    for fully-offline, ANE-accelerated inference. Real export needs the ``[coreml]`` extra,
+    source weights, and (for cached inputs) offline HF:
+
+        uv sync --extra coreml
+        HF_HUB_OFFLINE=1 hearth models export-coreml --source <id> --out ~/.hearth/coreml/<id>
+    """
+    from .coreml import CoreMLExportConfig, CoreMLExportUnavailableError
+    from .coreml import export as run_export
+
+    config = CoreMLExportConfig(
+        source=source,
+        output_dir=out,
+        compute_units=compute_units,
+        precision=precision,
+        max_seq_len=max_seq_len,
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        console.print(f"[red]Invalid Core ML export config:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    console.print(
+        f"Exporting [cyan]{source}[/cyan] to Core ML "
+        f"({precision}, {compute_units}, seq={max_seq_len}) -> {out} …"
+    )
+    try:
+        outcome = run_export(config)
+    except CoreMLExportUnavailableError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Exported.[/green] model -> {outcome.output_dir}")
 
 
 @rag_app.command("ingest")

@@ -50,6 +50,23 @@ embeddings = [
     "mlx-lm>=0.20",
     "transformers>=4.44,<5",
 ]
+# Faster vector search backend for RAG (Phase 3 follow-up). Drops in behind the
+# VectorStore protocol via HEARTH_VECTOR_STORE=sqlite-vec. Install with:
+#   uv sync --extra vec
+# Imported lazily in memory/store.py so the core install/tests keep using the
+# dependency-free brute-force SQLiteVectorStore default.
+vec = [
+    "sqlite-vec>=0.1.6",
+]
+# Core ML / ANE export of a base model for the embedded on-device Swift path (Phase 6
+# follow-up). Install with:  uv sync --extra coreml
+# Imported lazily inside the export runner (coreml.py) so the core install/tests need
+# neither coremltools nor torch — tests inject a fake runner and never export.
+coreml = [
+    "coremltools>=8.0",
+    "torch>=2.2",
+    "transformers>=4.44,<5",
+]
 # MCP server so agents (Claude Code) can offload subtasks to the local model (Phase 5,
 # ADR-010). Install with: uv sync --extra mcp. Imported lazily in mcp/server.py and the
 # `hearth mcp` CLI command, so core install/tests run without it — the tool LOGIC in

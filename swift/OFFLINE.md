@@ -77,17 +77,62 @@ is therefore no supported, offline way to run a HEARTH MLX adapter inside
 Core ML export path (below) makes a HEARTH-fine-tuned small model runnable on-device — at
 which point adapter portability to *some* embedded backend becomes feasible.
 
-## Core ML — extension point (not built in v1)
+## Core ML — extension point (now implemented, generation loop pending)
 
-A Core ML / ANE-accelerated small-model path would be a **second** `HearthInference`
-conformer wrapping an `MLModel`, gated the same `#if canImport` / `@available` way as
-`FoundationModelsProvider`. It is intentionally **not** implemented in v1: a real Core ML LLM
-path needs a full export pipeline (weight conversion + tokenizer + KV-cache/generation loop),
-which is far more than a thin stub and out of scope for Phase 6.
+The Core ML / ANE-accelerated small-model path is a **second** `HearthInference` conformer,
+`CoreMLProvider`, wrapping an `MLModel`. It is gated the same `#if canImport(CoreML)` /
+`@available` way as `FoundationModelsProvider`, so the package still builds and tests on any
+toolchain (a fallback stub compiles where Core ML can't be imported, and every entry point
+throws `HearthError.onDeviceUnavailable`).
 
-The seam is marked in `Sources/Hearth/FoundationModelsProvider.swift` (the `#else` branch
-comment). To add it later: introduce e.g. `CoreMLProvider: HearthInference`, keep it behind
-`#if canImport(CoreML)` + an availability gate, throw `HearthError.onDeviceUnavailable` when
-the compiled model/tokenizer aren't bundled, and let callers select it exactly like the
-FoundationModels provider. No changes to `HearthInference` or existing call sites are needed —
-that is the point of the protocol.
+### Export a model
+
+Produce a `.mlpackage` from a base checkpoint with the Python side (needs the `[coreml]`
+extra — `coremltools` / `torch` / `transformers`):
+
+```sh
+uv sync --extra coreml
+HF_HUB_OFFLINE=1 hearth models export-coreml \
+    --source <hf-repo-or-path> \
+    --out ~/.hearth/coreml/my-model.mlpackage \
+    --compute-units cpuAndNeuralEngine \
+    --precision float16 \
+    --max-seq-len 512
+```
+
+Like the MLX quantization pipeline, the export is delegated to an injectable runner
+(`hearth.coreml.export`) and the heavy `coremltools` work lives in a lazily-imported default
+runner, so the module imports with no extras installed.
+
+### Construct the provider
+
+```swift
+import Hearth
+
+let url = URL(fileURLWithPath: "…/my-model.mlpackage")   // or a compiled .mlmodelc
+if CoreMLProvider.isAvailable {
+    let engine: any HearthInference =
+        try CoreMLProvider(modelURL: url, computeUnits: .cpuAndNeuralEngine)
+    // engine slots in behind `any HearthInference` exactly like the other transports.
+}
+```
+
+Construction compiles the `.mlpackage` (or loads a `.mlmodelc`) into an `MLModel` and throws
+`HearthError.onDeviceUnavailable(reason)` on a missing file, compile failure, or incompatible
+device.
+
+### Current state (honest)
+
+**What is real and shipping:** the `CoreMLProvider` type, the `#if canImport(CoreML)` gating +
+fallback stub, availability probes (`isAvailable` / `unavailableReason`), init-from-URL, model
+compilation/loading, and full `HearthInference` conformance. All of this compiles and is tested
+on any toolchain.
+
+**What is not yet wired:** the actual token-generation loop (tokenizer + KV-cache + sampling)
+is a large, model-specific pipeline and the exported `.mlpackage` does not yet bundle a
+tokenizer contract. Until that lands, `generate` / `generateStream` throw
+`HearthError.onDeviceUnavailable(...)` explaining the state and pointing callers at
+`HearthClient` (daemon) or `FoundationModelsProvider` for on-device generation. The seam,
+export path, and model loading are the real deliverable here; the generation loop is the
+remaining follow-up.
+

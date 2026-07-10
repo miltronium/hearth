@@ -228,14 +228,26 @@ real models or conversions in tests). 138 → 175 Python tests, all green; echo 
 
 ## Remaining follow-ups (post-Phase 7)
 
-The phased build is done. What's left is deferred hardening and live wiring, none of it blocking:
+The phased build is done. The two code-side follow-ups are now shipped and green; the two
+remaining items are blocked only on real hardware / a live consumer, not on missing code.
 
-- **Live consumer wiring.** Land CAMBOT → HEARTH and the Claude Code MCP integration on a real
-  workload, then read `hearth stats` to prove the token-savings thesis (G2/G8) with real numbers.
-- **Real training run.** The LoRA path (Phase 4) is exercised only with fakes. Validate it
-  end-to-end: `uv sync --extra mlx` + a cached base model + `HF_HUB_OFFLINE=1`, train an adapter,
-  and confirm the eval gate + promotion lifecycle on real weights.
-- **`VectorStore` backend.** Swap the brute-force cosine `SQLiteVectorStore` (Phase 3) for a
-  `sqlite-vec`/LanceDB backend when RAG corpus size warrants it.
-- **Core ML export.** Phase 6 left a marked extension point for a Core ML / ANE path; embedded
-  mode is FoundationModels-only in v1.
+- **`sqlite-vec` VectorStore backend (done).** `SqliteVecVectorStore` (`memory/store.py`) drops in
+  behind the `VectorStore` protocol via `HEARTH_VECTOR_STORE=sqlite-vec` (KNN over a `vec0` virtual
+  table; L2-distance→cosine score conversion documented). Default stays the dependency-free
+  brute-force `SQLiteVectorStore`; `sqlite-vec` is lazy-imported behind `uv sync --extra vec`.
+  Extension-gated tests skip cleanly when the native lib is absent.
+- **Core ML / ANE path (done, minus the generation loop).** Python export pipeline (`coreml.py`,
+  `hearth models export-coreml`) mirrors the quant pipeline's injectable-runner pattern (real
+  export behind `uv sync --extra coreml`, faked in tests). Swift `CoreMLProvider` fills the Phase 6
+  seam: real `#if canImport(CoreML)` gating, `.mlpackage`/`.mlmodelc` load, availability probes, and
+  full `HearthInference` conformance — the tokenizer/KV-cache/sampling generation loop is the one
+  honestly-deferred piece (`generate` loads-then-throws with a fallback hint; see `swift/OFFLINE.md`).
+- **Real training run (blocked on hardware).** Harness + runbook shipped:
+  `scripts/train_lora_real.sh` (prereq-guarded, download-refusing) and `docs/RUNBOOK_training.md`
+  drive the real `hearth train` → eval gate → `hearth adapters promote` lifecycle. Executing it
+  needs an Apple-Silicon GPU + `uv sync --extra mlx` + a cached base model + `HF_HUB_OFFLINE=1`.
+- **Live consumer wiring (blocked on a live consumer).** Integration examples + runbook shipped:
+  `examples/cambot_offload.{py,swift}`, `examples/claude_code_mcp.md`, and
+  `docs/RUNBOOK_consumer_wiring.md` wire CAMBOT + Claude Code to a live HEARTH and read
+  `estimated_frontier_tokens_saved` from `/v1/hearth/admin/metrics`. Real G2/G8 numbers require the
+  MLX backend plus the actual CAMBOT app / a live Claude Code MCP session driving a workload.
