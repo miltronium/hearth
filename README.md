@@ -99,6 +99,7 @@ the core install uses the offline `echo` backend and a dependency-free vector st
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | How CAMBOT, Claude Code (MCP), and generic clients consume HEARTH. |
 | [docs/PLUGINS.md](docs/PLUGINS.md) | Writing third-party providers / vector stores against the plugin entry points. |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture Decision Records — the *why* behind the big choices. |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | Confidential-work model: what stays local, the only egress vectors, sealed no-egress mode (`scripts/hearth_private.sh`), and how to verify. |
 | [docs/RUNBOOK_training.md](docs/RUNBOOK_training.md) | Validate the LoRA path end-to-end on real weights (Apple Silicon). |
 | [docs/RUNBOOK_consumer_wiring.md](docs/RUNBOOK_consumer_wiring.md) | Wire CAMBOT + Claude Code to a live HEARTH and read the token-savings numbers. |
 | [docs/HANDOFF.md](docs/HANDOFF.md) | For a Claude Code running on real hardware: how to pick up the two hardware-blocked follow-ups and partner back. |
