@@ -54,7 +54,7 @@ local RAG, LoRA/QLoRA fine-tuning with an eval gate, a Swift SDK + Python client
 server, an offline embedded Swift path (Foundation Models, with a Core ML seam), a plugin
 API, and multi-model serving + a quantization/export pipeline.
 
-**190 Python tests + a Swift package, all green** on the `echo` backend with no model
+**193 Python tests + a Swift package, all green** on the `echo` backend with no model
 downloaded. The two validations that needed real hardware / a live consumer are **now done
 on Apple Silicon** (Apple M3 Pro / 36 GB): an end-to-end LoRA training run on real 7B weights
 (train → eval gate both directions → promote → live serving) and live CAMBOT / Claude Code /
@@ -66,7 +66,7 @@ phase-by-phase result log.
 
 ```bash
 uv sync --extra dev            # install (core + test deps; no MLX needed)
-uv run pytest -q               # 190 passing (1 skip: sqlite-vec extension absent)
+uv run pytest -q               # 193 passing (1 skip: sqlite-vec extension absent)
 uv run hearth doctor           # environment preflight
 uv run hearth run "hello"      # one-shot (echo backend until MLX is installed)
 uv run hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080

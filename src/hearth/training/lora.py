@@ -155,6 +155,33 @@ def _build_args(config: LoRAConfig, run_dir: Path) -> list[str]:
     return args
 
 
+def _preflight_batch_size(args: list[str], run_dir: Path) -> None:
+    """Fail fast (before GPU time) if the validation split is smaller than ``batch_size``.
+
+    ``mlx_lm.lora`` iterates the *validation* set in ``batch_size`` chunks and aborts with
+    ``"Dataset must have at least batch_size=N examples but only has M"`` when the split is
+    too small. Because HEARTH holds out ``valid_fraction`` of the records, a dataset that
+    passes :meth:`LoRAConfig.validate` (>=2 records) can still yield a validation split
+    below ``batch_size``. Surface that here with an actionable message instead of mlx-lm's
+    opaque one. Real-path only (tests inject a fake runner and never reach this).
+    """
+    try:
+        batch_size = int(args[args.index("--batch-size") + 1])
+    except (ValueError, IndexError):
+        return  # no/unparseable batch size — let mlx-lm speak for itself
+    valid_path = run_dir / "data" / "valid.jsonl"
+    if not valid_path.exists():
+        return
+    n_valid = sum(1 for line in valid_path.read_text().splitlines() if line.strip())
+    if n_valid < batch_size:
+        raise DatasetError(
+            f"validation split has {n_valid} example(s) but batch_size is {batch_size}; "
+            f"mlx-lm needs at least {batch_size}. Provide more records (roughly "
+            f">= {batch_size}/valid_fraction total, e.g. ~{batch_size * 10} at the 0.1 "
+            "default) or lower the batch size."
+        )
+
+
 def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
     """Default runner: shell out to ``python -m mlx_lm.lora`` (needs the ``[mlx]`` extra).
 
@@ -168,6 +195,7 @@ def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
         raise RuntimeError(
             "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx"
         )
+    _preflight_batch_size(args, run_dir)
     subprocess.run([sys.executable, "-m", "mlx_lm.lora", *args], check=True)
     return run_dir / "adapters"
 

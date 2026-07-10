@@ -61,14 +61,24 @@ from hearth.training.dataset import build_dataset, write_dataset
 pairs = [
     ("Extract the ticket id from: 'Fixed in PROJ-1234, see PR #90'.", "PROJ-1234"),
     ("Extract the ticket id from: 'Closes PROJ-5678 after review'.",  "PROJ-5678"),
-    # ... at least 2 records (the trainer holds out a validation split)
+    # ... see the size note below — a real run needs ~40+ records, not just 2
 ]
 ds = build_dataset(task="extract", pairs=pairs, created_at="2026-07-09T00:00:00Z")
 write_dataset(ds, Path("data/extract.jsonl"))
 ```
 
-`LoRAConfig.validate()` requires **≥ 2 records** (it splits into `train.jsonl` /
-`valid.jsonl`). You can validate a hand-written file without a GPU:
+> **Dataset size — read this before a real run.** `LoRAConfig.validate()` accepts **≥ 2
+> records**, but that is *not enough for a real `mlx_lm.lora` run*. HEARTH holds out
+> `valid_fraction` (default 0.1) as a validation split, and mlx-lm iterates that split in
+> `batch_size` (default **4**) chunks — so the **validation split must have ≥ `batch_size`
+> examples**, or the run aborts with `Dataset must have at least batch_size=4 examples but
+> only has N`. In practice you need **~40+ records** (≈ `batch_size / valid_fraction`).
+> `scripts/build_extract_dataset.py` / `scripts/build_route_dataset.py` generate ~48–50.
+> The real runner now preflights this and raises an actionable error before spending GPU
+> time (see `hearth.training.lora._preflight_batch_size`). Validated live on Apple Silicon
+> — see [RESULTS.md](RESULTS.md) → Finding 1.
+
+You can validate a hand-written file without a GPU:
 
 ```sh
 uv run python -c "from hearth.training.dataset import load_dataset; print(len(load_dataset('data/extract.jsonl')))"
