@@ -1,7 +1,8 @@
 # HEARTH — Roadmap
 
-**Status:** Phases 0–7 all shipped and green (175 Python tests + Swift package). The planned
-build is complete; remaining work is follow-ups and live consumer wiring (see end of file).
+**Status:** Phases 0–7 all shipped and green (190 Python tests + Swift package). The planned
+build is complete **and both hardware-blocked follow-ups are now validated on real Apple
+Silicon** — see [RESULTS.md](RESULTS.md) and "Remaining follow-ups" at the end of this file.
 Companion to [PROPOSAL.md](PROPOSAL.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Phases are ordered so that **each one ships something usable on its own**. You get
@@ -228,8 +229,9 @@ real models or conversions in tests). 138 → 175 Python tests, all green; echo 
 
 ## Remaining follow-ups (post-Phase 7)
 
-The phased build is done. The two code-side follow-ups are now shipped and green; the two
-remaining items are blocked only on real hardware / a live consumer, not on missing code.
+The phased build is done. The two code-side follow-ups are shipped and green; the two
+hardware-blocked items are **now validated on real Apple Silicon** (Apple M3 Pro / 36 GB) —
+full evidence in [RESULTS.md](RESULTS.md).
 
 - **`sqlite-vec` VectorStore backend (done).** `SqliteVecVectorStore` (`memory/store.py`) drops in
   behind the `VectorStore` protocol via `HEARTH_VECTOR_STORE=sqlite-vec` (KNN over a `vec0` virtual
@@ -242,12 +244,22 @@ remaining items are blocked only on real hardware / a live consumer, not on miss
   seam: real `#if canImport(CoreML)` gating, `.mlpackage`/`.mlmodelc` load, availability probes, and
   full `HearthInference` conformance — the tokenizer/KV-cache/sampling generation loop is the one
   honestly-deferred piece (`generate` loads-then-throws with a fallback hint; see `swift/OFFLINE.md`).
-- **Real training run (blocked on hardware).** Harness + runbook shipped:
-  `scripts/train_lora_real.sh` (prereq-guarded, download-refusing) and `docs/RUNBOOK_training.md`
-  drive the real `hearth train` → eval gate → `hearth adapters promote` lifecycle. Executing it
-  needs an Apple-Silicon GPU + `uv sync --extra mlx` + a cached base model + `HF_HUB_OFFLINE=1`.
-- **Live consumer wiring (blocked on a live consumer).** Integration examples + runbook shipped:
-  `examples/cambot_offload.{py,swift}`, `examples/claude_code_mcp.md`, and
-  `docs/RUNBOOK_consumer_wiring.md` wire CAMBOT + Claude Code to a live HEARTH and read
-  `estimated_frontier_tokens_saved` from `/v1/hearth/admin/metrics`. Real G2/G8 numbers require the
-  MLX backend plus the actual CAMBOT app / a live Claude Code MCP session driving a workload.
+- **Real training run (done — validated on real weights).** `scripts/train_lora_real.sh` +
+  `docs/RUNBOOK_training.md` drove a real `hearth train` → eval gate → `hearth adapters promote`
+  lifecycle on `Qwen2.5-Coder-7B-4bit` (Apple M3 Pro). The eval gate was exercised **both
+  directions with real scores** (refused a 0.20-vs-1.0 candidate; promoted a genuine 1.0-vs-0.2
+  winner that learned an arbitrary routing convention the base can't), and the promoted adapter
+  **serves live** through the gateway (verified with an on-daemon adapter-vs-base A/B). See
+  [RESULTS.md](RESULTS.md) → Task A.
+- **Live consumer wiring (done — real G2/G8 numbers).** `examples/cambot_offload.{py,swift}`,
+  `examples/claude_code_mcp.md`, and `docs/RUNBOOK_consumer_wiring.md` were run against a live
+  `HEARTH_BACKEND=mlx` daemon: CAMBOT (Python) offloaded real subtasks locally, the Swift SDK
+  called it live, and Claude Code offloaded a real subtask via the MCP server (stdio, escalation
+  provably off). `/v1/hearth/admin/metrics` reported **`estimated_frontier_tokens_saved: 2210`**
+  over 19 all-local requests (class_mix across classify/summarize/extract/draft). See
+  [RESULTS.md](RESULTS.md) → Task B.
+
+> **One shipped-code fix came out of this run:** `MLXProvider._strip_terminators` now truncates
+> at the *first* chat terminator (a LoRA-tuned model can emit a literal `<|im_end|>` mid-stream
+> and ramble); without it a promoted adapter served garbage. Suite stays green (190 passed, 1
+> skipped). Details in [RESULTS.md](RESULTS.md) → Finding 2.
