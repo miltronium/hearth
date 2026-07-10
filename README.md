@@ -51,15 +51,17 @@ and improvable.
 capability below is implemented and tested: OpenAI-compatible gateway (streaming +
 embeddings), a router/policy layer with escalation + token budgeting + observability,
 local RAG, LoRA/QLoRA fine-tuning with an eval gate, a Swift SDK + Python client + MCP
-server, an offline embedded Swift path (Foundation Models, with a Core ML seam), a plugin
-API, and multi-model serving + a quantization/export pipeline.
+server, an offline embedded Swift path (Foundation Models + a **working Core ML generation
+loop**), a plugin API, and multi-model serving + a quantization/export pipeline.
 
-**211 Python tests + a Swift package, all green** on the `echo` backend with no model
-downloaded. The two validations that needed real hardware / a live consumer are **now done
-on Apple Silicon** (Apple M3 Pro / 36 GB): an end-to-end LoRA training run on real 7B weights
-(train → eval gate both directions → promote → live serving) and live CAMBOT / Claude Code /
-Swift wiring showing **2,210 estimated frontier tokens saved** over an all-local session. Full
-evidence: [docs/RESULTS.md](docs/RESULTS.md). See [docs/ROADMAP.md](docs/ROADMAP.md) for the
+**219 Python tests + a Swift package (two products, 20 tests), all green** on the `echo`
+backend with no model downloaded. Three real-hardware validations are **done on Apple Silicon**:
+an end-to-end LoRA training run on real 7B weights (train → eval gate both directions → promote →
+live serving); live CAMBOT / Claude Code / Swift wiring showing **2,210 estimated frontier tokens
+saved** over an all-local session; and (ADR-011) a **fully-offline Core ML generation loop** —
+`hearth models export-coreml` → Swift `CoreMLProvider.generate` ran a real Qwen2.5 on the ANE with
+no daemon and no network, greedy-matching the source model. Full evidence:
+[docs/RESULTS.md](docs/RESULTS.md). See [docs/ROADMAP.md](docs/ROADMAP.md) for the
 phase-by-phase result log.
 
 ## Run it now

@@ -363,85 +363,66 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
 
     hf_config = AutoConfig.from_pretrained(config.source)
     tokenizer = AutoTokenizer.from_pretrained(config.source)
-    model = AutoModelForCausalLM.from_pretrained(config.source, torchscript=True)
+    # Eager attention traces cleanly under `torch.jit.trace` (SDPA's fused kernel does not).
+    model = AutoModelForCausalLM.from_pretrained(
+        config.source, torchscript=True, attn_implementation="eager"
+    )
     model.eval()
 
-    # --- Stateful KV-cache export to swift-transformers' contract (ADR-011) -----------------
-    # `LanguageModelWithStatefulKVCache` (swift-transformers) drives a Core ML model shaped:
-    #   inputs : `inputIds`  [1, RangeDim(1..max)]   (+ `causalMask` [1,1,q,max] when required)
-    #   states : `keyCache`, `valueCache`  — combined-across-layers tensors, updated in place
-    #   output : `logits`    [1, seq, vocab]
-    # The ranged `inputIds` lets one graph both prefill the prompt and extend one token at a time
-    # (the O(1)-per-token win). We back the cache with fixed buffers slice-updated in place
-    # (Apple's stateful-LLM recipe) so coremltools captures them as `ct.StateType`s. The concrete
-    # StaticCache/attention wiring is architecture-specific (Qwen2/Llama-family) and is finalized
-    # + validated on real weights in docs/HANDOFF.md → Task C.
-    from transformers.cache_utils import StaticCache
+    # --- Export to swift-transformers' Core ML contract (ADR-011) ---------------------------
+    # swift-transformers' base `LanguageModel` drives a NON-stateful (padded-prefill) model:
+    #   input  : `inputIds` [1, max_seq_len]  (right-padded; causal masking makes trailing pad
+    #            positions irrelevant to the logits at the last real token)
+    #   output : `logits`   [1, max_seq_len, vocab]
+    # It reads `logits[tokenCount-1]` each step — O(n²) over a decode, but robust and correct, and
+    # ideal for HEARTH's short cheap tasks (classify/summarize/commit-msg). This is the path
+    # validated end-to-end on real weights (docs/HANDOFF.md → Task C).
+    #
+    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization) targets the same Swift consumer
+    # via `LanguageModelWithStatefulKVCache` (states `keyCache`/`valueCache`, ranged `inputIds`).
+    # It needs Apple's custom slice-update cache + attention recipe rather than HF's internal
+    # `Cache` (whose layout churns across transformers versions), and is tracked as the follow-up
+    # in RESULTS.md → Task C. The Swift side already auto-selects stateful vs. base from the model's
+    # state descriptions, so upgrading the export later needs no Swift change.
+    seq_len = config.max_seq_len
+    is_stateful = False
 
-    num_layers = hf_config.num_hidden_layers
-    num_kv_heads = getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads)
-    head_dim = hf_config.hidden_size // hf_config.num_attention_heads
-    # One tensor per cache, stacked over layers, matching swift-transformers' two states.
-    cache_shape = (num_layers, 1, num_kv_heads, config.max_seq_len, head_dim)
+    class _PlainCausalLM(torch.nn.Module):  # pragma: no cover - hardware path (Task C)
+        """HF model as a single fixed-length forward: `inputIds[1, seq_len]` -> `logits`.
 
-    class _StatefulCausalLM(torch.nn.Module):  # pragma: no cover - hardware path (Task C)
-        """HF model wrapped with fixed `keyCache`/`valueCache` buffers exposed as Core ML states.
-
-        ``forward(inputIds, causalMask)`` seeds a StaticCache from the buffers, runs one
-        prefill-or-extend step, writes the updated cache back in place, and returns logits.
+        Builds the causal mask internally with `torch.triu` (a plain, export-friendly op) and
+        hands it to the model, bypassing transformers' `masking_utils` — whose `vmap` +
+        `packed_sequence_mask` indexing is hostile to `torch.export`. The Core ML model therefore
+        exposes only `inputIds`, matching swift-transformers' base `LanguageModel` contract (it
+        right-pads and reads `logits[tokenCount-1]`; causal masking makes the trailing pad
+        positions irrelevant to that logit).
         """
 
         def __init__(self, inner):
             super().__init__()
             self.inner = inner
-            self.register_buffer("keyCache", torch.zeros(cache_shape, dtype=torch.float16))
-            self.register_buffer("valueCache", torch.zeros(cache_shape, dtype=torch.float16))
 
-        def forward(self, inputIds, causalMask):
-            cache = StaticCache(
-                config=hf_config,
-                max_batch_size=1,
-                max_cache_len=config.max_seq_len,
-                device="cpu",
-                dtype=torch.float16,
-            )
-            for layer in range(num_layers):
-                cache.key_cache[layer] = self.keyCache[layer]
-                cache.value_cache[layer] = self.valueCache[layer]
-            out = self.inner(
-                input_ids=inputIds, attention_mask=causalMask, past_key_values=cache, use_cache=True
-            )
-            for layer in range(num_layers):
-                self.keyCache[layer].copy_(cache.key_cache[layer])
-                self.valueCache[layer].copy_(cache.value_cache[layer])
-            return out.logits
+        def forward(self, inputIds):
+            seq = inputIds.shape[1]
+            neg = torch.finfo(torch.float32).min
+            mask = torch.triu(torch.full((1, 1, seq, seq), neg), diagonal=1)
+            return self.inner(input_ids=inputIds, attention_mask=mask, use_cache=False).logits
 
-    wrapper = _StatefulCausalLM(model).eval()
-    seq = min(8, config.max_seq_len)
-    example_ids = torch.zeros((1, seq), dtype=torch.int32)
-    example_mask = torch.zeros((1, 1, seq, config.max_seq_len), dtype=torch.float16)
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapper, (example_ids, example_mask))
+    wrapper = _PlainCausalLM(model).eval()
+    example_ids = torch.zeros((1, seq_len), dtype=torch.int64)
+    # Use `torch.export` (then lower to the ATEN dialect via `run_decompositions`), NOT
+    # `torch.jit.trace`: modern transformers builds its attention mask with `torch.vmap`, which
+    # jit.trace cannot capture (it raises deep in functorch). coremltools converts the resulting
+    # `ExportedProgram` directly. NOTE (Task C, real run): on a bleeding-edge stack (transformers
+    # 4.57 + torch 2.13 + coremltools 9) the ATEN graph can still contain ops coremltools hasn't
+    # lowered yet (e.g. `diff`); pin a coremltools-tested torch (≈2.7) + an export-friendly
+    # transformers to convert. See RESULTS.md → Task C.
+    exported = torch.export.export(wrapper, (example_ids,)).run_decompositions({})
 
-    query = ct.RangeDim(lower_bound=1, upper_bound=config.max_seq_len, default=seq)
-    def _state(name):
-        return ct.StateType(
-            wrapped_type=ct.TensorType(shape=cache_shape, dtype=np.float16), name=name
-        )
-
-    states = [_state("keyCache"), _state("valueCache")]
     mlmodel = ct.convert(
-        traced,
-        inputs=[
-            ct.TensorType(name="inputIds", shape=(1, query), dtype=np.int32),
-            ct.TensorType(
-                name="causalMask",
-                shape=(1, 1, query, config.max_seq_len),
-                dtype=np.float16,
-            ),
-        ],
+        exported,
+        inputs=[ct.TensorType(name="inputIds", shape=(1, seq_len), dtype=np.int32)],
         outputs=[ct.TensorType(name="logits", dtype=np.float16)],
-        states=states,
         compute_precision=precision,
         compute_units=compute_units,
         minimum_deployment_target=ct.target.macOS15,
@@ -464,7 +445,7 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
         vocab_size=int(getattr(hf_config, "vocab_size", len(tokenizer))),
         eos_token_ids=_terminator_ids(tokenizer, hf_config),
         bos_token_id=getattr(tokenizer, "bos_token_id", None),
-        stateful=True,
+        stateful=is_stateful,
         input_name="inputIds",
         output_name="logits",
         compute_units=config.compute_units,

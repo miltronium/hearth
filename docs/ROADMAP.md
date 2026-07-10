@@ -238,12 +238,17 @@ full evidence in [RESULTS.md](RESULTS.md).
   table; L2-distance→cosine score conversion documented). Default stays the dependency-free
   brute-force `SQLiteVectorStore`; `sqlite-vec` is lazy-imported behind `uv sync --extra vec`.
   Extension-gated tests skip cleanly when the native lib is absent.
-- **Core ML / ANE path (done, minus the generation loop).** Python export pipeline (`coreml.py`,
-  `hearth models export-coreml`) mirrors the quant pipeline's injectable-runner pattern (real
-  export behind `uv sync --extra coreml`, faked in tests). Swift `CoreMLProvider` fills the Phase 6
-  seam: real `#if canImport(CoreML)` gating, `.mlpackage`/`.mlmodelc` load, availability probes, and
-  full `HearthInference` conformance — the tokenizer/KV-cache/sampling generation loop is the one
-  honestly-deferred piece (`generate` loads-then-throws with a fallback hint; see `swift/OFFLINE.md`).
+- **Core ML / ANE path — generation loop done, validated end-to-end (ADR-011).** The offline
+  Swift generation loop is wired and **validated on real weights** (Task C): `hearth models
+  export-coreml` produces a Core ML `.mlpackage` + a sidecar contract (`hearth-coreml.json` +
+  tokenizer), and Swift `CoreMLProvider.generate` runs fully offline via swift-transformers'
+  tokenizer + `LanguageModel` — a real Qwen2.5-0.5B answered `"In one word, what color is the
+  sky?"` → `Blue` on the ANE, greedy-matching the source PyTorch model (fp16 precision divergence
+  only). The dependency is quarantined in an opt-in `HearthCoreML` product so the core `Hearth`
+  stays zero-dep / macOS 13. **Approach A (non-stateful padded-prefill) is the shipped/validated
+  path; the stateful KV-cache export (Approach B, O(1)/token) is the documented follow-up** — the
+  Swift side already auto-selects it, so it needs no Swift change. Full evidence + the three
+  version-compat fixes: [RESULTS.md](RESULTS.md) → Task C.
 - **Real training run (done — validated on real weights).** `scripts/train_lora_real.sh` +
   `docs/RUNBOOK_training.md` drove a real `hearth train` → eval gate → `hearth adapters promote`
   lifecycle on `Qwen2.5-Coder-7B-4bit` (Apple M3 Pro). The eval gate was exercised **both

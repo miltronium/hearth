@@ -23,7 +23,7 @@ training job or drive a live consumer — that's your half. See
 | Core ML export + Swift `CoreMLProvider` | ✅ shipped (generation loop deferred) | cloud instance |
 | **Real LoRA training run** | ⏳ harness + runbook ready — **needs you to execute** | **you** |
 | **Live CAMBOT / Claude Code wiring + real token-savings numbers** | ✅ done (Task B, see RESULTS.md) | **you** |
-| **Core ML stateful generation loop** (ADR-011) | 🚧 export + provider loop being built — Task C validates on real weights | cloud builds, **you** validate |
+| **Core ML offline generation loop** (ADR-011) | ✅ done (Task C) — validated E2E on real weights (Approach A); stateful KV-cache is the follow-up | cloud + **you** |
 
 Nothing below requires you to write new features. Your job is to **run the shipped
 harnesses on real hardware, capture honest results, and hand them back**. If you find a

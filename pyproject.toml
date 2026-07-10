@@ -64,7 +64,10 @@ vec = [
 # neither coremltools nor torch — tests inject a fake runner and never export.
 coreml = [
     "coremltools>=8.0",
-    "torch>=2.2",
+    # coremltools' Torch frontend tracks a tested torch ceiling (2.7 for coremltools 9); newer
+    # torch emits ExportedProgram ops its converter can't lower yet (`diff`, `alias`). Pin below
+    # 2.8 so `hearth models export-coreml` converts. Raise when coremltools catches up.
+    "torch>=2.2,<2.8",
     "transformers>=4.44,<5",
 ]
 # MCP server so agents (Claude Code) can offload subtasks to the local model (Phase 5,

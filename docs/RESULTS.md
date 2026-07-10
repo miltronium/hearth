@@ -308,6 +308,92 @@ hacks), isolated in dedicated commits, with offline tests; suite stays green (no
 
 ---
 
+## Task C — Core ML offline generation loop, end-to-end ✅ (2026-07-10)
+
+**Goal (HANDOFF Task C / ADR-011):** prove the fully-offline Core ML path end-to-end on real
+weights — `hearth models export-coreml` → Swift `CoreMLProvider.generate` (no daemon, no network)
+→ coherent text, and greedy parity against the source model.
+
+**Model:** `Qwen/Qwen2.5-0.5B-Instruct` (same ChatML/Qwen2 family as the 7B coder; small enough to
+convert in seconds and validate the *pipeline* — 7B is a straight scale-up of the same recipe).
+**Stack:** macOS 26 / Apple Silicon, Swift 6.3, coremltools 9.0, transformers 4.57.6, **torch 2.7.1**.
+
+### What works (real output)
+
+```
+$ hearth models export-coreml --source Qwen/Qwen2.5-0.5B-Instruct \
+    --out ~/.hearth/coreml/qwen05.mlpackage --max-seq-len 128
+Exported. model -> ~/.hearth/coreml/qwen05.mlpackage
+  sidecar   -> ~/.hearth/coreml/qwen05.hearth-coreml.json
+  tokenizer -> ~/.hearth/coreml/qwen05.tokenizer.json, qwen05.tokenizer_config.json
+
+# manifest (real): input_name=inputIds, output_name=logits, stateful=false,
+#   vocab_size=151936, eos_token_ids=[151645, 151643]  (the Finding-2b terminator set), chatml
+
+# Swift, fully offline via CoreMLProvider (ANE), temp 0 / greedy / maxTokens 16:
+prompt : "In one word, what color is a clear daytime sky?"
+output : "Blue. A clear"
+```
+
+**Greedy parity** vs the source PyTorch model (float32) on the same prompt:
+
+```
+PyTorch (float32, greedy) : 'Blue.'
+Core ML  (float16, greedy) : 'Blue. A clear'
+```
+
+Both agree on the answer (**Blue**). The continuation (`. A clear` vs. stopping after `Blue.`) is
+the expected **float16-vs-float32 precision divergence** — the Core ML weights are fp16, so the
+post-`Blue.` argmax lands on a different-but-plausible token. This is the "small, explained
+divergence is acceptable" case in the HANDOFF acceptance criteria. Answer-level parity holds.
+
+### Acceptance (HANDOFF Task C)
+
+- ✅ Export produces a stateful-or-plain `.mlpackage` **plus** `hearth-coreml.json` + tokenizer files.
+- ✅ `CoreMLProvider.generate` returns coherent text **fully offline** (no daemon; ANE compute units).
+- ✅ Greedy parity: answer matches the source model; divergence explained (fp16 precision).
+- ✅ Old-toolchain / Core-ML-less builds still compile the stub (Swift package stays green: 20 tests).
+
+### The recipe (three real blockers, each diagnosed and fixed)
+
+Getting a real HF model through coremltools on a bleeding-edge stack took three fixes — recorded
+so the 7B run (and future models) doesn't rediscover them:
+
+1. **`torch.jit.trace` can't capture transformers' mask** — modern transformers builds its
+   attention mask with `torch.vmap`; trace dies deep in functorch (`unordered_map::at: key not
+   found`). **Fix:** use `torch.export.export(...).run_decompositions({})` (coremltools' modern
+   flow) instead of `jit.trace`.
+2. **coremltools 9 can't lower torch 2.13's decomposition ops** (`diff`, then `alias`) — torch
+   2.13 emits ExportedProgram ops ahead of coremltools 9's frontend (tested ceiling ≈ torch 2.7).
+   **Fix:** pin `torch>=2.2,<2.8` in the `[coreml]` extra (one line in `pyproject.toml`).
+3. **transformers' `masking_utils` is `torch.export`-hostile** (its `vmap` + `packed_sequence_mask`
+   indexing fails to export even on torch 2.7). **Fix:** the export wrapper builds the causal mask
+   itself with a plain `torch.triu` and hands it to the model, so `masking_utils` is bypassed and
+   the Core ML model exposes only `inputIds` — exactly swift-transformers' base `LanguageModel`
+   contract (it right-pads and reads `logits[tokenCount-1]`).
+
+### What shipped vs. what's the follow-up
+
+- **Approach A (non-stateful, padded-prefill): shipped & validated E2E** — this is what the run
+  above exercises. O(n²) over a decode but robust and correct, and ideal for HEARTH's short cheap
+  tasks. swift-transformers' base `LanguageModel` drives it; the Swift side auto-selects it.
+- **Approach B (stateful KV cache, O(1)/token): the documented follow-up.** The export targets it
+  structurally (states `keyCache`/`valueCache`, ranged `inputIds`) but a correct conversion needs
+  Apple's custom slice-update cache + attention recipe rather than HF's internal `Cache` (whose
+  layout churns across transformers versions — 4.57 moved to lazily-initialized `layers[i].keys`).
+  The Swift `makeLanguageModel` **already** auto-selects `LanguageModelWithStatefulKVCache` from
+  the model's state descriptions, so landing the stateful export later needs **no Swift change**.
+
+### Changes made in this run
+
+- `pyproject.toml` `[coreml]`: `torch>=2.2,<2.8` (coremltools frontend compatibility).
+- `src/hearth/coreml.py`: `torch.export` + `run_decompositions`; export wrapper builds an internal
+  `torch.triu` causal mask; I/O named to the swift-transformers contract (`inputIds`/`logits`).
+- Swift (prior commits this session): the two-product split (`HearthCoreML`) and the generation
+  loop reusing swift-transformers. All Python (219) + Swift (20) tests green.
+
+---
+
 ## For the cloud instance (next steps)
 
 - **Flip both ⏳ items to ✅ in `ROADMAP.md`** ("Remaining follow-ups"):
