@@ -242,8 +242,10 @@ validation set (`valid_fraction=0.1`) and **requires the validation split to hav
 ValueError: Dataset must have at least batch_size=4 examples but only has 2.
 ```
 So a usable dataset needs ~40+ records, not 2. I sized both datasets accordingly (48 / 50).
-No shipped code was changed for this — it's a dataset-sizing reality worth adding to the
-runbook (see "For the cloud instance").
+**Follow-up shipped:** `hearth.training.lora._preflight_batch_size` now raises an actionable
+`DatasetError` before spending GPU time when the validation split is below `batch_size`
+(real-runner path only; fake-runner tests unaffected), and `RUNBOOK_training.md` documents
+the real constraint. Covered by three new offline tests (suite 190 → 193).
 
 **Finding 2 — a real serving bug: LoRA-tuned models emit a literal terminator mid-string.**
 The fine-tuned adapters produce the correct answer followed by a literal
@@ -267,11 +269,11 @@ commit and is a genuine correctness fix, not a run-passing hack.
     promoted adapter serves live. Cite this file.
   - *Live consumer wiring* — done for CAMBOT (Python) + metrics; MCP + Swift validated in
     their sections. Cite `estimated_frontier_tokens_saved: 2210`.
-- **Runbook fix (RUNBOOK_training.md):** replace "≥2 records" guidance with the real
-  constraint — the **validation split** must hold ≥ `batch_size` (default 4) examples, so a
-  real dataset needs ~40+ records. Consider surfacing this as a clear pre-flight error in
-  `LoRAConfig.validate()` (would need a `batch_size`-aware check; watch the existing 2-record
-  fake-runner tests).
+- **Runbook fix + preflight (done in this branch):** `RUNBOOK_training.md` now states the
+  real constraint (validation split ≥ `batch_size`, so ~40+ records), and
+  `_preflight_batch_size` raises a clear `DatasetError` on the real path before GPU time. It
+  lives in the real runner (not `LoRAConfig.validate()`) precisely so the existing 2-record
+  fake-runner tests stay valid.
 - **Optional follow-ups discovered:**
   - Add a one-command `hearth eval` (RUNBOOK step 4 notes it doesn't exist; I used
     `scripts/eval_candidate.py` as the stand-in).

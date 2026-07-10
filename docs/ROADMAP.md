@@ -1,6 +1,6 @@
 # HEARTH — Roadmap
 
-**Status:** Phases 0–7 all shipped and green (190 Python tests + Swift package). The planned
+**Status:** Phases 0–7 all shipped and green (193 Python tests + Swift package). The planned
 build is complete **and both hardware-blocked follow-ups are now validated on real Apple
 Silicon** — see [RESULTS.md](RESULTS.md) and "Remaining follow-ups" at the end of this file.
 Companion to [PROPOSAL.md](PROPOSAL.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -261,5 +261,5 @@ full evidence in [RESULTS.md](RESULTS.md).
 
 > **One shipped-code fix came out of this run:** `MLXProvider._strip_terminators` now truncates
 > at the *first* chat terminator (a LoRA-tuned model can emit a literal `<|im_end|>` mid-stream
-> and ramble); without it a promoted adapter served garbage. Suite stays green (190 passed, 1
+> and ramble); without it a promoted adapter served garbage. Suite stays green (193 passed, 1
 > skipped). Details in [RESULTS.md](RESULTS.md) → Finding 2.

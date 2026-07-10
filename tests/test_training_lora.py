@@ -7,7 +7,7 @@ import json
 import pytest
 
 from hearth.training.dataset import DatasetError, build_dataset
-from hearth.training.lora import LoRAConfig, train
+from hearth.training.lora import LoRAConfig, _preflight_batch_size, train
 
 
 def _dataset(n=4):
@@ -62,3 +62,28 @@ def test_train_validates_inputs(tmp_path):
             ),
             runner=lambda a, d: d,
         )
+
+
+def _write_valid(run_dir, n):
+    data_dir = run_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "valid.jsonl").write_text(
+        "".join(f'{{"prompt": "p{i}", "completion": "c{i}"}}\n' for i in range(n))
+    )
+
+
+def test_preflight_batch_size_rejects_small_validation_split(tmp_path):
+    # A validation split smaller than batch_size is mlx-lm's opaque abort — we catch it early.
+    _write_valid(tmp_path, 2)
+    with pytest.raises(DatasetError, match="validation split has 2"):
+        _preflight_batch_size(["--batch-size", "4"], tmp_path)
+
+
+def test_preflight_batch_size_passes_when_split_is_large_enough(tmp_path):
+    _write_valid(tmp_path, 4)
+    _preflight_batch_size(["--batch-size", "4"], tmp_path)  # no raise
+
+
+def test_preflight_batch_size_noops_without_batch_arg(tmp_path):
+    _write_valid(tmp_path, 1)
+    _preflight_batch_size(["--iters", "10"], tmp_path)  # nothing to check -> no raise
