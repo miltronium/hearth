@@ -408,6 +408,9 @@ def models_export_coreml(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]Exported.[/green] model -> {outcome.output_dir}")
+    console.print(f"  sidecar -> {outcome.manifest_path}")
+    for path in outcome.tokenizer_paths:
+        console.print(f"  tokenizer -> {path}")
 
 
 @rag_app.command("ingest")

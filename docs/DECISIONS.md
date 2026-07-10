@@ -166,3 +166,47 @@ we don't control.
 
 **Revisit if.** MCP is superseded as the agent-tool protocol — then swap the adapter, keep the
 core.
+
+---
+
+## ADR-011 — Core ML generation loop: stateful KV-cache export + swift-transformers tokenizer
+
+**Context.** Phase 6 shipped the `CoreMLProvider` seam (model load + gating + protocol
+conformance) but left the token-generation loop deferred: the exported `.mlpackage` is a plain
+traced forward with no tokenizer contract and no KV cache, so `generate`/`generateStream` throw
+`onDeviceUnavailable`. Completing it is the last real feature gap in the fully-offline,
+no-daemon path (ADR-009 deployment model #3). Two forks drive the work: how decode is shaped
+(re-run a padded window vs. a stateful KV cache) and how Swift tokenizes (own it vs. depend on
+a library). The Swift package deliberately carries **zero SwiftPM dependencies** to date.
+
+**Decision.**
+1. **Decode = stateful KV cache (Approach B).** Rewrite `hearth models export-coreml`
+   (`src/hearth/coreml.py`) to emit a *stateful* Core ML model using coremltools' `States` API
+   — single-token `input_ids` + position input, per-layer KV read/write states, `logits`
+   output pinned by name — so decode is O(1)/token instead of re-running a padded 512-window
+   each step (O(n²)).
+2. **Tokenizer = swift-transformers.** Add `huggingface/swift-transformers` as the package's
+   first dependency; use its `Tokenizers` to read the exported `tokenizer.json` (byte-level BPE,
+   merges, added/special tokens) and lean on its Core ML LM/generation layer as the stateful
+   decode reference. We spend the zero-dep principle specifically to make the single most
+   error-prone, hardest-to-verify-offline piece (tokenization) boring and correct.
+3. **Platform floor → macOS 15 / iOS 18.** The States API requires it. The real path is gated
+   `@available(macOS 15, iOS 18, *)`; the existing fallback stub keeps older toolchains and
+   Core-ML-less builds compiling, so `swift build`/`swift test` stay green everywhere.
+4. **Model contract via sidecar.** Export writes `hearth-coreml.json` (eos token ids — including
+   the Finding-2b terminator set — bos, vocab size, max_seq_len, input/output names, chat
+   template id) + a copy of `tokenizer.json` next to the `.mlpackage`. `CoreMLProvider` loads
+   both at init and falls back to `onDeviceUnavailable` when the sidecar is absent.
+
+**Consequences.** Fully-offline generation finally works end-to-end, and it's fast (KV-cached)
+rather than a toy. Costs: the export rewrite is model-specific (layer/head plumbing) and is the
+tall pole; the OS floor rises (accepted — Apple Silicon target); the package gains a dependency
+and its transitive deps (tracked, ADR-worthy precisely because it breaks the zero-dep stance).
+Sampling/stop and manifest parsing are pure, offline-testable functions; the stateful loop
+itself is hardware-gated and validated via `HANDOFF.md` Task C (greedy-parity vs. the mlx
+daemon). ChatML/Qwen framing ships first (the model already validated in RESULTS), manifest-
+driven so other templates extend cleanly.
+
+**Revisit if.** swift-transformers stalls or its API churns painfully → vendor a minimal
+tokenizer. Or Apple ships a higher-level on-device LLM generation API that subsumes the
+hand-built stateful loop → adopt it and keep the `HearthInference` seam.

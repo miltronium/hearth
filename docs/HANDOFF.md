@@ -22,7 +22,8 @@ training job or drive a live consumer — that's your half. See
 | sqlite-vec VectorStore backend | ✅ shipped (ext-gated tests skip w/o native lib) | cloud instance |
 | Core ML export + Swift `CoreMLProvider` | ✅ shipped (generation loop deferred) | cloud instance |
 | **Real LoRA training run** | ⏳ harness + runbook ready — **needs you to execute** | **you** |
-| **Live CAMBOT / Claude Code wiring + real token-savings numbers** | ⏳ examples + runbook ready — **needs you to execute** | **you** |
+| **Live CAMBOT / Claude Code wiring + real token-savings numbers** | ✅ done (Task B, see RESULTS.md) | **you** |
+| **Core ML stateful generation loop** (ADR-011) | 🚧 export + provider loop being built — Task C validates on real weights | cloud builds, **you** validate |
 
 Nothing below requires you to write new features. Your job is to **run the shipped
 harnesses on real hardware, capture honest results, and hand them back**. If you find a
@@ -115,6 +116,49 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 - CAMBOT and Claude Code both offload real tasks to HEARTH (local, no frontier call).
 - `/v1/hearth/admin/metrics` reports a non-trivial `estimated_frontier_tokens_saved` and a
   credible `escalation_rate` / `backend_mix` / `class_mix` over a real session.
+
+## Task C — Core ML stateful generation loop (real export + parity)
+
+**Goal:** validate the ADR-011 offline Core ML path end-to-end on real weights — export a
+stateful `.mlpackage`, run `CoreMLProvider.generate` fully offline (no daemon, no network), and
+confirm **greedy parity** against the mlx daemon for a fixed prompt.
+
+**Decision record:** [DECISIONS.md](DECISIONS.md) → ADR-011.
+**Export:** `hearth models export-coreml` (`src/hearth/coreml.py`, stateful KV-cache export).
+**Provider:** `swift/Sources/Hearth/CoreMLProvider.swift` + the generation loop
+(swift-transformers tokenizer, `@available(macOS 15, iOS 18, *)`).
+
+```sh
+# 1. Export a stateful Core ML model + sidecar (needs the [coreml] extra + cached source):
+uv sync --extra coreml
+HF_HUB_OFFLINE=1 uv run hearth models export-coreml \
+  --source mlx-community/Qwen2.5-Coder-7B-Instruct-4bit \
+  --out ~/.hearth/coreml/qwen-coder.mlpackage \
+  --compute-units cpuAndNeuralEngine --precision float16
+
+# confirm the sidecar contract landed next to the .mlpackage:
+#   ~/.hearth/coreml/qwen-coder.mlpackage  +  hearth-coreml.json  +  tokenizer.json
+
+# 2. Drive CoreMLProvider offline from Swift (a small runner in swift/, or a test target):
+#    engine = try CoreMLProvider(modelURL: url); print(try await engine.generate(...))
+
+# 3. Greedy parity: same prompt, temperature 0, against the mlx daemon:
+HEARTH_BACKEND=mlx uv run hearth run "classify: <fixed prompt>" --temperature 0
+```
+
+**Acceptance (record each):**
+- The export produces a stateful `.mlpackage` **plus** `hearth-coreml.json` + `tokenizer.json`.
+- `CoreMLProvider.generate` returns coherent text **fully offline** (no daemon, network off).
+- `generateStream` yields incremental deltas and stops cleanly on the Finding-2b terminator set
+  (no `<|im_end|>` leakage — verify the same way Task B did for the daemon).
+- **Greedy parity:** Core ML (temp 0) and the mlx daemon (temp 0) agree on a fixed short prompt
+  (or the divergence is explained — quantization/precision differences are acceptable if small).
+- Old-toolchain / Core-ML-less builds still compile and report the unavailable contract (the
+  stub path stays green).
+
+> If the stateful export needs model-specific plumbing the harness doesn't cover yet, fix the
+> harness and call it out in a dedicated commit (same rule as Tasks A/B) — don't hack a run to
+> pass.
 
 ---
 
