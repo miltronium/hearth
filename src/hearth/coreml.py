@@ -77,7 +77,9 @@ class CoreMLManifest:
     eos_token_ids: list[int]
     bos_token_id: int | None = None
     stateful: bool = True
-    input_name: str = "input_ids"
+    # Feature names follow swift-transformers' stateful Core ML LLM contract (Apple convention):
+    # input `inputIds` (+ optional `causalMask`), states `keyCache`/`valueCache`, output `logits`.
+    input_name: str = "inputIds"
     output_name: str = "logits"
     chat_template_id: str = _DEFAULT_CHAT_TEMPLATE
     tokenizer_files: list[str] = field(default_factory=list)
@@ -121,7 +123,7 @@ class CoreMLManifest:
             eos_token_ids=list(data["eos_token_ids"]),
             bos_token_id=data.get("bos_token_id"),
             stateful=data.get("stateful", True),
-            input_name=data.get("input_name", "input_ids"),
+            input_name=data.get("input_name", "inputIds"),
             output_name=data.get("output_name", "logits"),
             chat_template_id=data.get("chat_template_id", _DEFAULT_CHAT_TEMPLATE),
             tokenizer_files=list(data.get("tokenizer_files", [])),
@@ -364,58 +366,79 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     model = AutoModelForCausalLM.from_pretrained(config.source, torchscript=True)
     model.eval()
 
-    # --- Stateful KV-cache export (ADR-011, Task C validates on real weights) --------------
-    # A stateful Core ML model keeps the attention KV cache across `prediction` calls, so decode
-    # feeds ONE new token per step (O(1)) instead of re-running the whole window. We wrap the HF
-    # model so its `past_key_values` are exposed as Core ML States, trace a single-token step,
-    # and convert with `ct.convert(..., states=[...])`. The exact cache tensor shapes are
-    # model-specific (layers × heads × head_dim) — read from the config so this stays generic.
-    num_layers = hf_config.num_hidden_layers
-    num_kv_heads = getattr(
-        hf_config, "num_key_value_heads", hf_config.num_attention_heads
-    )
-    head_dim = hf_config.hidden_size // hf_config.num_attention_heads
-    cache_shape = (1, num_kv_heads, config.max_seq_len, head_dim)
+    # --- Stateful KV-cache export to swift-transformers' contract (ADR-011) -----------------
+    # `LanguageModelWithStatefulKVCache` (swift-transformers) drives a Core ML model shaped:
+    #   inputs : `inputIds`  [1, RangeDim(1..max)]   (+ `causalMask` [1,1,q,max] when required)
+    #   states : `keyCache`, `valueCache`  — combined-across-layers tensors, updated in place
+    #   output : `logits`    [1, seq, vocab]
+    # The ranged `inputIds` lets one graph both prefill the prompt and extend one token at a time
+    # (the O(1)-per-token win). We back the cache with fixed buffers slice-updated in place
+    # (Apple's stateful-LLM recipe) so coremltools captures them as `ct.StateType`s. The concrete
+    # StaticCache/attention wiring is architecture-specific (Qwen2/Llama-family) and is finalized
+    # + validated on real weights in docs/HANDOFF.md → Task C.
+    from transformers.cache_utils import StaticCache
 
-    class _StatefulStep(torch.nn.Module):
-        """One decode step: (input_ids[1,1], position) -> logits[1,1,vocab], KV cache updated."""
+    num_layers = hf_config.num_hidden_layers
+    num_kv_heads = getattr(hf_config, "num_key_value_heads", hf_config.num_attention_heads)
+    head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+    # One tensor per cache, stacked over layers, matching swift-transformers' two states.
+    cache_shape = (num_layers, 1, num_kv_heads, config.max_seq_len, head_dim)
+
+    class _StatefulCausalLM(torch.nn.Module):  # pragma: no cover - hardware path (Task C)
+        """HF model wrapped with fixed `keyCache`/`valueCache` buffers exposed as Core ML states.
+
+        ``forward(inputIds, causalMask)`` seeds a StaticCache from the buffers, runs one
+        prefill-or-extend step, writes the updated cache back in place, and returns logits.
+        """
 
         def __init__(self, inner):
             super().__init__()
             self.inner = inner
-            for layer in range(num_layers):
-                self.register_buffer(f"k_{layer}", torch.zeros(cache_shape))
-                self.register_buffer(f"v_{layer}", torch.zeros(cache_shape))
+            self.register_buffer("keyCache", torch.zeros(cache_shape, dtype=torch.float16))
+            self.register_buffer("valueCache", torch.zeros(cache_shape, dtype=torch.float16))
 
-        def forward(self, input_ids, position):  # pragma: no cover - hardware path
-            past = tuple(
-                (getattr(self, f"k_{i}"), getattr(self, f"v_{i}")) for i in range(num_layers)
+        def forward(self, inputIds, causalMask):
+            cache = StaticCache(
+                config=hf_config,
+                max_batch_size=1,
+                max_cache_len=config.max_seq_len,
+                device="cpu",
+                dtype=torch.float16,
             )
-            out = self.inner(input_ids=input_ids, past_key_values=past, use_cache=True)
-            for i, (k, v) in enumerate(out.past_key_values):
-                getattr(self, f"k_{i}").copy_(k)
-                getattr(self, f"v_{i}").copy_(v)
+            for layer in range(num_layers):
+                cache.key_cache[layer] = self.keyCache[layer]
+                cache.value_cache[layer] = self.valueCache[layer]
+            out = self.inner(
+                input_ids=inputIds, attention_mask=causalMask, past_key_values=cache, use_cache=True
+            )
+            for layer in range(num_layers):
+                self.keyCache[layer].copy_(cache.key_cache[layer])
+                self.valueCache[layer].copy_(cache.value_cache[layer])
             return out.logits
 
-    step = _StatefulStep(model).eval()
-    example_ids = torch.zeros((1, 1), dtype=torch.int32)
-    example_pos = torch.zeros((1,), dtype=torch.int32)
+    wrapper = _StatefulCausalLM(model).eval()
+    seq = min(8, config.max_seq_len)
+    example_ids = torch.zeros((1, seq), dtype=torch.int32)
+    example_mask = torch.zeros((1, 1, seq, config.max_seq_len), dtype=torch.float16)
     with torch.no_grad():
-        traced = torch.jit.trace(step, (example_ids, example_pos))
+        traced = torch.jit.trace(wrapper, (example_ids, example_mask))
 
-    states = [
-        ct.StateType(
-            wrapped_type=ct.TensorType(shape=cache_shape, dtype=np.float16),
-            name=f"{kind}_{layer}",
+    query = ct.RangeDim(lower_bound=1, upper_bound=config.max_seq_len, default=seq)
+    def _state(name):
+        return ct.StateType(
+            wrapped_type=ct.TensorType(shape=cache_shape, dtype=np.float16), name=name
         )
-        for layer in range(num_layers)
-        for kind in ("k", "v")
-    ]
+
+    states = [_state("keyCache"), _state("valueCache")]
     mlmodel = ct.convert(
         traced,
         inputs=[
-            ct.TensorType(name="input_ids", shape=(1, 1), dtype=np.int32),
-            ct.TensorType(name="position", shape=(1,), dtype=np.int32),
+            ct.TensorType(name="inputIds", shape=(1, query), dtype=np.int32),
+            ct.TensorType(
+                name="causalMask",
+                shape=(1, 1, query, config.max_seq_len),
+                dtype=np.float16,
+            ),
         ],
         outputs=[ct.TensorType(name="logits", dtype=np.float16)],
         states=states,
@@ -442,7 +465,7 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
         eos_token_ids=_terminator_ids(tokenizer, hf_config),
         bos_token_id=getattr(tokenizer, "bos_token_id", None),
         stateful=True,
-        input_name="input_ids",
+        input_name="inputIds",
         output_name="logits",
         compute_units=config.compute_units,
         precision=config.precision,
