@@ -1,0 +1,6 @@
+{"expected": "PROJ-4242", "prompt": "Extract the ticket id from: 'See PROJ-4242 for context'."}
+{"expected": "CORE-777", "prompt": "Extract the ticket id from: 'Resolved in CORE-777 last sprint'."}
+{"expected": "HEARTH-31", "prompt": "Extract the ticket id from: 'Tracking regression in HEARTH-31'."}
+{"expected": "API-500", "prompt": "Extract the ticket id from: 'Superseded by API-500'."}
+{"expected": "OPS-13", "prompt": "Extract the ticket id from: 'Deploy gated on OPS-13'."}
+{"expected": "DATA-2024", "prompt": "Extract the ticket id from: 'Reopened as DATA-2024'."}

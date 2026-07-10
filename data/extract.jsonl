@@ -1,0 +1,49 @@
+{"count": 48, "created_at": "2026-07-09T00:00:00Z", "kind": "hearth.dataset.header", "provenance": {"hand_curated": "true", "source": "scripts/build_extract_dataset.py"}, "schema_version": 1, "task": "extract", "version": "v1"}
+{"completion": "PROJ-10", "prompt": "Extract the ticket id from: 'Fixed in PROJ-10, see PR #100'."}
+{"completion": "CORE-47", "prompt": "Extract the ticket id from: 'Closes CORE-47 after review'."}
+{"completion": "DATA-84", "prompt": "Extract the ticket id from: 'Blocked by DATA-84 until infra lands'."}
+{"completion": "HEARTH-121", "prompt": "Extract the ticket id from: 'See HEARTH-121 for the migration plan'."}
+{"completion": "WEB-158", "prompt": "Extract the ticket id from: 'Reverted WEB-158 due to a regression'."}
+{"completion": "API-195", "prompt": "Extract the ticket id from: 'API-195 shipped in today's release'."}
+{"completion": "OPS-232", "prompt": "Extract the ticket id from: 'Follow-up tracked in OPS-232'."}
+{"completion": "PLAT-269", "prompt": "Extract the ticket id from: 'Root cause documented in PLAT-269'."}
+{"completion": "AUTH-306", "prompt": "Extract the ticket id from: 'Merged after CI green: AUTH-306'."}
+{"completion": "BILL-343", "prompt": "Extract the ticket id from: 'Duplicate of BILL-343, closing'."}
+{"completion": "PROJ-380", "prompt": "Extract the ticket id from: 'Hotfix for PROJ-380 is live'."}
+{"completion": "CORE-417", "prompt": "Extract the ticket id from: 'Design signed off in CORE-417'."}
+{"completion": "DATA-454", "prompt": "Extract the ticket id from: 'Fixed in DATA-454, see PR #112'."}
+{"completion": "HEARTH-491", "prompt": "Extract the ticket id from: 'Closes HEARTH-491 after review'."}
+{"completion": "WEB-528", "prompt": "Extract the ticket id from: 'Blocked by WEB-528 until infra lands'."}
+{"completion": "API-565", "prompt": "Extract the ticket id from: 'See API-565 for the migration plan'."}
+{"completion": "OPS-602", "prompt": "Extract the ticket id from: 'Reverted OPS-602 due to a regression'."}
+{"completion": "PLAT-639", "prompt": "Extract the ticket id from: 'PLAT-639 shipped in today's release'."}
+{"completion": "AUTH-676", "prompt": "Extract the ticket id from: 'Follow-up tracked in AUTH-676'."}
+{"completion": "BILL-713", "prompt": "Extract the ticket id from: 'Root cause documented in BILL-713'."}
+{"completion": "PROJ-750", "prompt": "Extract the ticket id from: 'Merged after CI green: PROJ-750'."}
+{"completion": "CORE-787", "prompt": "Extract the ticket id from: 'Duplicate of CORE-787, closing'."}
+{"completion": "DATA-824", "prompt": "Extract the ticket id from: 'Hotfix for DATA-824 is live'."}
+{"completion": "HEARTH-861", "prompt": "Extract the ticket id from: 'Design signed off in HEARTH-861'."}
+{"completion": "WEB-898", "prompt": "Extract the ticket id from: 'Fixed in WEB-898, see PR #124'."}
+{"completion": "API-935", "prompt": "Extract the ticket id from: 'Closes API-935 after review'."}
+{"completion": "OPS-972", "prompt": "Extract the ticket id from: 'Blocked by OPS-972 until infra lands'."}
+{"completion": "PLAT-19", "prompt": "Extract the ticket id from: 'See PLAT-19 for the migration plan'."}
+{"completion": "AUTH-56", "prompt": "Extract the ticket id from: 'Reverted AUTH-56 due to a regression'."}
+{"completion": "BILL-93", "prompt": "Extract the ticket id from: 'BILL-93 shipped in today's release'."}
+{"completion": "PROJ-130", "prompt": "Extract the ticket id from: 'Follow-up tracked in PROJ-130'."}
+{"completion": "CORE-167", "prompt": "Extract the ticket id from: 'Root cause documented in CORE-167'."}
+{"completion": "DATA-204", "prompt": "Extract the ticket id from: 'Merged after CI green: DATA-204'."}
+{"completion": "HEARTH-241", "prompt": "Extract the ticket id from: 'Duplicate of HEARTH-241, closing'."}
+{"completion": "WEB-278", "prompt": "Extract the ticket id from: 'Hotfix for WEB-278 is live'."}
+{"completion": "API-315", "prompt": "Extract the ticket id from: 'Design signed off in API-315'."}
+{"completion": "OPS-352", "prompt": "Extract the ticket id from: 'Fixed in OPS-352, see PR #136'."}
+{"completion": "PLAT-389", "prompt": "Extract the ticket id from: 'Closes PLAT-389 after review'."}
+{"completion": "AUTH-426", "prompt": "Extract the ticket id from: 'Blocked by AUTH-426 until infra lands'."}
+{"completion": "BILL-463", "prompt": "Extract the ticket id from: 'See BILL-463 for the migration plan'."}
+{"completion": "PROJ-500", "prompt": "Extract the ticket id from: 'Reverted PROJ-500 due to a regression'."}
+{"completion": "CORE-537", "prompt": "Extract the ticket id from: 'CORE-537 shipped in today's release'."}
+{"completion": "DATA-574", "prompt": "Extract the ticket id from: 'Follow-up tracked in DATA-574'."}
+{"completion": "HEARTH-611", "prompt": "Extract the ticket id from: 'Root cause documented in HEARTH-611'."}
+{"completion": "WEB-648", "prompt": "Extract the ticket id from: 'Merged after CI green: WEB-648'."}
+{"completion": "API-685", "prompt": "Extract the ticket id from: 'Duplicate of API-685, closing'."}
+{"completion": "OPS-722", "prompt": "Extract the ticket id from: 'Hotfix for OPS-722 is live'."}
+{"completion": "PLAT-759", "prompt": "Extract the ticket id from: 'Design signed off in PLAT-759'."}

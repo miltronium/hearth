@@ -1,0 +1,5 @@
+{"expected": "QX-7", "prompt": "The write-ahead log partition ran out of space."}
+{"expected": "QX-2", "prompt": "Requests to the internal DNS resolver are timing out."}
+{"expected": "QX-9", "prompt": "SAML login fails with a signature validation error."}
+{"expected": "QX-4", "prompt": "The usage report shows charges for a cancelled plan."}
+{"expected": "QX-1", "prompt": "The nav menu overlaps the content on small screens."}
