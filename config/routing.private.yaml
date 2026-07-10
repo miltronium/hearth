@@ -1,0 +1,27 @@
+# HEARTH PRIVATE routing — a NO-EGRESS profile for confidential work.
+#
+# The privacy guarantee, expressed as data: EVERY task class runs `local` and escalates
+# `never`, and there are ZERO remotes defined — so the router has nowhere to send a task
+# even if a request explicitly asks to escalate. Combined with a loopback bind and offline
+# model loading (see scripts/hearth_private.sh), nothing a client sends to HEARTH can leave
+# this machine via the router. See docs/PRIVACY.md.
+#
+# Point HEARTH at this file with:  HEARTH_ROUTING_YAML=config/routing.private.yaml
+# (scripts/hearth_private.sh does this for you and verifies the posture before serving.)
+
+defaults:
+  local_model: auto
+  remote: none                     # names a remote that does not exist -> remote_for() == None
+  remote_budget_tokens_per_day: 0  # no remote budget at all
+
+classes:
+  summarize: { backend: local, escalate: never }
+  extract:   { backend: local, escalate: never }
+  classify:  { backend: local, escalate: never }
+  rank:      { backend: local, escalate: never }
+  draft:     { backend: local, escalate: never }
+  code:      { backend: local, escalate: never }
+  reason:    { backend: local, escalate: never }   # local (the default profile sends this remote)
+  chat:      { backend: local, escalate: never }
+
+remotes: {}   # no escalation targets exist — the router cannot egress a task
