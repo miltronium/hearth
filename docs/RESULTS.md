@@ -289,8 +289,22 @@ candidate eval went 0.0 → 1.0 and live serving returns clean `QX-2`. The **str
 was hardened the same way (`_clean_stream` stops at the first complete marker and never
 leaks one split across chunk boundaries) and **verified live** — a streamed `classify`
 request through the promoted adapter assembles to `QX-2` with no `<|im_end|>` in the SSE
-deltas. Both are genuine correctness fixes (not run-passing hacks), isolated in dedicated
-commits, with offline tests; suite stays green (now 202 passed, 1 skipped).
+deltas.
+
+**Finding 2b — the real root cause (fixed at the generation layer).** Digging into *why* the
+tuned model rambled: it does **not** emit the string form of the terminator — it emits the
+real special token `<|im_end|>` (id **151645**, the tokenizer's `eos_token`) after the answer.
+But mlx-lm's `generate` stops only on `tokenizer.eos_token_ids`, which for Qwen is
+`{151643}` (`<|endoftext|>`) — **151645 is not in it**. So generation doesn't stop at
+end-of-turn; it decodes `<|im_end|>` to text and runs on. The base model gets lucky (it soon
+emits `<|endoftext|>` and stops); a tuned adapter loops `<|im_end|>\n!` to `max_tokens`.
+`MLXProvider._ensure_stop_tokens` now adds `eos_token_id` to the stop set at load time, so
+generation **stops cleanly at end-of-turn** — verified live: the same adapter request returns
+`'QX-2'` in **4 completion tokens** (was running to the full `max_tokens`), a correctness
+*and* token/latency win. The `_strip_terminators`/`_clean_stream` fixes remain as a
+defense-in-depth safety net for other decoders. All three are genuine fixes (not run-passing
+hacks), isolated in dedicated commits, with offline tests; suite stays green (now 211 passed,
+1 skipped).
 
 ---
 
@@ -307,10 +321,10 @@ commits, with offline tests; suite stays green (now 202 passed, 1 skipped).
   lives in the real runner (not `LoRAConfig.validate()`) precisely so the existing 2-record
   fake-runner tests stay valid.
 - **Optional follow-ups discovered:**
-  - Add a one-command `hearth eval` (RUNBOOK step 4 notes it doesn't exist; I used
-    `scripts/eval_candidate.py` as the stand-in).
-  - Consider training short-answer adapters in a way that teaches EOS (or post-processing at
-    the trainer), so adapters don't rely on the serving-layer strip.
+  - `hearth eval` now exists (RUNBOOK step 4); `scripts/eval_candidate.py` was the stand-in.
+  - The "teach EOS at train time" idea turned out unnecessary: the investigation found the
+    ramble is an *inference* stop-token gap, not a training defect (Finding 2b). Fixed by
+    `MLXProvider._ensure_stop_tokens`; no training-recipe change needed.
   - A live escalation demo now exists (`scripts/frontier_stub.py` +
     `config/routing.escalation-demo.yaml`) proving the path with a local stub; a *real*
     frontier escalation still needs `[remote]` + an Anthropic key (or a real endpoint).

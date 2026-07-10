@@ -64,8 +64,33 @@ class MLXProvider:
 
         kwargs = {"adapter_path": adapter} if adapter else {}
         loaded = load(self.model_id, **kwargs)
+        self._ensure_stop_tokens(loaded[1])
         self._cache[key] = loaded
         return loaded
+
+    @staticmethod
+    def _ensure_stop_tokens(tokenizer) -> None:
+        """Make generation stop at the chat-template turn terminator.
+
+        Root cause of the LoRA "ramble" (see ``_clean_stream``): mlx-lm's ``generate`` stops
+        only on ``tokenizer.eos_token_ids`` — for Qwen that's ``<|endoftext|>`` (151643) — but
+        the chat template ends an assistant turn with a *different* token, ``<|im_end|>``
+        (151645, the tokenizer's ``eos_token``). A model that emits the turn terminator but not
+        the base EOS therefore never stops: it decodes ``<|im_end|>`` to the literal string and
+        runs to ``max_tokens``. Base models usually emit ``<|endoftext|>`` soon after and get
+        lucky; a tuned adapter can loop the turn terminator forever. Adding ``eos_token_id`` to
+        the stop set fixes it at the source — generation ends cleanly at end-of-turn (and stops
+        burning tokens on the ramble). Best-effort: a tokenizer without a mutable
+        ``eos_token_ids`` set is left as-is (the ``_strip_terminators`` safety net still runs).
+        """
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        stop = getattr(tokenizer, "eos_token_ids", None)
+        if eos_id is None or stop is None:
+            return
+        try:
+            stop.add(eos_id)
+        except AttributeError:
+            pass
 
     def _ensure_loaded(self, adapter: str | None = None) -> None:
         """Ensure the variant for ``adapter`` (or the provider default) is the active one."""
