@@ -1,6 +1,8 @@
 # HEARTH — Roadmap
 
-**Status:** Draft. Companion to [PROPOSAL.md](PROPOSAL.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+**Status:** Phases 0–7 all shipped and green (175 Python tests + Swift package). The planned
+build is complete; remaining work is follow-ups and live consumer wiring (see end of file).
+Companion to [PROPOSAL.md](PROPOSAL.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Phases are ordered so that **each one ships something usable on its own**. You get
 token savings at the end of Phase 1; everything after compounds it. Don't build ahead —
@@ -52,6 +54,13 @@ against the real 7B weights.
 **Acceptance:** point an OpenAI SDK at HEARTH and run summarize/extract/draft tasks with no
 frontier calls. `hearth run "summarize" --file X` works.
 
+**Result (done).** Full OpenAI-compat gateway: `/v1/chat/completions` (streaming + non-stream),
+`/v1/embeddings`, `/v1/models`. `MLXProvider` productionized with streaming, an adapter slot, and
+`footprint()`. Registry backed by `config/models.yaml` (pinned + checksummed) with
+`hearth models list|pull|rm`. `hearth run` one-shot CLI (`--file`, `--intent`). Local bearer-token
+auth with constant-time comparison (`secrets.compare_digest`). Offline-safe via the `echo` backend;
+real inference behind `HEARTH_BACKEND=mlx`.
+
 ---
 
 ## Phase 2 — Router/policy + escalation + budget + observability → **Smart escalation + proof (G2, G8)**
@@ -67,6 +76,15 @@ frontier calls. `hearth run "summarize" --file X` works.
 
 **Acceptance:** mixed workload routes correctly; escalations are logged with reasons;
 `hearth stats` shows a credible weekly token-savings number and escalation rate.
+
+**Result (done).** Task classifier (`router/classify.py`) combining rules + an `intent` hint
+short-circuit. Policy engine driven by `config/routing.yaml` (`router/policy.py`) with a
+`RemoteProvider` (`providers/remote.py`) for escalation (endpoint/auth via config) and confidence
+gating for escalation-eligible classes. Token-budget accountant (`observability/budget.py`,
+per-day remote budget; prefers local when scarce). Observability: per-request records +
+`observability/metrics.py`, `hearth stats` rollups, and `/v1/hearth/admin/metrics` reporting
+estimated frontier-tokens-saved. Router wired end-to-end through the gateway
+(`test_router_gateway.py`).
 
 ---
 
@@ -130,6 +148,13 @@ base model + `HF_HUB_OFFLINE=1`.
 
 **Acceptance:** CAMBOT offloads a real task to HEARTH; Claude Code uses the HEARTH MCP tool
 to summarize/extract locally; conformance suite is green without CAMBOT.
+
+**Result (done).** Swift package client (`swift/Sources/Hearth/HearthClient.swift`, async +
+streaming) talking to HEARTH over HTTP. HEARTH MCP server (`hearth mcp`, stdio —
+`src/hearth/mcp/`) exposing offload tools so Claude Code can delegate subtasks to the local
+model. Python convenience client (`src/hearth/client.py`). Client-agnostic conformance suite
+(`tests/test_conformance.py`) green with no CAMBOT present. Live CAMBOT wiring is left to the
+consumer; the surface it targets is shipped and tested.
 
 ---
 
@@ -198,3 +223,19 @@ real models or conversions in tests). 138 → 175 Python tests, all green; echo 
 - **5 can start partially after Phase 1** (a basic Swift/HTTP client) but the MCP server and
   conformance suite belong after routing exists.
 - Keep the walking skeleton green at every phase boundary.
+
+---
+
+## Remaining follow-ups (post-Phase 7)
+
+The phased build is done. What's left is deferred hardening and live wiring, none of it blocking:
+
+- **Live consumer wiring.** Land CAMBOT → HEARTH and the Claude Code MCP integration on a real
+  workload, then read `hearth stats` to prove the token-savings thesis (G2/G8) with real numbers.
+- **Real training run.** The LoRA path (Phase 4) is exercised only with fakes. Validate it
+  end-to-end: `uv sync --extra mlx` + a cached base model + `HF_HUB_OFFLINE=1`, train an adapter,
+  and confirm the eval gate + promotion lifecycle on real weights.
+- **`VectorStore` backend.** Swap the brute-force cosine `SQLiteVectorStore` (Phase 3) for a
+  `sqlite-vec`/LanceDB backend when RAG corpus size warrants it.
+- **Core ML export.** Phase 6 left a marked extension point for a Core ML / ANE path; embedded
+  mode is FoundationModels-only in v1.
