@@ -256,9 +256,12 @@ would serve garbage to real consumers, and exact-match eval scored a correct-but
 answer 0.0. **Fix (dedicated commit):** truncate at the **first** terminator marker instead
 of only a trailing one — the docstring already anticipated this failure mode ("some chat
 templates decode the terminator into the output string instead of stopping"). Result:
-candidate eval went 0.0 → 1.0 and live serving returns clean `QX-2`. Suite stays green
-(190 passed, 1 skipped). This is the only shipped-source change; it's isolated in its own
-commit and is a genuine correctness fix, not a run-passing hack.
+candidate eval went 0.0 → 1.0 and live serving returns clean `QX-2`. The **streaming path**
+was hardened the same way (`_clean_stream` stops at the first complete marker and never
+leaks one split across chunk boundaries) and **verified live** — a streamed `classify`
+request through the promoted adapter assembles to `QX-2` with no `<|im_end|>` in the SSE
+deltas. Both are genuine correctness fixes (not run-passing hacks), isolated in dedicated
+commits, with offline tests; suite stays green (now 202 passed, 1 skipped).
 
 ---
 
@@ -277,9 +280,6 @@ commit and is a genuine correctness fix, not a run-passing hack.
 - **Optional follow-ups discovered:**
   - Add a one-command `hearth eval` (RUNBOOK step 4 notes it doesn't exist; I used
     `scripts/eval_candidate.py` as the stand-in).
-  - `stream()` still yields intermediate chunks before the terminator fix applies on the
-    final flush; if a tuned model emits the literal marker mid-stream, streaming clients can
-    still see it. Non-streaming `generate()` is fully fixed. Worth a follow-up for the SSE path.
   - Consider training short-answer adapters in a way that teaches EOS (or post-processing at
     the trainer), so adapters don't rely on the serving-layer strip.
   - A live escalation demo (non-zero `escalation_rate`) needs `[remote]` + an Anthropic key.
