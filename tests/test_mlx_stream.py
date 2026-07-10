@@ -65,3 +65,30 @@ def test_stream_does_not_leak_marker_split_across_chunks():
 
 def test_stream_empty_when_marker_leads():
     assert _stream(["<|im_end|>", " junk"]) == ""
+
+
+# -- _ensure_stop_tokens (root-cause fix: stop at the chat-template terminator) --------------
+
+class _FakeTok:
+    def __init__(self, eos_token_id, eos_token_ids):
+        self.eos_token_id = eos_token_id
+        self.eos_token_ids = eos_token_ids
+
+
+def test_ensure_stop_tokens_adds_chat_terminator():
+    # Qwen shape: generate stops on {151643} but the turn ends with 151645 (eos_token_id).
+    tok = _FakeTok(eos_token_id=151645, eos_token_ids={151643})
+    MLXProvider._ensure_stop_tokens(tok)
+    assert tok.eos_token_ids == {151643, 151645}
+
+
+def test_ensure_stop_tokens_idempotent():
+    tok = _FakeTok(eos_token_id=151645, eos_token_ids={151643, 151645})
+    MLXProvider._ensure_stop_tokens(tok)
+    assert tok.eos_token_ids == {151643, 151645}
+
+
+def test_ensure_stop_tokens_tolerates_missing_set():
+    # No mutable stop set / no eos id -> best-effort no-op, never raises.
+    MLXProvider._ensure_stop_tokens(_FakeTok(eos_token_id=None, eos_token_ids=None))
+    MLXProvider._ensure_stop_tokens(_FakeTok(eos_token_id=5, eos_token_ids=None))
