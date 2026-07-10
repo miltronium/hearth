@@ -10,13 +10,12 @@
 //
 // GENERIC by design: no CAMBOT (or any consumer) types appear here (ADR-001).
 //
-// SCOPE (honest current state): construction, availability gating, and loading an `MLModel`
-// from a URL are real and fully wired. A complete LLM generation loop (tokenizer + KV-cache +
-// sampling) is a large, model-specific pipeline and is intentionally NOT implemented here —
-// the exported `.mlpackage` does not yet bundle a tokenizer contract. Until that is wired, the
-// generate paths throw `HearthError.onDeviceUnavailable(...)` explaining the state, exactly as
-// the extension-point comment describes. Everything that CAN be real (type, gating, init, model
-// load, protocol conformance) is real and compiles. See swift/OFFLINE.md.
+// SCOPE: construction, availability gating, model load, and the offline generation loop are all
+// wired (ADR-011). Generation requires (a) a sidecar next to the model — `<stem>.hearth-coreml.json`
+// + tokenizer files, written by `hearth models export-coreml` — and (b) macOS 15 / iOS 18 for the
+// stateful KV-cache path. When either is missing, `generate` throws `onDeviceUnavailable(...)` with
+// the reason so callers fall back to `HearthClient` (daemon) or `FoundationModelsProvider`. The
+// decode loop itself lives in CoreMLGeneration.swift. See swift/OFFLINE.md.
 
 import Foundation
 import Hearth
@@ -51,12 +50,16 @@ private final class LoadedModel: @unchecked Sendable {
 ///   Model loading, availability, and gating are fully real.
 @available(macOS 13.0, iOS 16.0, visionOS 1.0, *)
 public struct CoreMLProvider: HearthInference {
-    /// The loaded compiled Core ML model, in a `Sendable` box. Held so a future generation
-    /// loop can invoke it.
+    /// The loaded compiled Core ML model, in a `Sendable` box. Held so the generation loop can
+    /// invoke it (see CoreMLGeneration.swift).
     private let loaded: LoadedModel
 
     /// The URL the model was loaded from (for diagnostics).
     public let modelURL: URL
+
+    /// The generation contract located next to the model (manifest + tokenizer files), or `nil`
+    /// when no sidecar shipped — in which case generation throws `onDeviceUnavailable`.
+    let sidecar: CoreMLSidecar?
 
     /// Load a compiled Core ML model from `modelURL`, verifying it can be instantiated *now*.
     ///
@@ -90,6 +93,10 @@ public struct CoreMLProvider: HearthInference {
                 "failed to load Core ML model at \(modelURL.path): \(error)"
             )
         }
+
+        // Best-effort: locate the generation contract. Absent/incompatible ⇒ generation throws
+        // a clear reason, but construction still succeeds (the model loaded).
+        self.sidecar = CoreMLSidecar.locate(modelURL: modelURL)
     }
 
     /// Whether a Core ML provider *could* be constructed on this build/platform. Core ML is
@@ -107,24 +114,54 @@ public struct CoreMLProvider: HearthInference {
         messages: [ChatMessage],
         options: InferenceOptions = .default
     ) async throws -> String {
-        throw HearthError.onDeviceUnavailable(Self.noGenerationLoopReason)
+        guard let sidecar else { throw HearthError.onDeviceUnavailable(Self.noSidecarReason) }
+        guard #available(macOS 15.0, iOS 18.0, visionOS 2.0, *) else {
+            throw HearthError.onDeviceUnavailable(Self.needsModernOSReason)
+        }
+        return try await runGeneration(
+            messages: messages, options: options, model: loaded.model, sidecar: sidecar, stream: nil
+        )
     }
 
     public func generateStream(
         messages: [ChatMessage],
         options: InferenceOptions = .default
     ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream {
-            $0.finish(throwing: HearthError.onDeviceUnavailable(Self.noGenerationLoopReason))
+        let model = loaded.model
+        let sidecar = self.sidecar
+        return AsyncThrowingStream { continuation in
+            guard let sidecar else {
+                continuation.finish(throwing: HearthError.onDeviceUnavailable(Self.noSidecarReason))
+                return
+            }
+            guard #available(macOS 15.0, iOS 18.0, visionOS 2.0, *) else {
+                continuation.finish(throwing: HearthError.onDeviceUnavailable(Self.needsModernOSReason))
+                return
+            }
+            let task = Task {
+                do {
+                    _ = try await runGeneration(
+                        messages: messages, options: options, model: model, sidecar: sidecar
+                    ) { delta in continuation.yield(delta) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
     // MARK: Internals
 
-    static let noGenerationLoopReason =
-        "Core ML model loaded, but the token-generation loop (tokenizer + KV-cache + sampling) " +
-        "is not yet wired for this exported model; use HearthClient (daemon) or " +
-        "FoundationModelsProvider for on-device generation. See swift/OFFLINE.md."
+    static let noSidecarReason =
+        "Core ML model loaded, but no generation sidecar (`<stem>.hearth-coreml.json` + tokenizer) " +
+        "was found next to it; re-export with `hearth models export-coreml`. Use HearthClient " +
+        "(daemon) or FoundationModelsProvider meanwhile. See swift/OFFLINE.md."
+
+    static let needsModernOSReason =
+        "the offline Core ML stateful generation path needs macOS 15 / iOS 18; use HearthClient " +
+        "(daemon) or FoundationModelsProvider on older systems. See swift/OFFLINE.md."
 
     /// Resolve a compiled-model URL: compile a `.mlpackage`/`.mlmodel` on the fly, or pass a
     /// `.mlmodelc` through unchanged.

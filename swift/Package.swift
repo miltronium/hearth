@@ -44,7 +44,8 @@ let package = Package(
             name: "HearthCoreML",
             dependencies: [
                 "Hearth",
-                .product(name: "Transformers", package: "swift-transformers")
+                .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Hub", package: "swift-transformers")
             ]
         ),
         .testTarget(name: "HearthTests", dependencies: ["Hearth"]),
