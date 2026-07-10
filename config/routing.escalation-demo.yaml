@@ -1,0 +1,20 @@
+# Escalation-demo routing: default remote points at a LOCAL OpenAI-compatible stub
+# (scripts/frontier_stub.py on 127.0.0.1:8099) so the escalation path runs with no external call.
+defaults:
+  local_model: auto
+  remote: default
+  remote_budget_tokens_per_day: 200000
+classes:
+  summarize: { backend: local,  escalate: never }
+  extract:   { backend: local,  escalate: never }
+  classify:  { backend: local,  escalate: never }
+  rank:      { backend: local,  escalate: never }
+  draft:     { backend: local,  escalate: on_low_confidence, threshold: 0.6 }
+  code:      { backend: local,  escalate: on_low_confidence, threshold: 0.7 }
+  reason:    { backend: remote, escalate: always }
+  chat:      { backend: local,  escalate: on_low_confidence, threshold: 0.65 }
+remotes:
+  default:
+    protocol: openai
+    model: frontier-stub
+    base_url: http://127.0.0.1:8099/v1
