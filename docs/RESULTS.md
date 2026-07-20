@@ -429,6 +429,23 @@ Loading and calling `predict()` on the saved stateful model SIGBUSes:
   torch 2.7.0 (the coremltools-blessed version) — the predict SIGBUS is identical**, so the torch
   version is ruled out; the blocker is the CoreML runtime (macOS build + coremltools 9.0) itself.
 
+**Minimal repro + bisection** (`scripts/coreml_stateful_repro.py` — pure torch + coremltools,
+random weights, no HF download): a tiny stateful attention block reproduces the crash, and bisecting
+the dims pins the trigger to **tensor size, not weights or the op mix**:
+
+| Config (2 layers, random weights) | `predict()` |
+| --- | --- |
+| trivial control (increment a state) | ✅ OK |
+| large `VOCAB` (151936) only, rest tiny | ✅ OK — embedding size is not it |
+| large `STATE_LEN` (KV-cache seq) only, rest tiny | ⛔ SIGBUS |
+| large `HIDDEN`/heads/intermediate only, tiny rest | ⛔ SIGBUS |
+| `STATE_LEN` sweep, all else tiny | **96 → OK, 128 → SIGBUS** |
+
+The 96→128 boundary looks like an ANE-tiling / MIL threshold. This is the artifact to attach to a
+coremltools issue: a stateful fp16 attention model whose KV-cache sequence dim (or hidden width)
+crosses ~128 fails to build an execution plan, while the identical model just under the threshold
+runs — so it is a runtime/compiler limit, not a graph-logic error.
+
 ### The recipe (what folds into `coreml.py` once the runtime cooperates)
 
 Getting from "converts" to "would-run" took four design fixes, each recorded:
