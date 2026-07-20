@@ -222,3 +222,22 @@ model already validated in RESULTS), manifest-driven so other templates extend c
 tokenizer. Or Apple ships a higher-level on-device LLM generation API that subsumes the
 hand-built stateful loop → adopt it and keep the `HearthInference` seam. Or the two-product
 split proves unnecessary (core consumers all want Core ML anyway) → collapse back to one target.
+
+**Update (2026-07-20) — Approach B recipe validated, runtime blocker isolated, contract revised.**
+The stateful export was taken from "structurally targeted" to a **math-validated recipe** (greedy
+parity vs. stock PyTorch; `torch.export` + coremltools `States` convert & save all succeed) —
+reference: `scripts/coreml_stateful_reference.py`, full writeup in RESULTS.md → Task C-2. Two
+decisions changed:
+- **The winning contract is fully static** (`inputIds [1,1]`, fixed-width `causalMask`, explicit
+  `writePos`; one-hot **blend** write; **fp16** states — coremltools mandates fp16 states). A
+  dynamic-length cache read / ranged shapes fail to build a state execution plan (`-14`).
+- **Point 1 of this ADR is revised:** decode is *single-token* (not swift-transformers'
+  multi-token prefill), and point 2's assumption that Approach B needs **no Swift change** does
+  **not** hold — this static contract needs a small custom decode loop in `CoreMLGeneration.swift`
+  (swift-transformers stays for tokenization only). Its `LanguageModelWithStatefulKVCache` mask
+  handling is unreliable anyway.
+- **Open blocker:** CoreML `predict()` on the saved stateful fp16 real-transformer model SIGBUSes
+  (`-14` / `ANECCompile FAILED`) on this stack (macOS 26 *Internal* + torch 2.7.1, which coremltools
+  flags untested). Minimal synthetic stateful models run fine. Approach A stays the shipped default;
+  Approach B is not landed until `predict` runs on a release build (pin `torch==2.7.0`) or a
+  coremltools fix.

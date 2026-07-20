@@ -394,6 +394,85 @@ so the 7B run (and future models) doesn't rediscover them:
 
 ---
 
+## Task C-2 — Stateful KV-cache export (Approach B): recipe validated, runtime blocker isolated (2026-07-20)
+
+**Goal (ADR-011 follow-up):** replace Approach A's O(n²) padded re-prefill with a **stateful**
+Core ML model (coremltools `States`, O(1)/token). Done on the same M3 Pro / macOS 26.4 (Internal)
+/ coremltools 9.0 / transformers 4.57.6 / **torch 2.7.1** as Task C. Reference recipe (runs the
+proven parts by default): `scripts/coreml_stateful_reference.py`.
+
+### What's proven ✅
+
+- **Greedy parity (math correct).** A self-contained stateful Qwen2 forward (reusing the HF weight
+  modules) reproduces the stock PyTorch model **token-for-token**:
+  `"The capital of France is"` → `" Paris. It is the largest city in Europe and the third"`
+  (stateful loop == full-recompute reference). The KV-cache read/write is exact.
+- **`torch.export` + lowering.** The stateful graph exports and `run_decompositions({})` lowers it.
+- **coremltools convert + save.** A stateful `.mlpackage` with `keyCache`/`valueCache` **States**
+  is produced (all MIL pipelines complete; model saves).
+
+### The blocker ⛔ — CoreML *runtime* crash (not a logic error)
+
+Loading and calling `predict()` on the saved stateful model SIGBUSes:
+`"Failed to build the model execution plan … error code: -14"` (+ `ANECCompile() FAILED`), on
+**both** `CPU_ONLY` and `CPU_AND_NE`. Isolation done to pin the cause:
+
+- Minimal synthetic stateful models — an incrementing counter, a one-hot **blend** write, and a
+  **per-layer slice write** into a 5-D state — all `make_state()`/`predict()` **fine** on this
+  exact stack. So states, blend-writes, and per-layer state slicing are individually sound.
+- The crash reproduces with the model **truncated to 2 layers** (so it is not scale) and with
+  **RoPE precomputed and passed as inputs** (so it is not `rotary_emb`). It is the real-transformer
+  ops + **fp16 states** combination in the CoreML runtime. (coremltools **mandates fp16 states** —
+  `"State only support fp16 dtype"` — so an fp32 fallback isn't available.)
+- Strongly suspected environmental: macOS 26 here is a `ReleaseType: Internal` build, and
+  coremltools 9.0 explicitly flags torch 2.7.1 as untested (2.7.0 is its ceiling).
+
+### The recipe (what folds into `coreml.py` once the runtime cooperates)
+
+Getting from "converts" to "would-run" took four design fixes, each recorded:
+
+1. **Own the attention core.** transformers 4.57's `Cache` base now demands
+   `layers`/`layer_class_to_replicate` and has a churny internal layout; HF's attention also builds
+   `cache_kwargs` itself (so it won't forward a write-position). Re-implementing the Qwen2 attention
+   core (reusing the HF q/k/v/o + RMSNorm + MLP + RoPE modules) puts the write position under our
+   control and dodges both `torch.export`'s ban on **data-dependent slice bounds** and on
+   **module-attribute mutation** during trace.
+2. **Fully static shapes.** `inputIds [1,1]`, `causalMask [1,1,1,STATE_LEN]` (fixed), `writePos
+   int32[1]`; read the **full** fixed cache and let the mask gate valid slots. A *dynamic-length*
+   `keyCache[:, :, :end, :]` read was the first `-14` trigger — the state execution plan needs
+   static intermediates. (Two separate `RangeDim`s for a shared dim also mis-split into
+   `"recklessly broadcast {is,is}"` symbols.)
+3. **One-hot blend write.** coremltools' EXIR frontend supports **no** `index_copy`/scatter-into-
+   state (`Unsupported fx node index_copy`); writing the new token's KV at `writePos` via
+   `cache*(1-oh) + kv*oh` is pure elementwise and converts cleanly.
+4. **Freeze params + fp16 states.** `aot_export` bans mutating a grad-requiring graph input, so all
+   params are `requires_grad_(False)`; states must be fp16.
+
+### Contract divergence (matters for the Swift side)
+
+This static (`writePos` + full-width mask) contract does **not** match swift-transformers'
+`LanguageModelWithStatefulKVCache`, which sends ranged `inputIds` + a `[1,1,1,tokenCount+1]` mask
+and no `writePos` (and whose stateful mask handling looks unreliable — query dim 1 during a
+multi-token prefill). So ADR-011's assumption that Approach B needs **no Swift change** does not
+hold for this recipe: driving it needs a small custom decode loop in `CoreMLGeneration.swift`
+(swift-transformers is still used for tokenization). The dynamic-shape contract that *would* match
+swift-transformers is also what fails to build an execution plan here, so the static contract is
+the right target regardless.
+
+### Decision / next steps
+
+- **Not shipped to production.** `src/hearth/coreml.py` keeps the validated **Approach A** as the
+  default export; a `predict`-crashing path is not landed behind a user flag. The recipe lives in
+  `scripts/coreml_stateful_reference.py` (parity + export + convert run by default; `--predict`
+  attempts the crashing step).
+- **To finish Approach B:** re-test the `predict` step on a **release** macOS build with a
+  coremltools-blessed torch (pin `torch==2.7.0`); if it still `-14`s, file a coremltools issue with
+  the minimal repro (real ops + fp16 states). Then add a small stateful decode loop to
+  `CoreMLGeneration.swift` for the `writePos` contract and fold the recipe into `_coreml_export_runner`
+  behind `--stateful`.
+
+---
+
 ## For the cloud instance (next steps)
 
 - **Flip both ⏳ items to ✅ in `ROADMAP.md`** ("Remaining follow-ups"):

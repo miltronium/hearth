@@ -378,12 +378,15 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     # ideal for HEARTH's short cheap tasks (classify/summarize/commit-msg). This is the path
     # validated end-to-end on real weights (docs/HANDOFF.md → Task C).
     #
-    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization) targets the same Swift consumer
-    # via `LanguageModelWithStatefulKVCache` (states `keyCache`/`valueCache`, ranged `inputIds`).
-    # It needs Apple's custom slice-update cache + attention recipe rather than HF's internal
-    # `Cache` (whose layout churns across transformers versions), and is tracked as the follow-up
-    # in RESULTS.md → Task C. The Swift side already auto-selects stateful vs. base from the model's
-    # state descriptions, so upgrading the export later needs no Swift change.
+    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization): now a **math-validated recipe
+    # with an isolated runtime blocker** — reference `scripts/coreml_stateful_reference.py`, findings
+    # in RESULTS.md → Task C-2. The winning contract is fully static (single-token `inputIds`,
+    # fixed-width `causalMask`, explicit `writePos`; one-hot blend write; fp16 `keyCache`/`valueCache`
+    # states) — NOT swift-transformers' ranged contract, so it needs a small custom Swift decode loop
+    # (revising the "no Swift change" note below). Greedy parity + torch.export + coremltools States
+    # convert/save all pass, but CoreML `predict()` SIGBUSes (`-14`/`ANECCompile FAILED`) on the
+    # current stack (macOS 26 Internal + torch 2.7.1, coremltools-untested). Not landed here until
+    # `predict` runs on a release build (pin torch==2.7.0) or a coremltools fix; Approach A ships.
     seq_len = config.max_seq_len
     is_stateful = False
 

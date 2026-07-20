@@ -246,9 +246,13 @@ full evidence in [RESULTS.md](RESULTS.md).
   sky?"` → `Blue` on the ANE, greedy-matching the source PyTorch model (fp16 precision divergence
   only). The dependency is quarantined in an opt-in `HearthCoreML` product so the core `Hearth`
   stays zero-dep / macOS 13. **Approach A (non-stateful padded-prefill) is the shipped/validated
-  path; the stateful KV-cache export (Approach B, O(1)/token) is the documented follow-up** — the
-  Swift side already auto-selects it, so it needs no Swift change. Full evidence + the three
-  version-compat fixes: [RESULTS.md](RESULTS.md) → Task C.
+  path.** Approach B (stateful KV-cache, O(1)/token) is now a **math-validated recipe with an
+  isolated runtime blocker** (2026-07-20): greedy parity + `torch.export` + coremltools `States`
+  convert/save all succeed, but CoreML `predict()` on the saved fp16 stateful model SIGBUSes
+  (`-14`/`ANECCompile FAILED`) on this stack (macOS 26 *Internal* + torch 2.7.1, coremltools-untested).
+  Recipe: `scripts/coreml_stateful_reference.py`; full findings + next steps: [RESULTS.md](RESULTS.md)
+  → Task C-2. (The winning contract is single-token + fixed-width mask + `writePos`, so it needs a
+  small custom Swift decode loop — revising ADR-011's "no Swift change" assumption.)
 - **Real training run (done — validated on real weights).** `scripts/train_lora_real.sh` +
   `docs/RUNBOOK_training.md` drove a real `hearth train` → eval gate → `hearth adapters promote`
   lifecycle on `Qwen2.5-Coder-7B-4bit` (Apple M3 Pro). The eval gate was exercised **both
