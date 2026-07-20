@@ -237,7 +237,7 @@ decisions changed:
   (swift-transformers stays for tokenization only). Its `LanguageModelWithStatefulKVCache` mask
   handling is unreliable anyway.
 - **Open blocker:** CoreML `predict()` on the saved stateful fp16 real-transformer model SIGBUSes
-  (`-14` / `ANECCompile FAILED`) on this stack (macOS 26 *Internal* + torch 2.7.1, which coremltools
-  flags untested). Minimal synthetic stateful models run fine. Approach A stays the shipped default;
-  Approach B is not landed until `predict` runs on a release build (pin `torch==2.7.0`) or a
-  coremltools fix.
+  (`-14` / `ANECCompile FAILED`) on this stack (macOS 26 *Internal* + coremltools 9.0). Minimal
+  synthetic stateful models run fine, and pinning `torch==2.7.0` (coremltools-blessed) did **not**
+  help — so it's the CoreML runtime, not torch. Approach A stays the shipped default; Approach B is
+  not landed until `predict` runs on a release macOS build or a coremltools fix.

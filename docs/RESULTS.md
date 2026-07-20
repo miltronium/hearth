@@ -425,7 +425,9 @@ Loading and calling `predict()` on the saved stateful model SIGBUSes:
   ops + **fp16 states** combination in the CoreML runtime. (coremltools **mandates fp16 states** —
   `"State only support fp16 dtype"` — so an fp32 fallback isn't available.)
 - Strongly suspected environmental: macOS 26 here is a `ReleaseType: Internal` build, and
-  coremltools 9.0 explicitly flags torch 2.7.1 as untested (2.7.0 is its ceiling).
+  coremltools 9.0 explicitly flags torch 2.7.1 as untested (2.7.0 is its ceiling). **Tested
+  torch 2.7.0 (the coremltools-blessed version) — the predict SIGBUS is identical**, so the torch
+  version is ruled out; the blocker is the CoreML runtime (macOS build + coremltools 9.0) itself.
 
 ### The recipe (what folds into `coreml.py` once the runtime cooperates)
 
@@ -469,7 +471,8 @@ the right target regardless.
   coremltools-blessed torch (pin `torch==2.7.0`); if it still `-14`s, file a coremltools issue with
   the minimal repro (real ops + fp16 states). Then add a small stateful decode loop to
   `CoreMLGeneration.swift` for the `writePos` contract and fold the recipe into `_coreml_export_runner`
-  behind `--stateful`.
+  behind `--stateful`. *(2026-07-20: `torch==2.7.0` alone was tried on this Internal macOS build and
+  did not help — the retest must be on a release OS build, or await a coremltools runtime fix.)*
 
 ---
 

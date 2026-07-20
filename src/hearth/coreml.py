@@ -385,8 +385,9 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     # states) — NOT swift-transformers' ranged contract, so it needs a small custom Swift decode loop
     # (revising the "no Swift change" note below). Greedy parity + torch.export + coremltools States
     # convert/save all pass, but CoreML `predict()` SIGBUSes (`-14`/`ANECCompile FAILED`) on the
-    # current stack (macOS 26 Internal + torch 2.7.1, coremltools-untested). Not landed here until
-    # `predict` runs on a release build (pin torch==2.7.0) or a coremltools fix; Approach A ships.
+    # current stack (macOS 26 Internal + coremltools 9.0; torch==2.7.0 tested, doesn't help — it's
+    # the runtime, not torch). Not landed here until `predict` runs on a release build or a
+    # coremltools fix; Approach A ships.
     seq_len = config.max_seq_len
     is_stateful = False
 

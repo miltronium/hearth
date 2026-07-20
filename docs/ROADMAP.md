@@ -249,7 +249,8 @@ full evidence in [RESULTS.md](RESULTS.md).
   path.** Approach B (stateful KV-cache, O(1)/token) is now a **math-validated recipe with an
   isolated runtime blocker** (2026-07-20): greedy parity + `torch.export` + coremltools `States`
   convert/save all succeed, but CoreML `predict()` on the saved fp16 stateful model SIGBUSes
-  (`-14`/`ANECCompile FAILED`) on this stack (macOS 26 *Internal* + torch 2.7.1, coremltools-untested).
+  (`-14`/`ANECCompile FAILED`) on this stack (macOS 26 *Internal* + coremltools 9.0; `torch==2.7.0`
+  tested, does not help — so it's the runtime, not torch).
   Recipe: `scripts/coreml_stateful_reference.py`; full findings + next steps: [RESULTS.md](RESULTS.md)
   → Task C-2. (The winning contract is single-token + fixed-width mask + `writePos`, so it needs a
   small custom Swift decode loop — revising ADR-011's "no Swift change" assumption.)
