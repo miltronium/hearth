@@ -378,16 +378,17 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     # ideal for HEARTH's short cheap tasks (classify/summarize/commit-msg). This is the path
     # validated end-to-end on real weights (docs/HANDOFF.md → Task C).
     #
-    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization): now a **math-validated recipe
-    # with an isolated runtime blocker** — reference `scripts/coreml_stateful_reference.py`, findings
-    # in RESULTS.md → Task C-2. The winning contract is fully static (single-token `inputIds`,
-    # fixed-width `causalMask`, explicit `writePos`; one-hot blend write; fp16 `keyCache`/`valueCache`
-    # states) — NOT swift-transformers' ranged contract, so it needs a small custom Swift decode loop
-    # (revising the "no Swift change" note below). Greedy parity + torch.export + coremltools States
-    # convert/save all pass, but CoreML `predict()` SIGBUSes (`-14`/`ANECCompile FAILED`) on the
-    # current stack (macOS 26 Internal + coremltools 9.0; torch==2.7.0 tested, doesn't help — it's
-    # the runtime, not torch). Not landed here until `predict` runs on a release build or a
-    # coremltools fix; Approach A ships.
+    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization): **validated end-to-end on CPU**
+    # (2026-07-20) — reference `scripts/coreml_stateful_reference.py`, findings RESULTS.md → Task C-2.
+    # The exported stateful `.mlpackage` runs offline in CoreML and greedy-matches the source model.
+    # Working recipe: per-layer separate fp16 state buffers (`keyCache{i}`/`valueCache{i}`, NOT one
+    # 5-D state sliced per layer — that hard-SIGBUSes), fully static single-token contract
+    # (`inputIds [1,1]`, fixed-width `causalMask`, explicit `writePos`; one-hot blend write), convert
+    # `compute_units=CPU_ONLY` (the ANE compiler can't plan it: `-14`/`ANECCompile FAILED`), and
+    # `compute_precision=FLOAT32` (fp16 compute degenerates the decode). Not yet folded in here: it
+    # needs a small custom Swift decode loop for the `writePos` contract (revises the "no Swift
+    # change" note below) and runs on CPU until the ANE-compiler limitation is fixed upstream.
+    # Approach A ships (it uses the ANE).
     seq_len = config.max_seq_len
     is_stateful = False
 

@@ -223,21 +223,28 @@ tokenizer. Or Apple ships a higher-level on-device LLM generation API that subsu
 hand-built stateful loop → adopt it and keep the `HearthInference` seam. Or the two-product
 split proves unnecessary (core consumers all want Core ML anyway) → collapse back to one target.
 
-**Update (2026-07-20) — Approach B recipe validated, runtime blocker isolated, contract revised.**
-The stateful export was taken from "structurally targeted" to a **math-validated recipe** (greedy
-parity vs. stock PyTorch; `torch.export` + coremltools `States` convert & save all succeed) —
-reference: `scripts/coreml_stateful_reference.py`, full writeup in RESULTS.md → Task C-2. Two
-decisions changed:
-- **The winning contract is fully static** (`inputIds [1,1]`, fixed-width `causalMask`, explicit
-  `writePos`; one-hot **blend** write; **fp16** states — coremltools mandates fp16 states). A
-  dynamic-length cache read / ranged shapes fail to build a state execution plan (`-14`).
-- **Point 1 of this ADR is revised:** decode is *single-token* (not swift-transformers'
-  multi-token prefill), and point 2's assumption that Approach B needs **no Swift change** does
-  **not** hold — this static contract needs a small custom decode loop in `CoreMLGeneration.swift`
-  (swift-transformers stays for tokenization only). Its `LanguageModelWithStatefulKVCache` mask
-  handling is unreliable anyway.
-- **Open blocker:** CoreML `predict()` on the saved stateful fp16 real-transformer model SIGBUSes
-  (`-14` / `ANECCompile FAILED`) on this stack (macOS 26 *Internal* + coremltools 9.0). Minimal
-  synthetic stateful models run fine, and pinning `torch==2.7.0` (coremltools-blessed) did **not**
-  help — so it's the CoreML runtime, not torch. Approach A stays the shipped default; Approach B is
-  not landed until `predict` runs on a release macOS build or a coremltools fix.
+**Update (2026-07-20) — Approach B VALIDATED end-to-end on CPU; contract revised; ANE deferred.**
+The stateful export now runs fully offline in the CoreML runtime and **greedy-matches** the stock
+PyTorch model token-for-token (`Qwen2.5-0.5B`: `"The capital of France is"` → `" Paris. It is the
+largest city in Europe and the third"`). Reference: `scripts/coreml_stateful_reference.py`; full
+writeup RESULTS.md → Task C-2. Three fixes got it from a hard `predict()` SIGBUS to parity, none of
+them OS-related (an earlier "Internal macOS build" guess was wrong — the blocker had a clean size
+threshold and reproduced across torch versions, the signature of a compiler/graph issue):
+- **Per-layer separate state buffers** (`keyCache{i}`/`valueCache{i}`), NOT one 5-D `keyCache[N,…]`
+  sliced per layer. Slicing a 5-D state along the layer dim hard-SIGBUSes CoreML's execution-plan
+  builder above ~128 seq.
+- **Convert `compute_units=CPU_ONLY`.** The `-14` / execution-plan failure is the **ANE compiler**
+  (`ANECCompile FAILED`); CPU-only conversion removes it.
+- **`compute_precision=FLOAT32`** (states stay fp16 — coremltools mandates fp16 states). fp16
+  compute degenerated the decode into repetition; fp32 gives exact parity.
+
+Contract + ADR revisions: the winning contract is **fully static, single-token** (`inputIds [1,1]`,
+fixed-width `causalMask`, explicit `writePos`; one-hot **blend** write) — so ADR point 1 (multi-token
+decode) and point 2's "no Swift change" both no longer hold: driving it needs a small custom decode
+loop in `CoreMLGeneration.swift` (swift-transformers stays for tokenization only).
+
+Remaining (separately-filable, not OS-build): the **ANE compiler** can't plan this stateful fp16
+graph above ~128 seq (repro: `scripts/coreml_stateful_repro.py`), so Approach B runs on **CPU** for
+now (fine for the 0.5B). Approach A stays the shipped default (it uses the ANE); Approach B is the
+CPU O(1)/token upgrade, to be folded into `_coreml_export_runner` behind `--stateful` together with
+the Swift decode loop.

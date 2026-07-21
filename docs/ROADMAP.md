@@ -246,14 +246,16 @@ full evidence in [RESULTS.md](RESULTS.md).
   sky?"` → `Blue` on the ANE, greedy-matching the source PyTorch model (fp16 precision divergence
   only). The dependency is quarantined in an opt-in `HearthCoreML` product so the core `Hearth`
   stays zero-dep / macOS 13. **Approach A (non-stateful padded-prefill) is the shipped/validated
-  path.** Approach B (stateful KV-cache, O(1)/token) is now a **math-validated recipe with an
-  isolated runtime blocker** (2026-07-20): greedy parity + `torch.export` + coremltools `States`
-  convert/save all succeed, but CoreML `predict()` on the saved fp16 stateful model SIGBUSes
-  (`-14`/`ANECCompile FAILED`) on this stack (macOS 26 *Internal* + coremltools 9.0; `torch==2.7.0`
-  tested, does not help — so it's the runtime, not torch).
-  Recipe: `scripts/coreml_stateful_reference.py`; full findings + next steps: [RESULTS.md](RESULTS.md)
-  → Task C-2. (The winning contract is single-token + fixed-width mask + `writePos`, so it needs a
-  small custom Swift decode loop — revising ADR-011's "no Swift change" assumption.)
+  path** (it uses the ANE). Approach B (stateful KV-cache, O(1)/token) is now **validated
+  end-to-end on CPU** (2026-07-20): the exported stateful `.mlpackage` runs offline in the CoreML
+  runtime and greedy-matches the source PyTorch model token-for-token. The fix was three concrete
+  changes (per-layer state buffers; convert `CPU_ONLY`; fp32 compute), **not** an OS-build issue as
+  first guessed. Reference: `scripts/coreml_stateful_reference.py`; findings + repro:
+  [RESULTS.md](RESULTS.md) → Task C-2. Remaining: ANE acceleration (the ANE compiler can't plan the
+  stateful fp16 graph above ~128 seq — a filable coremltools issue, repro
+  `scripts/coreml_stateful_repro.py`) and a small custom Swift decode loop for the `writePos`
+  contract (revising ADR-011's "no Swift change" note), after which B folds into the export behind
+  `--stateful`.
 - **Real training run (done — validated on real weights).** `scripts/train_lora_real.sh` +
   `docs/RUNBOOK_training.md` drove a real `hearth train` → eval gate → `hearth adapters promote`
   lifecycle on `Qwen2.5-Coder-7B-4bit` (Apple M3 Pro). The eval gate was exercised **both

@@ -1,31 +1,26 @@
 """Minimal repro: coremltools 9 stateful fp16 model — convert+save OK, predict SIGBUSes.
 
 Self-contained (pure torch + coremltools, random weights, no downloads). A small **stateful**
-Core ML model with fp16 `keyCache`/`valueCache` States and a transformer-style attention block
-(GQA + softmax + one-hot blend state write + SwiGLU MLP, fully static shapes):
+Core ML model with fp16 `keyCache`/`valueCache` States and a transformer-style attention block,
+using **one 5-D state buffer sliced per layer** (`keyCache[i] = …`), SIGBUSes on predict()
+("Failed to build the model execution plan … error code: -14" / ANECCompile FAILED) once the
+KV-cache seq (or hidden width) crosses ~128, while a trivial state-increment control runs fine.
 
-  * exports via torch.export + run_decompositions,           OK
-  * converts + saves to a .mlpackage with States,            OK
-  * but SIGBUSes on predict() with
-    "Failed to build the model execution plan … error code: -14" (+ ANECCompile FAILED),  CRASH
+RESOLUTION (see docs/RESULTS.md → Task C-2 — the full stateful path is now validated on CPU):
+HEARTH's working export avoids this by (1) using PER-LAYER separate state buffers instead of one
+5-D state sliced per layer, (2) converting `compute_units=CPU_ONLY` (the `-14` is the **ANE
+compiler**), and (3) `compute_precision=FLOAT32`. This file is kept as the minimal artifact for a
+coremltools/Core-ML issue: the two things worth filing are (a) the hard SIGBUS from slicing a 5-D
+fp16 state along its leading dim, and (b) the ANE compiler failing to plan a stateful fp16
+attention graph above ~128 seq (reproduce by flipping the convert to `CPU_AND_NE`).
 
-on both CPU_ONLY and CPU_AND_NE. A trivial stateful control (increment a state) predicts fine on
-the same machine, so state support itself works.
+Bisection (random weights, 2 layers, stacked-5-D state as below): trivial control → OK; large VOCAB
+alone → OK; large STATE_LEN or HIDDEN → SIGBUS; STATE_LEN 96 → OK, 128 → SIGBUS. So it scales with
+stateful-attention tensor size, not weights — an ANE-tiling / MIL threshold, NOT an OS-build issue.
 
-What triggers it (bisected with random weights, 2 layers, on the machine below):
-  * The trivial control model                             → predict OK
-  * Large VOCAB alone (151936), everything else tiny      → predict OK  (embedding size is NOT it)
-  * Large STATE_LEN alone (KV-cache seq dim), tiny rest   → CRASH
-  * Large HIDDEN/heads/intermediate alone, tiny rest      → CRASH
-  * STATE_LEN threshold (all other dims tiny): 96 → OK, 128 → CRASH  (flip STATE_LEN below to check)
-
-So the crash scales with the stateful-attention tensor sizes (KV-cache sequence length and/or
-hidden width), independent of the weights — not a logic error in the model. The 96→128 boundary
-looks like an ANE tiling / MIL threshold.
-
-Observed on: Apple M3 Pro, macOS 26.4.2 (Internal build 25E260), coremltools 9.0, torch 2.7.0 AND
-2.7.1 (both crash identically), Python 3.11, numpy 2.x. coremltools requires fp16 states
-("State only support fp16 dtype"), so an fp32 fallback isn't available.
+Observed on: Apple M3 Pro, macOS 26.4.2 (build 25E260), coremltools 9.0, torch 2.7.0 and 2.7.1
+(both crash identically), Python 3.11. coremltools requires fp16 states ("State only support fp16
+dtype").
 
 Run:  python scripts/coreml_stateful_repro.py
 Expect: "[control] predict OK", "[repro] convert+save OK", then a SIGBUS/-14 crash at
