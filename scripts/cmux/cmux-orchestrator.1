@@ -1,0 +1,52 @@
+.TH CMUX-ORCHESTRATOR 1 "2026-07-21" "HEARTH" "HEARTH cmux integration"
+.SH NAME
+cmux-orchestrator \- triage cmux panes with on-device HEARTH and notify the ones needing attention
+.SH SYNOPSIS
+.B uv run python scripts/cmux/orchestrator.py
+.RB [ --lines
+.IR N ]
+.RB [ --dry-run ]
+.RB [ --socket
+.IR PATH ]
+.SH DESCRIPTION
+Runs one triage sweep over a running cmux: enumerates terminal surfaces, reads each pane's recent
+output, asks a
+.B local
+HEARTH model to classify the pane's state
+.RB ( working ,
+.BR waiting ,
+.BR done ,
+.BR error ),
+and fires
+.B cmux notify
+for the panes that need a human. Lets you run many agents in parallel and be told which one to look at.
+.PP
+Pane text is sent only to the local HEARTH router
+.RB ( build_toolset ,
+escalation off); the cmux client speaks only the local Unix socket. There is no other network path,
+so the sweep stays loopback-only under
+.BR cmux-sealed (1).
+.SH OPTIONS
+.TP
+.BI --lines " N"
+Screen lines per pane to read (default 80).
+.TP
+.B --dry-run
+Triage and print, but send no notifications.
+.TP
+.BI --socket " PATH"
+cmux socket path (default
+.BR $CMUX_SOCKET_PATH ).
+.SH PRIORITIES
+.IP \(bu 3
+.BR waiting ", " error " \(-> attention (notify)."
+.IP \(bu 3
+.BR done " \(-> info (notify)."
+.IP \(bu 3
+.BR working ", unknown \(-> quiet (no notify)."
+.SH "SEE ALSO"
+.BR cmux-sealed (1),
+.B docs/cmux/RUNBOOK_orchestrator.md ,
+.B scripts/cmux/orchestrator_demo.py
+.SH CAVEAT
+Triage quality is bounded by the local model; treat notifications as a routing hint, not ground truth.
