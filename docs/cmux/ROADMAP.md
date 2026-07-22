@@ -110,8 +110,17 @@ launcher which fails closed.
 **Acceptance gate:**
 - `cmux-sealed --check` exits non-zero if *any* egress path is present (cloud endpoint set, a
   networked container, a resolvable HEARTH remote, non-loopback bind) — demonstrated for each failure.
+  ✅ **Met** — three mandatory gates (tier / hearth / pf-firewall), each demonstrated failing closed:
+  open-classified repo → exit 3; firewall absent → exit 2. Classifier: 14 tests green.
 - A sealed workspace is `lsof`-clean at idle and under a real confidential-style workload.
-- Fails closed: a deliberately mis-set config does **not** launch.
+  ⏳ **Pending** — needs the on-hardware run (load pf, launch real cmux, `cmux_egress_probe.sh`);
+  shared with the C0 §9 dynamic step.
+- Fails closed: a deliberately mis-set config does **not** launch. ✅ **Met** (see above).
+
+**Delivered:** `scripts/cmux/{cmux-sealed, cmux-sealed.pf.conf, tier_classify.py, cmux-sealed.1}`,
+`config/cmux/tiers.example.yaml` (canonical-path note), `tests/test_cmux_tier_classify.py` (14),
+`docs/cmux/RUNBOOK_sealed.md`, PRIVACY scrollback-purge guidance. Enforcement per ADR-C006: the
+loopback-only pf firewall is the structural seal (browser/iroh have no code switch).
 
 ---
 

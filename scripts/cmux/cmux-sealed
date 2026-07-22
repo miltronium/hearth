@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# cmux-sealed — launch a cmux workspace in the SEALED (confidential) tier, or verify the posture.
+#
+# The cmux-side analog of scripts/hearth_private.sh. It enforces the C0 §4 seal invariant
+# (docs/cmux/AUDIT.md) and FAILS CLOSED: if it cannot prove no-egress, it does not launch.
+# See docs/cmux/DECISIONS.md ADR-C001/C003/C006 and docs/cmux/PRIVACY.md.
+#
+# Seal model (ADR-C006): the STRUCTURAL guarantee is an OS-level loopback-only egress firewall
+# (pf), because cmux's in-app browser and iroh have no in-code off switch. Tier=sealed and a
+# no-egress HEARTH are the other mandatory gates. Telemetry/Sparkle/signed-out are defense-in-depth.
+#
+# Usage:
+#   scripts/cmux/cmux-sealed --check [REPO]      # verify posture only; exit 0 iff sealed-clean
+#   scripts/cmux/cmux-sealed [REPO]              # verify, then launch cmux sealed (REPO default: cwd)
+#   scripts/cmux/cmux-sealed --strict ...        # also fail on advisory (telemetry/Sparkle/sign-in) checks
+#   scripts/cmux/cmux-sealed --install-firewall  # load the pf egress anchor (needs sudo)
+#   scripts/cmux/cmux-sealed --remove-firewall   # unload the pf egress anchor (needs sudo)
+#
+# Exit: 0 = sealed-clean (mandatory gates pass; +advisory under --strict). Non-zero = NOT sealed.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CMUX_BUNDLE_ID="${CMUX_BUNDLE_ID:-com.cmuxterm.app}"
+PF_ANCHOR="cmux-sealed"
+PF_CONF="$REPO_ROOT/scripts/cmux/cmux-sealed.pf.conf"
+
+CHECK_ONLY=0; STRICT=0; MODE="run"; REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK_ONLY=1; shift ;;
+    --strict) STRICT=1; shift ;;
+    --install-firewall) MODE="install-fw"; shift ;;
+    --remove-firewall) MODE="remove-fw"; shift ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown flag: $1" >&2; exit 64 ;;
+    *) REPO="$1"; shift ;;
+  esac
+done
+REPO="${REPO:-$(pwd)}"
+
+pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
+fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
+warn() { printf '  \033[33mWARN\033[0m  %s\n' "$1"; }
+
+# --- firewall install/remove (structural egress seal; needs sudo) ------------------------------
+if [ "$MODE" = "install-fw" ]; then
+  [ -f "$PF_CONF" ] || { echo "missing $PF_CONF" >&2; exit 1; }
+  echo "==> loading pf anchor '$PF_ANCHOR' (loopback-only egress for the cmux uid). Needs sudo."
+  sudo pfctl -a "$PF_ANCHOR" -f "$PF_CONF" && sudo pfctl -e 2>/dev/null || true
+  echo "==> loaded. Verify: sudo pfctl -a $PF_ANCHOR -sr"
+  exit 0
+fi
+if [ "$MODE" = "remove-fw" ]; then
+  echo "==> flushing pf anchor '$PF_ANCHOR'. Needs sudo."
+  sudo pfctl -a "$PF_ANCHOR" -F all 2>/dev/null || true
+  exit 0
+fi
+
+echo "==> cmux-sealed — verifying SEALED posture for: $REPO"
+echo "    bundle=$CMUX_BUNDLE_ID  pf-anchor=$PF_ANCHOR  strict=$STRICT"
+echo
+mandatory_ok=1; advisory_ok=1
+
+# 1) MANDATORY: repo classifies to the sealed tier (ADR-C003).
+if uv run --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --require-sealed >/dev/null 2>&1; then
+  pass "tier: '$REPO' classifies as sealed (config/cmux/tiers.yaml)"
+else
+  fail "tier: '$REPO' does NOT classify as sealed — refusing (default-sealed means this is a config or path error)"
+  mandatory_ok=0
+fi
+
+# 2) MANDATORY: HEARTH has no egress path (reuse the engine's own sealed check).
+if "$REPO_ROOT/scripts/hearth_private.sh" --check >/dev/null 2>&1; then
+  pass "hearth: no-egress posture verified (0 remotes, all classes local/never)"
+else
+  fail "hearth: sealed posture check failed (scripts/hearth_private.sh --check) — a remote may resolve"
+  mandatory_ok=0
+fi
+
+# 3) MANDATORY: OS-level loopback-only egress firewall is active (the structural seal, ADR-C006 #5).
+if command -v pfctl >/dev/null 2>&1 && sudo -n pfctl -a "$PF_ANCHOR" -sr 2>/dev/null | grep -q 'block'; then
+  pass "firewall: pf anchor '$PF_ANCHOR' active with a block rule (loopback-only egress)"
+elif pfctl -a "$PF_ANCHOR" -sr 2>/dev/null | grep -q 'block'; then
+  pass "firewall: pf anchor '$PF_ANCHOR' active with a block rule"
+else
+  fail "firewall: pf anchor '$PF_ANCHOR' not loaded — the structural egress seal is absent. Run: $0 --install-firewall"
+  mandatory_ok=0
+fi
+
+# --- advisory (defense-in-depth; C0 §4 #1-#4). WARN by default; FAIL under --strict. -----------
+adv() { if [ "$STRICT" = 1 ]; then fail "$1"; advisory_ok=0; else warn "$1"; fi; }
+
+tele="$(defaults read "$CMUX_BUNDLE_ID" sendAnonymousTelemetry 2>/dev/null || echo MISSING)"
+if [ "$tele" = "0" ]; then pass "telemetry: sendAnonymousTelemetry=0 (PostHog/Sentry off)"; else
+  adv "telemetry: sendAnonymousTelemetry='$tele' (want 0 before first launch; default is ON)"; fi
+
+spark="$(defaults read "$CMUX_BUNDLE_ID" SUEnableAutomaticChecks 2>/dev/null || echo MISSING)"
+if [ "$spark" = "0" ]; then pass "auto-update: SUEnableAutomaticChecks=0 (Sparkle off)"; else
+  adv "auto-update: SUEnableAutomaticChecks='$spark' (want 0; Sparkle probes GitHub at launch)"; fi
+
+if [ "${CMUX_CLI_SENTRY_DISABLED:-}" = "1" ] && [ "${CMUX_CLAUDE_HOOK_SENTRY_DISABLED:-}" = "1" ]; then
+  pass "cli-telemetry: CMUX_CLI_SENTRY_DISABLED + CMUX_CLAUDE_HOOK_SENTRY_DISABLED set"; else
+  adv "cli-telemetry: export CMUX_CLI_SENTRY_DISABLED=1 and CMUX_CLAUDE_HOOK_SENTRY_DISABLED=1 (separate env-only gate)"; fi
+
+# best-effort signed-out: look for a cmux auth item in the login keychain.
+if security find-generic-password -s "$CMUX_BUNDLE_ID" >/dev/null 2>&1; then
+  adv "sign-in: a cmux keychain item exists — may be signed IN (signed-out disables cloud+iroh; best-effort)"; else
+  pass "sign-in: no cmux auth item found in keychain (best-effort: appears signed out)"; fi
+
+echo
+GATE_OK=$mandatory_ok
+[ "$STRICT" = 1 ] && [ "$advisory_ok" = 0 ] && GATE_OK=0
+if [ "$GATE_OK" != 1 ]; then
+  echo "==> RESULT: NOT SEALED — failing closed, will not launch. (fix the FAILs above)"; exit 2
+fi
+echo "==> RESULT: sealed posture verified.$([ "$STRICT" = 1 ] && echo ' (strict)')"
+
+if [ "$CHECK_ONLY" = 1 ]; then echo "==> --check only; not launching."; exit 0; fi
+
+# --- launch cmux in the sealed workspace -------------------------------------------------------
+export CMUX_CLI_SENTRY_DISABLED=1 CMUX_CLAUDE_HOOK_SENTRY_DISABLED=1
+APP="/Applications/cmux.app"
+echo "==> launching cmux SEALED at $REPO (telemetry env set; egress fenced by pf)…"
+if [ -d "$APP" ]; then
+  open -a "$APP" "$REPO"
+else
+  echo "    cmux.app not found at $APP. Launch your cmux build with cwd=$REPO and the env above;"
+  echo "    run 'scripts/cmux/cmux_egress_probe.sh' alongside to confirm loopback-only (AUDIT §9)."
+fi
