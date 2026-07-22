@@ -96,7 +96,7 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | — | `cmux/planning-docs` | This doc set (map + plan) | Docs reviewed & merged to `cmux/integration` | ☑ |
 | C0 | `cmux/egress-audit` | cmux egress audit ([AUDIT.md](AUDIT.md)) + `lsof` probe | Static: **done** (123 findings, all disableable). Dynamic `lsof` run: pending real-hardware exec | ◐ |
 | C1 | `cmux/adr` | ADRs ratifying the two-tier gated model | ADR-C001…C006 **Accepted**; tier-classification concrete ([tiers.example.yaml](../../config/cmux/tiers.example.yaml)) | ☑ |
-| C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | A cmux pane offloads to sealed HEARTH; 0 frontier tokens | ☐ |
+| C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | Pane-equivalent offload to sealed HEARTH **validated** (1053 tokens saved, 0 esc); live-GUI proof folds into C3/C6 | ☑ |
 | C3 | `cmux/sealed-profile` | Sealed-tier launcher + preflight (cmux analog of `hearth_private.sh`) | Fails closed on any cloud/network path; egress-verified | ☐ |
 | C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Reads panes → HEARTH triage → notify/drive, fully local | ☐ |
 | C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Tier selection default-sealed; cloud reachable only when explicitly classified | ☐ |

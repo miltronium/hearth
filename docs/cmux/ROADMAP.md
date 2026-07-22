@@ -88,7 +88,12 @@ launcher which fails closed.
 **Acceptance gate:**
 - A live cmux pane offloads a summarize/classify subtask to a **sealed** HEARTH (escalation off) —
   demonstrated, with `hearth stats` showing the frontier tokens saved (0 spent locally).
+  ✅ **Met (code-path equivalent)** — `examples/cmux/offload_demo.py` drove the exact `build_toolset`
+  → Router path an MCP-wired pane uses: 4 subtasks, **1053 est. frontier tokens saved, 0 escalations,
+  all local** on real MLX. HTTP/OpenAI path verified against a live sealed serve. Live-GUI pane proof
+  folds into the C3/C6 on-hardware run (with the AUDIT §9 egress probe). See `docs/cmux/RUNBOOK_wiring.md`.
 - No changes required to HEARTH's own code (config-only), or any change is minimal + tested.
+  ✅ **Met** — configure-only; artifacts live in `examples/cmux/` + docs; HEARTH core untouched.
 
 ---
 
