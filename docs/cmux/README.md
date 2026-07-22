@@ -64,6 +64,9 @@ token-saving, gate-able brain cmux's agents offload to. Same hardware, both Swif
 | [ROADMAP.md](ROADMAP.md) | Phased plan (C0–C6), per-phase sub-branch, deliverables, **acceptance gates**. |
 | [WORKFLOW.md](WORKFLOW.md) | Branch discipline, merge-up gates, how work graduates to `main`, sub-agent rules. |
 | [DECISIONS.md](DECISIONS.md) | ADR log for this effort (ADR-C001…). The *why* behind the big choices. |
+| [AUDIT.md](AUDIT.md) | C0 egress audit: 123 findings, native-core vs cloud, the seal invariant. |
+| [RESULTS.md](RESULTS.md) | Validation results — headless (done) + on-hardware (C6) slots. |
+| **Runbooks** | [wiring](RUNBOOK_wiring.md) (C2) · [sealed](RUNBOOK_sealed.md) (C3) · [orchestrator](RUNBOOK_orchestrator.md) (C4) · [open](RUNBOOK_open.md) (C5) · [on-hardware](RUNBOOK_onhardware.md) (C6) |
 
 ---
 
@@ -100,7 +103,7 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); on-hardware egress-probe run pending | ◐ |
 | C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Triage **validated** on real model (3/4 panes, 0 tokens); live-socket run pending | ◐ |
 | C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Gate **demonstrated** (open opt-in only; sealed/unclassified refused + logged); live cloud run pending | ◐ |
-| C6 | `cmux/graduation` | Merge to `main` | Full integration proven, working, beneficial; RESULTS captured | ☐ |
+| C6 | `cmux/graduation` | Merge to `main` | On-hardware runbook + [RESULTS](RESULTS.md) scaffold **ready**; hardware run + graduation pending | ◐ |
 
 Phases are described in full in [ROADMAP.md](ROADMAP.md). This table is the at-a-glance index;
 the roadmap holds the detail and acceptance criteria.
