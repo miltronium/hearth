@@ -1,0 +1,33 @@
+# cmux workspace tier classification — EXAMPLE (ADR-C003)
+#
+# Decides whether a cmux workspace opens in the SEALED tier (Tier 0, confidential:
+# native/Docker-no-network panes, HEARTH sealed, cloud off, signed-out) or the OPEN
+# tier (Tier 1, non-confidential: cloud VMs / networked Docker / frontier escalation).
+# See docs/cmux/ARCHITECTURE.md §3 and docs/cmux/PRIVACY.md.
+#
+# INVARIANTS (enforced by the classifier; do not weaken):
+#   * default is SEALED — a workspace with no matching rule is sealed.
+#   * a repo reaches OPEN *only* by matching an `open:` rule (explicit opt-in).
+#   * MOST-RESTRICTIVE-WINS — if anything says sealed (a `sealed_override`, no match,
+#     or ambiguity), the workspace is sealed. Open never wins a tie.
+#   * UNKNOWN / unclassifiable repo ⇒ sealed. Fail safe, not fail open.
+#   * `sealed_override` ALWAYS beats `open` — the confidential belt-and-suspenders.
+#
+# A workspace's repo is resolved by its working-directory path and, when present,
+# its `git remote get-url origin` host. Copy this file to `config/cmux/tiers.yaml`
+# and edit for your machine. The C3 `cmux-sealed` launcher reads it and fails closed.
+
+default: sealed
+
+# Opt specific repos INTO the open tier. A rule matches on a path glob and/or a
+# remote host pattern; a repo needs at least one `open` match AND no sealed_override.
+open:
+  - path: "~/oss/**"                      # non-confidential working trees
+  - remote_host: "github.com/<your-public-org>/**"
+
+# Force SEALED even if an `open` rule would match. Put confidential markers here so
+# an accidental broad `open` rule can never expose a sensitive repo.
+sealed_override:
+  - path: "~/apple/**"
+  - remote_host_contains: "apple"
+  - remote_host_contains: "internal"

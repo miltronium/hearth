@@ -71,6 +71,10 @@ we must know exactly what it sends off-box. This is the gate before cmux touches
 
 **Acceptance gate:** each ADR has context/decision/consequences and a status; the tier-classification
 mechanism (C003) is concrete enough to implement in C3/C5.
+✅ **Done** — ADR-C001…C006 all **Accepted** (2026-07-21). C003 is concrete: a single
+`config/cmux/tiers.yaml` policy (example shipped at `config/cmux/tiers.example.yaml`) with
+default-sealed / explicit-open / sealed-override / most-restrictive-wins invariants, read by the C3
+launcher which fails closed.
 
 ---
 
