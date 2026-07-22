@@ -133,9 +133,17 @@ loopback-only pf firewall is the structural seal (browser/iroh have no code swit
 
 **Acceptance gate:**
 - Demonstrated: N panes, orchestrator correctly triages which need attention and notifies — using
-  only on-device HEARTH.
-- Runs under `cmux-sealed` with the workload still `lsof`-clean.
+  only on-device HEARTH. ✅ **Met** — `orchestrator_demo.py` triaged 4 panes on real MLX: build=working
+  (quiet), adapters=waiting, tests=done, coreml-fix=error — all correct, 3/4 flagged, 0 frontier tokens.
+- Runs under `cmux-sealed` with the workload still `lsof`-clean. ⏳ **Pending** on-hardware (live cmux
+  socket + probe; shared C0 §9 run).
 - Orchestrator has no path that ships pane contents anywhere but local HEARTH (code-reviewed).
+  ✅ **Met** — pane text → only `build_toolset` (escalation off); cmux client → only the local socket;
+  no network lib imported. See `docs/cmux/RUNBOOK_orchestrator.md` "Privacy".
+
+**Delivered:** `scripts/cmux/{orchestrator.py, orchestrator_demo.py, cmux-orchestrator.1}`,
+`tests/test_cmux_orchestrator.py` (8), `docs/cmux/RUNBOOK_orchestrator.md`. Transport-abstracted
+(real CLI client + fake) against the mapped cmux socket protocol.
 
 ---
 
