@@ -1,0 +1,20 @@
+{
+  "//": "Register HEARTH's local MCP tools with a coding agent running in a cmux pane (e.g. Claude",
+  "//1": "Code). The agent can then offload summarize/classify/extract/draft/rag_query to the local",
+  "//2": "model — 0 frontier tokens. All MCP tools run allow_escalation=False (mcp/tools.py), so this",
+  "//3": "is strictly local even without the sealed profile. See docs/cmux/RUNBOOK_wiring.md.",
+  "//4": "The env pins sealed/local: private routing (no remotes) + offline HF. Use an ABSOLUTE path",
+  "//5": "for HEARTH_ROUTING_YAML (the MCP server's cwd is not guaranteed to be the repo).",
+  "mcpServers": {
+    "hearth": {
+      "command": "hearth",
+      "args": ["mcp"],
+      "env": {
+        "HEARTH_BACKEND": "mlx",
+        "HEARTH_ROUTING_YAML": "/absolute/path/to/HEARTH/config/routing.private.yaml",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1"
+      }
+    }
+  }
+}
