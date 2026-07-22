@@ -49,9 +49,14 @@ we must know exactly what it sends off-box. This is the gate before cmux touches
 - The concrete list of knobs the **sealed launcher must disable** (feeds C3).
 
 **Acceptance gate:**
-- Every outbound path enumerated and classified.
+- Every outbound path enumerated and classified. ✅ **Done** — `docs/cmux/AUDIT.md` (123 verified
+  findings; 26 blockers, all disableable; native-core-vs-cloud split; seal invariant).
 - A "sealed candidate" config demonstrated `lsof`-clean at idle and under a local-agent workload.
+  ⏳ **Pending** — `scripts/cmux/cmux_egress_probe.sh` written; needs a real-hardware run (build +
+  launch cmux under the probe in the four AUDIT §9 states). This is the remaining C0 sub-step.
 - Report reviewed; any blocker (e.g. an un-disableable phone-home) escalated as an ADR before proceeding.
+  ✅ **Done** — no blocker is un-disableable, but the two no-code-switch paths (browser, iroh)
+  drove **ADR-C006** (config-only seal insufficient → signed-out + OS-level containment).
 
 ---
 

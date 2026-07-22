@@ -99,5 +99,33 @@ pinned ref (documented in the relevant runbook).
 
 ---
 
-## (C0 will add ADRs here as the audit surfaces real constraints — e.g. an un-disableable
-## outbound path, or a container-network enforcement decision.)
+## ADR-C006 — Sealing cmux requires signed-out + OS-level egress control (config alone is insufficient)
+
+**Status:** Proposed (ratify in C1). **Source:** C0 egress audit (`docs/cmux/AUDIT.md`).
+
+**Context.** The C0 audit (123 verified findings) established that cmux's native core is *not*
+egress-clean out of the box — a Release build makes always-on connections to PostHog, Sentry (app
+*and* CLI, on separate gates), Sparkle, and (when signed in) iroh relay servers. Critically, **two
+capabilities have no in-code off switch**: the in-app browser (`BrowserNavigationDelegate.swift:445`
+— no local-only mode) and iroh mobile-host (`MobileHostService.swift:542` — no runtime toggle). But
+the entire cloud surface (cloud VMs, presence, iroh, billing, push) is gated behind **Stack Auth
+sign-in** — signed-out ⇒ none of it activates.
+
+**Decision.** The sealed tier's guarantee rests on **(1) running cmux signed-out + (5) OS-level
+loopback-only egress containment** (pf / Little Snitch / restricted launch), with telemetry-off,
+auto-update-off, and browser-pinned as **defense-in-depth** (#2–#4 of the AUDIT §4 invariant).
+Config/flags alone are **insufficient** because of the no-switch paths. The `cmux-sealed` launcher
+(C3) must enforce **and verify** all five conditions and **fail closed** — e.g. refuse to launch if
+cmux is signed in or the firewall profile is inactive.
+
+**Consequences.** This refines **ADR-C004**: we will `wrap` cmux *and* depend on OS-level controls,
+and may need a small **build-time patch** to stub the browser/iroh for a hardened sealed build
+(prefer upstreaming a `--sealed`/local-only mode to cmux). Also establishes a **build-offline,
+run-sealed** posture (AUDIT §8): build cmux on an unrestricted machine, run the artifact sealed;
+never build/`bun install`/`zig build` on the confidential box. Dynamic `lsof` verification
+(`scripts/cmux/cmux_egress_probe.sh`) gates C3 trust.
+
+---
+
+## (Further ADRs land here as C3+ surface real constraints — e.g. the exact container-network
+## enforcement, or an upstream cmux sealed-mode patch decision.)

@@ -94,7 +94,7 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | Phase | Sub-branch | Deliverable | Gate | Status |
 | --- | --- | --- | --- | --- |
 | — | `cmux/planning-docs` | This doc set (map + plan) | Docs reviewed & merged to `cmux/integration` | ☑ |
-| C0 | `cmux/egress-audit` | cmux egress/telemetry audit report | `lsof`-clean posture documented; cloud/update paths enumerated | ☐ |
+| C0 | `cmux/egress-audit` | cmux egress audit ([AUDIT.md](AUDIT.md)) + `lsof` probe | Static: **done** (123 findings, all disableable). Dynamic `lsof` run: pending real-hardware exec | ◐ |
 | C1 | `cmux/adr` | ADRs ratifying the two-tier gated model | Decisions recorded in DECISIONS.md | ☐ |
 | C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | A cmux pane offloads to sealed HEARTH; 0 frontier tokens | ☐ |
 | C3 | `cmux/sealed-profile` | Sealed-tier launcher + preflight (cmux analog of `hearth_private.sh`) | Fails closed on any cloud/network path; egress-verified | ☐ |
