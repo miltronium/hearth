@@ -4,14 +4,15 @@ Architecture Decision Records for the cmux integration, numbered `ADR-C###` to k
 from standalone HEARTH's `docs/DECISIONS.md` (ADR-0xx / ADR-011…). Same format: **Context → Decision
 → Consequences → Status.**
 
-Statuses: `Proposed` · `Accepted` · `Superseded` · `Rejected`. The C1 phase (`cmux/adr`) ratifies
-the `Proposed` ones below into `Accepted` and adds any the C0 audit demands.
+Statuses: `Proposed` · `Accepted` · `Superseded` · `Rejected`. **C1 (`cmux/adr`) is complete:**
+ADR-C001…C006 are all **Accepted** (2026-07-21); ADR-C003's mechanism is concrete
+(`config/cmux/tiers.example.yaml`). Later phases add ADRs as new constraints surface.
 
 ---
 
 ## ADR-C001 — Two-tier gated model (sealed default, fail-closed)
 
-**Status:** Proposed (ratify in C1)
+**Status:** Accepted (ratified C1, 2026-07-21)
 
 **Context.** We want *all* of cmux's ability, including cloud VMs and Docker workspaces — which are
 egress-capable. Standalone HEARTH's privacy model is airtight only because private mode removes
@@ -35,7 +36,7 @@ consciously (see PRIVACY.md § "The honest tradeoff") and concentrate rigor on t
 
 ## ADR-C002 — Cockpit/engine boundary (one-way dependency)
 
-**Status:** Proposed (ratify in C1)
+**Status:** Accepted (ratified C1, 2026-07-21)
 
 **Context.** cmux (cockpit) and HEARTH (engine) are complementary. HEARTH's design rule (from
 CAMBOT) is that consumers depend on HEARTH, never the reverse, and HEARTH's conformance suite passes
@@ -53,23 +54,35 @@ HEARTH's core.
 
 ## ADR-C003 — Tier classification mechanism
 
-**Status:** Proposed (decide concretely in C1, implement C3/C5)
+**Status:** Accepted (ratified C1, 2026-07-21). **Artifact:** `config/cmux/tiers.example.yaml`.
 
-**Context.** Something must decide whether a given repo/workspace is sealed or open, with a
-fail-safe default.
+**Context.** Something must decide whether a given cmux workspace is sealed or open, with a
+fail-safe default, in a language consistent with the rest of HEARTH.
 
-**Decision (direction; finalize in C1).** Prefer a single policy language over inventing a second
-one: a small mapping of repo path / git remote → tier, defaulting to **sealed**, expressed in the
-same spirit as the existing `routing.*.yaml`. Exact file/format ratified in C1.
+**Decision (concrete).** A single YAML policy file `config/cmux/tiers.yaml` (shipped example:
+`config/cmux/tiers.example.yaml`), in the spirit of the existing `routing.*.yaml`, with these keys
+and **invariants**:
+- `default: sealed` — a workspace with no matching rule is sealed.
+- `open:` — a list of opt-in rules (`path` glob and/or `remote_host` pattern). A repo reaches the
+  **open** tier *only* by matching one, **and** matching no `sealed_override`.
+- `sealed_override:` — rules (`path` glob / `remote_host_contains`) that force **sealed** even when
+  an `open` rule matches (the confidential belt-and-suspenders).
+- Resolution: by the workspace's working-dir **path** and, when present, its `git remote … origin`
+  **host**. **Most-restrictive-wins** — any sealed signal, no match, or ambiguity ⇒ sealed. Open
+  never wins a tie. Unknown/unresolvable ⇒ sealed.
+
+The C3 `cmux-sealed` launcher reads this file and **fails closed**: it will not open a workspace in
+the open tier unless classification unambiguously resolves to open.
 
 **Consequences.** One mental model for "what may leave the machine" across engine and cockpit.
-Unknown repos are sealed by default. Open-classification is explicit and auditable.
+Unknown repos are sealed by default; open-classification is explicit, auditable, and overridable by
+a confidential marker. Implemented/wired in C3 (sealed enforcement) and C5 (open-tier enablement).
 
 ---
 
 ## ADR-C004 — Configure > wrap > patch
 
-**Status:** Proposed (ratify in C1)
+**Status:** Accepted (ratified C1, 2026-07-21)
 
 **Context.** cmux is third-party GPL software. We can integrate by configuring it, wrapping it
 (launcher + socket orchestrator), or patching/forking it.
@@ -85,7 +98,7 @@ upstream. Pin a known-good cmux version; re-verify wiring per bump.
 
 ## ADR-C005 — cmux stays out of the HEARTH repo
 
-**Status:** Proposed (ratify in C1)
+**Status:** Accepted (ratified C1, 2026-07-21)
 
 **Context.** The audit and build need cmux present, but committing a third-party GPL codebase into
 HEARTH would entangle licensing, bloat the repo, and blur the boundary.
@@ -101,7 +114,7 @@ pinned ref (documented in the relevant runbook).
 
 ## ADR-C006 — Sealing cmux requires signed-out + OS-level egress control (config alone is insufficient)
 
-**Status:** Proposed (ratify in C1). **Source:** C0 egress audit (`docs/cmux/AUDIT.md`).
+**Status:** Accepted (ratified C1, 2026-07-21). **Source:** C0 egress audit (`docs/cmux/AUDIT.md`).
 
 **Context.** The C0 audit (123 verified findings) established that cmux's native core is *not*
 egress-clean out of the box — a Release build makes always-on connections to PostHog, Sentry (app
