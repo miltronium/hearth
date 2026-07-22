@@ -1,0 +1,114 @@
+.TH CMUX-SEALED 1 "2026-07-21" "HEARTH" "HEARTH cmux integration"
+.SH NAME
+cmux-sealed \- launch or verify a cmux workspace in the sealed (no\-egress) tier
+.SH SYNOPSIS
+.B cmux-sealed
+.RB [ --check ]
+.RB [ --strict ]
+.RI [ REPO ]
+.br
+.B cmux-sealed --install-firewall
+.br
+.B cmux-sealed --remove-firewall
+.SH DESCRIPTION
+.B cmux-sealed
+is the cmux\-side analog of
+.BR hearth_private.sh (1).
+It enforces the HEARTH \(mu cmux sealed\-tier invariant (see
+.B docs/cmux/AUDIT.md
+\(sc4 and ADR\-C006) and
+.B fails closed:
+if it cannot prove that a workspace has no path to leave the machine, it does not launch.
+.PP
+The structural guarantee is an OS\-level, loopback\-only egress firewall (pf), because cmux's in\-app
+browser and iroh peer\-to\-peer transport have no in\-code off switch. Two further mandatory gates are
+that the target
+.I REPO
+classifies to the sealed tier (ADR\-C003,
+.BR config/cmux/tiers.yaml )
+and that HEARTH itself resolves no remote. Telemetry, auto\-update, and signed\-out state are checked
+as defense\-in\-depth.
+.PP
+If
+.I REPO
+is omitted it defaults to the current directory. The default is
+.B sealed:
+an unclassified or unresolvable repo is treated as sealed, never open.
+.SH OPTIONS
+.TP
+.B --check
+Verify posture only; do not launch. Exit 0 iff the mandatory gates pass (and, under
+.BR --strict ,
+the advisory checks too).
+.TP
+.B --strict
+Also fail on the advisory checks (telemetry off, Sparkle off, CLI\-Sentry env, signed\-out), not just
+warn.
+.TP
+.B --install-firewall
+Load the pf anchor
+.B cmux-sealed
+from
+.B scripts/cmux/cmux-sealed.pf.conf
+(requires sudo). This is the structural egress seal.
+.TP
+.B --remove-firewall
+Flush the pf anchor (requires sudo).
+.SH "MANDATORY GATES"
+.IP \(bu 3
+.B tier:
+REPO classifies as sealed via
+.BR config/cmux/tiers.yaml .
+.IP \(bu 3
+.B hearth:
+.B scripts/hearth_private.sh --check
+passes (0 remotes, all classes local/never).
+.IP \(bu 3
+.B firewall:
+the pf anchor
+.B cmux-sealed
+is loaded with a block rule (loopback\-only egress).
+.SH "EXIT STATUS"
+.TP
+.B 0
+Sealed posture verified.
+.TP
+.B 2
+Not sealed \(em a mandatory gate (or, under
+.BR --strict ,
+an advisory check) failed; launch refused.
+.TP
+.B 64
+Usage error.
+.SH FILES
+.TP
+.B config/cmux/tiers.yaml
+Tier classification policy (example:
+.BR config/cmux/tiers.example.yaml ).
+.TP
+.B scripts/cmux/cmux-sealed.pf.conf
+pf rules for the loopback\-only egress seal.
+.TP
+.B scripts/cmux/cmux_egress_probe.sh
+Dynamic lsof/nettop probe to confirm a running cmux is loopback\-only.
+.SH "SEE ALSO"
+.BR hearth_private.sh (1),
+.BR pfctl (8),
+.B docs/cmux/AUDIT.md ,
+.B docs/cmux/PRIVACY.md ,
+.B docs/cmux/DECISIONS.md
+.SH NOTES
+Path rules in
+.B tiers.yaml
+are matched against the
+.B canonicalized
+repo path (symlinks resolved): on macOS
+.B /tmp
+resolves to
+.BR /private/tmp .
+Write rules against the real (resolved) location.
+.SH CAVEAT
+This seals the cmux cockpit. It does not seal a frontier agent you run inside a pane over confidential
+files \(em choose the pane's agent by the data's sensitivity (see
+.B docs/cmux/PRIVACY.md
+\(dq the caller caveat\(dq).

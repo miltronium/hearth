@@ -118,8 +118,14 @@ Standalone HEARTH's data-at-rest notes still apply (RAG index, adapters, token �
 on FileVault). cmux adds:
 
 - **cmux session state** (`~/Library/Application Support/cmux/`) — restores panes, working dirs,
-  **scrollback**. Scrollback of a confidential pane is a copy of confidential output on disk. Keep
-  it on the encrypted volume; know how to purge it. (Retention/purge policy finalized in C3.)
+  **scrollback**. Scrollback of a confidential pane is a copy of confidential terminal output on
+  disk, and it survives restarts by design. Handling for the sealed tier (C3):
+  - Keep `~/Library/Application Support/cmux/` on the FileVault-encrypted volume (as with `~/.hearth`).
+  - **Purge after a sealed session**: quit cmux, then remove the session/scrollback store —
+    `rm -rf ~/Library/Application\ Support/cmux/` (nukes all session state) or the specific
+    workspace's scrollback file within it. Do this before handing the machine off or when the
+    confidential work is done. A future `cmux-sealed --purge` may wrap this.
+  - The macOS app also holds recent output in memory; quitting cmux clears it.
 - **Docker volumes / workspace mounts** for sealed panes — same handling as any confidential
   working copy.
 

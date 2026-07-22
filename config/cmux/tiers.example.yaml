@@ -16,6 +16,10 @@
 # A workspace's repo is resolved by its working-directory path and, when present,
 # its `git remote get-url origin` host. Copy this file to `config/cmux/tiers.yaml`
 # and edit for your machine. The C3 `cmux-sealed` launcher reads it and fails closed.
+#
+# PATH RULES MATCH THE CANONICAL (symlink-resolved) PATH. On macOS `/tmp` resolves to
+# `/private/tmp`, and a home dir may itself be a symlink — write rules against the real,
+# resolved location. `path` globs are fnmatch-style: `*` and `**` both match across `/`.
 
 default: sealed
 
