@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# cmux-open — launch a cmux workspace in the OPEN (non-confidential) tier.
+#
+# The counterpart to cmux-sealed. The open tier permits what the sealed tier forbids: cloud VMs,
+# networked Docker, and frontier escalation. Because that capability is real egress, cmux-open opens
+# it ONLY for a repo explicitly classified `open` (ADR-C003, config/cmux/tiers.yaml) and **fails
+# closed to sealed** for anything confidential or unclassified. Every open decision is logged.
+#
+# See docs/cmux/RUNBOOK_open.md, docs/cmux/ARCHITECTURE.md §3, docs/cmux/DECISIONS.md ADR-C001/C003.
+#
+# Usage:
+#   scripts/cmux/cmux-open --check [REPO]     # verify eligibility, do not launch (grants not logged)
+#   scripts/cmux/cmux-open [REPO]             # verify, log the grant, launch cmux open (REPO=cwd default)
+#   scripts/cmux/cmux-open --dry-run [REPO]   # verify + log grant + print the launch command, no launch
+#   scripts/cmux/cmux-open --cost             # show the HEARTH escalation/cost rollup (open-tier frontier use)
+#
+# Audit: every REFUSED attempt is always logged (an attempt to open a sealed repo is security-relevant);
+# a GRANT is logged when the workspace is actually opened (launch or --dry-run). Log: $CMUX_TIER_AUDIT_LOG
+# (default ~/.hearth/cmux-tier-audit.log).
+#
+# Exit: 0 = allowed (open). 2 = REFUSED (repo is sealed/unclassified — fail-closed). 64 = usage.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+AUDIT_LOG="${CMUX_TIER_AUDIT_LOG:-$HOME/.hearth/cmux-tier-audit.log}"
+
+CHECK_ONLY=0; DRY_RUN=0; MODE="run"; REPO=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK_ONLY=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --cost) MODE="cost"; shift ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown flag: $1" >&2; exit 64 ;;
+    *) REPO="$1"; shift ;;
+  esac
+done
+
+if [ "$MODE" = "cost" ]; then
+  echo "==> open-tier frontier cost (HEARTH escalation rollup):"
+  HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.yaml" uv run --project "$REPO_ROOT" hearth stats 2>/dev/null || true
+  echo "    Note: this counts work HEARTH itself escalated. Frontier spend from a pane's own agent"
+  echo "    (e.g. Claude Code -> Anthropic) is outside HEARTH's meter — track via your provider."
+  exit 0
+fi
+
+REPO="${REPO:-$(pwd)}"
+REMOTE="$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '-')"
+
+echo "==> cmux-open — checking OPEN-tier eligibility for: $REPO"
+
+# MANDATORY GATE: the repo must classify OPEN. Anything else fails closed to sealed.
+if uv run --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --assert-open >/dev/null 2>&1; then
+  printf '  \033[32mPASS\033[0m  tier: repo classifies as OPEN (explicit opt-in in config/cmux/tiers.yaml)\n'
+else
+  printf '  \033[31mREFUSED\033[0m  tier: repo is sealed/unclassified — the open tier is off-limits.\n'
+  echo "          Default is sealed. To open a NON-confidential repo, add an 'open:' rule matching it"
+  echo "          (path glob / remote_host) to config/cmux/tiers.yaml, and ensure no 'sealed_override'"
+  echo "          matches. Confidential repos must never be opened here — use scripts/cmux/cmux-sealed."
+  # log the refusal for the audit trail
+  mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
+  printf '%s\topen-REFUSED\t%s\tremote=%s\tuser=%s\n' "$(date -u +%FT%TZ)" "$REPO" "$REMOTE" "${USER:-?}" >> "$AUDIT_LOG" 2>/dev/null || true
+  exit 2
+fi
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  echo "==> --check only; eligible for open tier. (not launching, not logged)"
+  exit 0
+fi
+
+# Explicit, LOGGED sealed->open transition (ADR-C001: open is opt-in and auditable).
+mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
+printf '%s\topen-GRANTED\t%s\tremote=%s\tuser=%s\n' "$(date -u +%FT%TZ)" "$REPO" "$REMOTE" "${USER:-?}" >> "$AUDIT_LOG"
+echo "  logged open-tier grant to $AUDIT_LOG"
+
+# Open-tier posture: frontier escalation permitted (routing.yaml), cloud/Docker allowed, NO pf seal.
+export HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.yaml"
+APP="/Applications/cmux.app"
+if [ "$DRY_RUN" = 1 ]; then
+  echo "==> --dry-run: would launch: open -a '$APP' '$REPO'  (open tier: cloud/Docker + frontier escalation)"
+  exit 0
+fi
+echo "==> launching cmux OPEN at $REPO (cloud/Docker + frontier escalation enabled)…"
+if [ -d "$APP" ]; then
+  open -a "$APP" "$REPO"
+else
+  echo "    cmux.app not found at $APP. Launch your cmux build with cwd=$REPO; cloud/Docker features"
+  echo "    may be used in this tier. (Networked Docker panes are fine here — unlike the sealed tier.)"
+fi

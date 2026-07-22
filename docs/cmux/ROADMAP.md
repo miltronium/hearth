@@ -156,9 +156,16 @@ loopback-only pf firewall is the structural seal (browser/iroh have no code swit
 
 **Acceptance gate:**
 - A non-confidential repo runs an open-tier workspace (cloud/Docker) successfully.
+  ⏳ **Pending** on-hardware (cmux GUI + cloud account). `cmux-open` guard + launch path built; an
+  explicit-`open` repo is granted and the launch command emitted (`--dry-run`).
 - A confidential (or unclassified) repo **cannot** reach the open tier — the gate blocks it;
-  demonstrated.
-- Switching a repo sealed→open is explicit and logged; open→ default remains sealed.
+  demonstrated. ✅ **Met** — HEARTH repo (unclassified→sealed) refused, exit 2; `sealed_override` wins.
+- Switching a repo sealed→open is explicit and logged; open→ default remains sealed. ✅ **Met** —
+  open requires an explicit `open:` rule; every grant/refusal is written to `$CMUX_TIER_AUDIT_LOG`.
+
+**Delivered:** `scripts/cmux/{cmux-open, cmux-open.1}`, `docs/cmux/RUNBOOK_open.md`. Fail-closed-to-sealed
+guard reuses the C3 classifier (`--assert-open`, unit-tested). No pf seal in this tier; frontier
+escalation permitted (`routing.yaml`); networked Docker allowed. Config-only; HEARTH untouched.
 
 ---
 
