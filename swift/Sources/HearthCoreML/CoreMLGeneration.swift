@@ -34,6 +34,15 @@ struct CoreMLSidecarManifest: Codable, Sendable {
     var eosTokenIds: [Int]
     var chatTemplateId: String
     var tokenizerFiles: [String]
+    // --- HEARTH stateful KV-cache contract (schema v2; nil/defaulted on a v1 sidecar) ----------
+    // When `writePos` names an input and `stateLayers` is set, the model uses the HEARTH native
+    // stateful contract (`inputIds [1,1]`, fixed-width `causalMask`, per-layer `keyCache{i}`/
+    // `valueCache{i}` states) that swift-transformers cannot drive — see the native decode path.
+    var causalMaskName: String?
+    var writePosName: String?
+    var stateLayers: Int?
+    var keyCachePrefix: String?
+    var valueCachePrefix: String?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -47,11 +56,27 @@ struct CoreMLSidecarManifest: Codable, Sendable {
         case eosTokenIds = "eos_token_ids"
         case chatTemplateId = "chat_template_id"
         case tokenizerFiles = "tokenizer_files"
+        case causalMaskName = "causal_mask_name"
+        case writePosName = "write_pos_name"
+        case stateLayers = "state_layers"
+        case keyCachePrefix = "key_cache_prefix"
+        case valueCachePrefix = "value_cache_prefix"
     }
 
-    /// The schema version this build understands (kept in sync with the Python
-    /// `MANIFEST_SCHEMA_VERSION`).
-    static let supportedSchemaVersion = 1
+    /// The newest schema version this build understands. v1 (Approach A) sidecars still decode:
+    /// the v2-only fields are optional and absent keys stay `nil`.
+    static let supportedSchemaVersion = 2
+
+    /// Whether this manifest describes the HEARTH native stateful contract (writePos + per-layer
+    /// states) that needs the native decode loop rather than swift-transformers' `LanguageModel`.
+    var usesHearthStatefulContract: Bool {
+        stateful && writePosName != nil
+    }
+
+    var causalMaskFeature: String { causalMaskName ?? "causalMask" }
+    var writePosFeature: String { writePosName ?? "writePos" }
+    var keyCacheStatePrefix: String { keyCachePrefix ?? "keyCache" }
+    var valueCacheStatePrefix: String { valueCachePrefix ?? "valueCache" }
 }
 
 /// A located sidecar: the parsed manifest plus the on-disk tokenizer files that ship with a model.
@@ -72,7 +97,8 @@ struct CoreMLSidecar: Sendable {
         guard
             let data = try? Data(contentsOf: manifestURL),
             let manifest = try? JSONDecoder().decode(CoreMLSidecarManifest.self, from: data),
-            manifest.schemaVersion == CoreMLSidecarManifest.supportedSchemaVersion
+            manifest.schemaVersion >= 1,
+            manifest.schemaVersion <= CoreMLSidecarManifest.supportedSchemaVersion
         else { return nil }
 
         let tokenizer = dir.appendingPathComponent("\(stem).tokenizer.json")
@@ -118,6 +144,23 @@ extension CoreMLProvider {
         stream: (@Sendable (String) -> Void)?
     ) async throws -> String {
         let tokenizer = try sidecar.loadTokenizer()
+
+        // The HEARTH stateful contract (writePos + per-layer keyCache{i}/valueCache{i} states) is a
+        // fully-static single-token graph swift-transformers can't drive; use the native loop.
+        // Detected from the manifest, or (defensively) from the model's own I/O description.
+        if sidecar.manifest.usesHearthStatefulContract
+            || Self.exposesHearthStatefulContract(model: model, manifest: sidecar.manifest)
+        {
+            return try Self.runNativeStatefulGeneration(
+                messages: messages,
+                options: options,
+                model: model,
+                tokenizer: tokenizer,
+                manifest: sidecar.manifest,
+                stream: stream
+            )
+        }
+
         let languageModel = try Self.makeLanguageModel(model: model, tokenizer: tokenizer)
         await languageModel.resetState()
 
@@ -143,6 +186,171 @@ extension CoreMLProvider {
         let output = try await languageModel.generate(config: config, tokens: promptTokens, callback: callback)
         let generated = Array(output.dropFirst(promptCount))
         return tokenizer.decode(tokens: generated, skipSpecialTokens: true)
+    }
+
+    // MARK: HEARTH native stateful decode (ADR-011 Approach B)
+
+    /// Fallback detection for the HEARTH stateful contract from the model's own description, for
+    /// when a manifest predates the v2 fields: a `writePos` input plus a per-layer `keyCache0` state.
+    static func exposesHearthStatefulContract(model: MLModel, manifest: CoreMLSidecarManifest) -> Bool {
+        let description = model.modelDescription
+        let hasWritePos = description.inputDescriptionsByName[manifest.writePosFeature] != nil
+        let hasPerLayerState =
+            description.stateDescriptionsByName["\(manifest.keyCacheStatePrefix)0"] != nil
+        return hasWritePos && hasPerLayerState
+    }
+
+    /// Drive the fully-static single-token stateful model with a native decode loop.
+    ///
+    /// Contract (matches `hearth.coreml._stateful_export_runner`): feed `inputIds [1,1]` (int32),
+    /// `causalMask [1,1,1,STATE_LEN]` (fp16; 0 for slots ≤ pos, else -1e4), `writePos [1]` (int32);
+    /// read `logits[0, 0, :]`. Per-layer `keyCache{i}`/`valueCache{i}` states live in the `MLState`
+    /// from `model.makeState()`. Prefill one token at a time (writePos = 0…promptCount-1), then
+    /// decode greedily (temperature 0) or by sampling, stopping on any manifest eos, up to maxTokens.
+    static func runNativeStatefulGeneration(
+        messages: [ChatMessage],
+        options: InferenceOptions,
+        model: MLModel,
+        tokenizer: Tokenizer,
+        manifest: CoreMLSidecarManifest,
+        stream: (@Sendable (String) -> Void)?
+    ) throws -> String {
+        let stateLen = manifest.maxSeqLen
+        let promptTokens = try encodePrompt(messages, tokenizer: tokenizer)
+        guard !promptTokens.isEmpty else { return "" }
+        guard promptTokens.count <= stateLen else {
+            throw HearthError.onDeviceUnavailable(
+                "prompt is \(promptTokens.count) tokens but the stateful model's fixed window is "
+                    + "\(stateLen); export with a larger --max-seq-len or shorten the prompt"
+            )
+        }
+
+        let state = model.makeState()
+        let maxTokens = options.maxTokens ?? 256
+        let temperature = options.temperature ?? 0
+        let stopIDs = Set(manifest.eosTokenIds)
+
+        // Prefill: run every prompt token so its KV lands in the cache. The last prefill step's
+        // logits seed the first generated token.
+        var lastLogits: MLMultiArray?
+        for (pos, token) in promptTokens.enumerated() {
+            lastLogits = try predictStep(
+                model: model, state: state, token: token, pos: pos,
+                stateLen: stateLen, manifest: manifest
+            )
+        }
+
+        var generated: [Int] = []
+        var pos = promptTokens.count - 1
+        let cursor = TextCursor()
+
+        func emitDelta() {
+            guard let stream else { return }
+            let text = tokenizer.decode(tokens: generated, skipSpecialTokens: true)
+            if text.count > cursor.emittedCount {
+                let delta = String(text.dropFirst(cursor.emittedCount))
+                cursor.emittedCount = text.count
+                stream(delta)
+            }
+        }
+
+        var current = try nextToken(from: lastLogits, temperature: temperature, vocab: manifest.vocabSize)
+        while generated.count < maxTokens {
+            if stopIDs.contains(current) { break }
+            generated.append(current)
+            emitDelta()
+            if generated.count >= maxTokens || pos + 1 >= stateLen { break }
+            pos += 1
+            let logits = try predictStep(
+                model: model, state: state, token: current, pos: pos,
+                stateLen: stateLen, manifest: manifest
+            )
+            current = try nextToken(from: logits, temperature: temperature, vocab: manifest.vocabSize)
+        }
+
+        return tokenizer.decode(tokens: generated, skipSpecialTokens: true)
+    }
+
+    /// One single-token stateful prediction; returns the `logits` multi-array (`[1, 1, vocab]`).
+    private static func predictStep(
+        model: MLModel,
+        state: MLState,
+        token: Int,
+        pos: Int,
+        stateLen: Int,
+        manifest: CoreMLSidecarManifest
+    ) throws -> MLMultiArray {
+        let inputIds = try MLMultiArray(shape: [1, 1], dataType: .int32)
+        inputIds[0] = NSNumber(value: Int32(token))
+
+        // causalMask [1,1,1,STATE_LEN]: 0 attend for slots 0…pos, -1e4 (fp16-safe) for the rest.
+        let mask = try MLMultiArray(shape: [1, 1, 1, NSNumber(value: stateLen)], dataType: .float16)
+        for slot in 0..<stateLen {
+            mask[slot] = NSNumber(value: Float(slot <= pos ? 0 : -1e4))
+        }
+
+        let writePos = try MLMultiArray(shape: [1], dataType: .int32)
+        writePos[0] = NSNumber(value: Int32(pos))
+
+        let features = try MLDictionaryFeatureProvider(dictionary: [
+            manifest.inputName: inputIds,
+            manifest.causalMaskFeature: mask,
+            manifest.writePosFeature: writePos,
+        ])
+        let out = try model.prediction(from: features, using: state)
+        guard let logits = out.featureValue(for: manifest.outputName)?.multiArrayValue else {
+            throw HearthError.onDeviceUnavailable(
+                "stateful Core ML model produced no `\(manifest.outputName)` output"
+            )
+        }
+        return logits
+    }
+
+    /// Pick the next token id from `[1, 1, vocab]` logits: argmax (greedy) when temperature ≤ 0,
+    /// else temperature-scaled softmax sampling. The single-token contract means we read row 0.
+    private static func nextToken(
+        from logits: MLMultiArray?,
+        temperature: Double,
+        vocab: Int
+    ) throws -> Int {
+        guard let logits else {
+            throw HearthError.onDeviceUnavailable("no logits to sample from (empty prefill?)")
+        }
+        let count = logits.count
+        let width = min(vocab, count)
+        // Logits are `[1, 1, vocab]`; the last dimension is contiguous, so slot i lives at offset i.
+        let base = count - width
+
+        if temperature <= 0 {
+            var bestIndex = 0
+            var bestValue = -Double.infinity
+            for i in 0..<width {
+                let v = logits[base + i].doubleValue
+                if v > bestValue {
+                    bestValue = v
+                    bestIndex = i
+                }
+            }
+            return bestIndex
+        }
+
+        var maxValue = -Double.infinity
+        for i in 0..<width {
+            maxValue = max(maxValue, logits[base + i].doubleValue)
+        }
+        var probs = [Double](repeating: 0, count: width)
+        var sum = 0.0
+        for i in 0..<width {
+            let p = exp((logits[base + i].doubleValue - maxValue) / temperature)
+            probs[i] = p
+            sum += p
+        }
+        var r = Double.random(in: 0..<1) * sum
+        for i in 0..<width {
+            r -= probs[i]
+            if r <= 0 { return i }
+        }
+        return width - 1
     }
 
     /// Pick the concrete `LanguageModel` for a compiled model: the stateful KV-cache subclass when

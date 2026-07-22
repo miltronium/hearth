@@ -372,6 +372,12 @@ def models_export_coreml(
     max_seq_len: int = typer.Option(
         512, "--max-seq-len", help="Fixed sequence length to trace/export at (Core ML is static)."
     ),
+    stateful: bool = typer.Option(
+        False,
+        "--stateful/--no-stateful",
+        help="Export the stateful KV-cache model (Approach B, O(1)/token, CPU-only, Qwen2; "
+        "ADR-011). Default off keeps Approach A (padded prefill, ANE) as the shipped path.",
+    ),
 ) -> None:
     """Export a checkpoint to a Core ML ``.mlpackage`` for the on-device Swift path (Phase 6).
 
@@ -391,6 +397,7 @@ def models_export_coreml(
         compute_units=compute_units,
         precision=precision,
         max_seq_len=max_seq_len,
+        stateful=stateful,
     )
     try:
         config.validate()
@@ -398,9 +405,10 @@ def models_export_coreml(
         console.print(f"[red]Invalid Core ML export config:[/red] {exc}")
         raise typer.Exit(code=1) from None
 
+    approach = "stateful KV-cache (Approach B)" if stateful else "padded prefill (Approach A)"
     console.print(
         f"Exporting [cyan]{source}[/cyan] to Core ML "
-        f"({precision}, {compute_units}, seq={max_seq_len}) -> {out} …"
+        f"({precision}, {compute_units}, seq={max_seq_len}, {approach}) -> {out} …"
     )
     try:
         outcome = run_export(config)

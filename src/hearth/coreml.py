@@ -40,7 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Bump when the manifest shape changes so the Swift loader can reject an incompatible sidecar.
-MANIFEST_SCHEMA_VERSION = 1
+# v2 adds the HEARTH stateful KV-cache contract (ADR-011 Approach B): `causal_mask_name`,
+# `write_pos_name`, `state_layers`, `state_name_prefixes`. v1 sidecars (Approach A) still parse.
+MANIFEST_SCHEMA_VERSION = 2
 
 # MLModel compute-unit placements exposed by coremltools. "cpuAndNeuralEngine" pins work to the
 # ANE (+CPU fallback) for the offline/low-power path; "all" also allows the GPU. Names match the
@@ -81,6 +83,18 @@ class CoreMLManifest:
     # input `inputIds` (+ optional `causalMask`), states `keyCache`/`valueCache`, output `logits`.
     input_name: str = "inputIds"
     output_name: str = "logits"
+    # --- HEARTH stateful KV-cache contract (ADR-011 Approach B; schema v2) ------------------
+    # The validated stateful export uses a fully-static single-token graph that swift-transformers'
+    # `LanguageModelWithStatefulKVCache` cannot drive: an explicit `writePos` input, a fixed-width
+    # `causalMask`, and PER-LAYER states (`keyCache{i}`/`valueCache{i}`). These fields tell the
+    # Swift loader to use its native decode loop instead. For Approach A (non-stateful) they stay
+    # defaulted:
+    # `write_pos_name=None`, `state_layers=None` — so a v1-shaped manifest is unaffected.
+    causal_mask_name: str = "causalMask"
+    write_pos_name: str | None = None
+    state_layers: int | None = None
+    key_cache_prefix: str = "keyCache"
+    value_cache_prefix: str = "valueCache"
     chat_template_id: str = _DEFAULT_CHAT_TEMPLATE
     tokenizer_files: list[str] = field(default_factory=list)
     compute_units: str = "cpuAndNeuralEngine"
@@ -95,6 +109,11 @@ class CoreMLManifest:
             "stateful": self.stateful,
             "input_name": self.input_name,
             "output_name": self.output_name,
+            "causal_mask_name": self.causal_mask_name,
+            "write_pos_name": self.write_pos_name,
+            "state_layers": self.state_layers,
+            "key_cache_prefix": self.key_cache_prefix,
+            "value_cache_prefix": self.value_cache_prefix,
             "max_seq_len": self.max_seq_len,
             "vocab_size": self.vocab_size,
             "bos_token_id": self.bos_token_id,
@@ -107,12 +126,17 @@ class CoreMLManifest:
 
     @classmethod
     def from_dict(cls, data: dict) -> CoreMLManifest:
-        """Parse a manifest dict, rejecting an unknown/newer schema version."""
+        """Parse a manifest dict, accepting schema v1 (Approach A) and v2 (adds stateful fields).
+
+        A newer/unknown schema version is rejected so a future incompatible sidecar fails loudly.
+        v1 manifests carry none of the stateful-contract keys; they fall back to the field defaults
+        (``write_pos_name=None``, ``state_layers=None``) and parse unchanged.
+        """
         version = data.get("schema_version")
-        if version != MANIFEST_SCHEMA_VERSION:
+        if version not in (1, MANIFEST_SCHEMA_VERSION):
             raise ValueError(
                 f"unsupported Core ML manifest schema_version {version!r} "
-                f"(this build understands {MANIFEST_SCHEMA_VERSION})"
+                f"(this build understands 1..{MANIFEST_SCHEMA_VERSION})"
             )
         if not data.get("eos_token_ids"):
             raise ValueError("manifest must list at least one eos_token_id")
@@ -125,6 +149,11 @@ class CoreMLManifest:
             stateful=data.get("stateful", True),
             input_name=data.get("input_name", "inputIds"),
             output_name=data.get("output_name", "logits"),
+            causal_mask_name=data.get("causal_mask_name", "causalMask"),
+            write_pos_name=data.get("write_pos_name"),
+            state_layers=data.get("state_layers"),
+            key_cache_prefix=data.get("key_cache_prefix", "keyCache"),
+            value_cache_prefix=data.get("value_cache_prefix", "valueCache"),
             chat_template_id=data.get("chat_template_id", _DEFAULT_CHAT_TEMPLATE),
             tokenizer_files=list(data.get("tokenizer_files", [])),
             compute_units=data.get("compute_units", "cpuAndNeuralEngine"),
@@ -167,6 +196,9 @@ class CoreMLExportConfig:
     compute_units: str = "cpuAndNeuralEngine"
     precision: str = "float16"
     max_seq_len: int = 512
+    # Opt-in to the stateful KV-cache export (ADR-011 Approach B, O(1)/token). Default False keeps
+    # Approach A (padded re-prefill, ANE) as the shipped path; stateful runs CPU-only today.
+    stateful: bool = False
 
     def validate(self) -> None:
         """Raise :class:`ValueError` unless the config is exportable."""
@@ -174,6 +206,8 @@ class CoreMLExportConfig:
             raise ValueError("source is required")
         if not self.output_dir:
             raise ValueError("output_dir is required")
+        if not isinstance(self.stateful, bool):
+            raise ValueError("stateful must be a bool")
         if self.compute_units not in _VALID_COMPUTE_UNITS:
             raise ValueError(
                 f"compute_units must be one of {_VALID_COMPUTE_UNITS}, got {self.compute_units!r}"
@@ -197,6 +231,7 @@ class CoreMLExportOutcome:
     max_seq_len: int
     manifest_path: Path
     tokenizer_paths: list[Path]
+    stateful: bool = False
 
 
 def sidecar_paths(mlpackage: Path) -> dict[str, Path]:
@@ -260,6 +295,11 @@ def write_sidecar(
         stateful=manifest.stateful,
         input_name=manifest.input_name,
         output_name=manifest.output_name,
+        causal_mask_name=manifest.causal_mask_name,
+        write_pos_name=manifest.write_pos_name,
+        state_layers=manifest.state_layers,
+        key_cache_prefix=manifest.key_cache_prefix,
+        value_cache_prefix=manifest.value_cache_prefix,
         chat_template_id=manifest.chat_template_id,
         tokenizer_files=written_names,
         compute_units=manifest.compute_units,
@@ -294,6 +334,7 @@ def export(
         max_seq_len=config.max_seq_len,
         manifest_path=manifest_path,
         tokenizer_paths=tokenizer_paths,
+        stateful=config.stateful,
     )
 
 
@@ -326,22 +367,34 @@ def _terminator_ids(tokenizer, model_config) -> list[int]:
 
 
 def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
-    """Default runner: convert an HF model to a **stateful** ``.mlpackage`` (needs ``[coreml]``).
+    """Default runner: convert an HF model to a ``.mlpackage`` (needs ``[coreml]``).
 
     Kept out of the tested path — tests always inject a fake runner. Raising with the fix hint
-    mirrors :class:`hearth.convert.ConvertUnavailableError`. The stateful KV-cache export
-    (single-token input + per-layer cache read/write via coremltools' ``States``, ADR-011) is the
-    model-specific piece validated on real hardware in ``docs/HANDOFF.md`` → Task C; here we set
-    up the graph, gather the tokenizer/manifest contract, and hand both back to :func:`export`.
+    mirrors :class:`hearth.convert.ConvertUnavailableError`. Dispatches on ``config.stateful``:
+    the default (``False``) is Approach A (padded re-prefill, ANE-friendly; validated end-to-end in
+    ``docs/RESULTS.md`` → Task C); ``True`` is the stateful KV-cache path (Approach B,
+    :func:`_stateful_export_runner`, ADR-011 / RESULTS Task C-2).
     """
     import importlib.util
-    import tempfile
 
     if importlib.util.find_spec("coremltools") is None:
         raise CoreMLExportUnavailableError(
             "coremltools is not installed. Install the Core ML export backend with: "
             "uv sync --extra coreml"
         )
+    if config.stateful:
+        return _stateful_export_runner(config)
+    return _plain_export_runner(config)
+
+
+def _plain_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:  # pragma: no cover
+    """Approach A runner: convert an HF model to a **non-stateful** ``.mlpackage``.
+
+    The padded-prefill contract swift-transformers' base ``LanguageModel`` drives (validated
+    end-to-end on real weights, ``docs/RESULTS.md`` → Task C). Sets up the graph, gathers the
+    tokenizer/manifest contract, and hands both back to :func:`export`.
+    """
+    import tempfile
 
     # Deferred heavy imports — only reached on the real path, never in tests.
     import coremltools as ct
@@ -376,19 +429,8 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     #   output : `logits`   [1, max_seq_len, vocab]
     # It reads `logits[tokenCount-1]` each step — O(n²) over a decode, but robust and correct, and
     # ideal for HEARTH's short cheap tasks (classify/summarize/commit-msg). This is the path
-    # validated end-to-end on real weights (docs/HANDOFF.md → Task C).
-    #
-    # STATEFUL KV-CACHE (Approach B, the O(1)/token optimization): **validated end-to-end on CPU**
-    # (2026-07-20) — reference `scripts/coreml_stateful_reference.py`, findings RESULTS.md → Task C-2.
-    # The exported stateful `.mlpackage` runs offline in CoreML and greedy-matches the source model.
-    # Working recipe: per-layer separate fp16 state buffers (`keyCache{i}`/`valueCache{i}`, NOT one
-    # 5-D state sliced per layer — that hard-SIGBUSes), fully static single-token contract
-    # (`inputIds [1,1]`, fixed-width `causalMask`, explicit `writePos`; one-hot blend write), convert
-    # `compute_units=CPU_ONLY` (the ANE compiler can't plan it: `-14`/`ANECCompile FAILED`), and
-    # `compute_precision=FLOAT32` (fp16 compute degenerates the decode). Not yet folded in here: it
-    # needs a small custom Swift decode loop for the `writePos` contract (revises the "no Swift
-    # change" note below) and runs on CPU until the ANE-compiler limitation is fixed upstream.
-    # Approach A ships (it uses the ANE).
+    # validated end-to-end on real weights (docs/RESULTS.md → Task C) and the shipped default (ANE).
+    # The stateful O(1)/token upgrade (Approach B) lives in `_stateful_export_runner` (RESULTS C-2).
     seq_len = config.max_seq_len
     is_stateful = False
 
@@ -455,6 +497,166 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
         output_name="logits",
         compute_units=config.compute_units,
         precision=config.precision,
+    )
+    return CoreMLRunResult(
+        output_dir=config.output_dir, manifest=manifest, tokenizer_dir=tok_dir
+    )
+
+
+def _stateful_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:  # pragma: no cover
+    """Approach B runner: convert a **Qwen2** model to a **stateful** KV-cache ``.mlpackage``.
+
+    Implements the recipe validated end-to-end on CPU (``scripts/coreml_stateful_reference.py``,
+    ``docs/RESULTS.md`` → Task C-2). Owns the Qwen2 attention core (reusing the HF weight modules)
+    so the KV write position is an explicit ``writePos`` input, and uses PER-LAYER separate fp16
+    state buffers (``keyCache{i}``/``valueCache{i}`` — NOT one 5-D state sliced per layer, which
+    hard-SIGBUSes CoreML's execution-plan builder). Fully-static single-token contract:
+    ``inputIds [1,1]`` (int32), ``causalMask [1,1,1,STATE_LEN]`` (fp16), ``writePos [1]`` (int32);
+    output ``logits [1,1,vocab]`` (fp16). Converts CPU-only at fp32 compute (the ANE compiler
+    can't plan this fp16 graph, and fp16 compute degenerates the decode).
+
+    Emits a schema-v2 manifest describing the stateful contract so the Swift native decode loop
+    (``CoreMLGeneration.swift``) can drive it — swift-transformers'
+    ``LanguageModelWithStatefulKVCache`` cannot (it expects a single ``keyCache``/``valueCache``
+    state, ranged ``inputIds``, no writePos).
+    """
+    import tempfile
+
+    # Deferred heavy imports — only reached on the real path, never in tests.
+    import coremltools as ct
+    import numpy as np
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, repeat_kv
+
+    state_len = config.max_seq_len
+
+    hf_config = AutoConfig.from_pretrained(config.source)
+    n_layers = hf_config.num_hidden_layers
+    n_kv = hf_config.num_key_value_heads
+    head_dim = getattr(hf_config, "head_dim", None) or (
+        hf_config.hidden_size // hf_config.num_attention_heads
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(config.source)
+    model = AutoModelForCausalLM.from_pretrained(
+        config.source, torch_dtype=torch.float32, attn_implementation="eager"
+    )
+    model.eval()
+
+    class _StatefulQwen(torch.nn.Module):
+        """Single-token stateful Qwen2 forward reusing the HF weight modules; static shapes."""
+
+        def __init__(self, inner_model):
+            super().__init__()
+            self.model = inner_model
+            for i in range(n_layers):
+                self.register_buffer(f"keyCache{i}", torch.zeros(1, n_kv, state_len, head_dim))
+                self.register_buffer(f"valueCache{i}", torch.zeros(1, n_kv, state_len, head_dim))
+
+        def _attn(self, sa, hidden, cos, sin, causalMask, oh, layer_idx):
+            input_shape = hidden.shape[:-1]
+            hidden_shape = (*input_shape, -1, head_dim)
+            q = sa.q_proj(hidden).view(hidden_shape).transpose(1, 2)
+            k = sa.k_proj(hidden).view(hidden_shape).transpose(1, 2)
+            v = sa.v_proj(hidden).view(hidden_shape).transpose(1, 2)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            # One-hot blend write of the new token's KV at writePos into this layer's cache.
+            kc = getattr(self, f"keyCache{layer_idx}")
+            vc = getattr(self, f"valueCache{layer_idx}")
+            kc[:] = kc * (1 - oh) + k * oh
+            vc[:] = vc * (1 - oh) + v * oh
+            k_all = repeat_kv(kc, sa.num_key_value_groups)
+            v_all = repeat_kv(vc, sa.num_key_value_groups)
+            attn = torch.matmul(q, k_all.transpose(2, 3)) * sa.scaling + causalMask
+            attn = torch.nn.functional.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
+            out = torch.matmul(attn, v_all).transpose(1, 2).contiguous().reshape(*input_shape, -1)
+            return sa.o_proj(out)
+
+        def forward(self, inputIds, causalMask, writePos):
+            inner = self.model.model
+            oh = (torch.arange(state_len) == writePos).to(self.keyCache0.dtype).view(
+                1, 1, state_len, 1
+            )
+            position_ids = writePos.view(1, 1).long()
+            hidden = inner.embed_tokens(inputIds)
+            cos, sin = inner.rotary_emb(hidden, position_ids)
+            for i, layer in enumerate(inner.layers):
+                residual = hidden
+                h = layer.input_layernorm(hidden)
+                h = self._attn(layer.self_attn, h, cos, sin, causalMask, oh, i)
+                hidden = residual + h
+                residual = hidden
+                h = layer.post_attention_layernorm(hidden)
+                hidden = residual + layer.mlp(h)
+            hidden = inner.norm(hidden)
+            return self.model.lm_head(hidden)
+
+    wrapper = _StatefulQwen(model).eval()
+    for _p in wrapper.parameters():  # torch.export bans mutating grad-requiring graph inputs
+        _p.requires_grad_(False)
+
+    example = (
+        torch.zeros((1, 1), dtype=torch.long),
+        torch.zeros((1, 1, 1, state_len)),
+        torch.zeros(1, dtype=torch.long),
+    )
+    exported = torch.export.export(wrapper, example).run_decompositions({})
+
+    per_layer = (1, n_kv, state_len, head_dim)
+    states = []
+    for i in range(n_layers):
+        states.append(
+            ct.StateType(
+                wrapped_type=ct.TensorType(shape=per_layer, dtype=np.float16), name=f"keyCache{i}"
+            )
+        )
+        states.append(
+            ct.StateType(
+                wrapped_type=ct.TensorType(shape=per_layer, dtype=np.float16), name=f"valueCache{i}"
+            )
+        )
+    mlmodel = ct.convert(
+        exported,
+        inputs=[
+            ct.TensorType(name="inputIds", shape=(1, 1), dtype=np.int32),
+            ct.TensorType(name="causalMask", shape=(1, 1, 1, state_len), dtype=np.float16),
+            ct.TensorType(name="writePos", shape=(1,), dtype=np.int32),
+        ],
+        outputs=[ct.TensorType(name="logits", dtype=np.float16)],
+        states=states,
+        minimum_deployment_target=ct.target.macOS15,
+        # fp16 compute degenerates the decode into repetition; fp32 gives exact greedy parity.
+        compute_precision=ct.precision.FLOAT32,
+        # The ANE compiler can't build a plan for this stateful fp16 graph (`-14`); CPU-only avoids.
+        compute_units=ct.ComputeUnit.CPU_ONLY,
+    )
+
+    config.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    mlmodel.save(str(config.output_dir))
+
+    # Stage the tokenizer so `export()` can copy it into the sidecar (same as the plain runner).
+    tok_dir = Path(tempfile.mkdtemp(prefix="hearth-coreml-tok-"))
+    tokenizer.save_pretrained(str(tok_dir))
+
+    manifest = CoreMLManifest(
+        source=config.source,
+        max_seq_len=state_len,  # STATE_LEN — the fixed KV-cache window
+        vocab_size=int(getattr(hf_config, "vocab_size", len(tokenizer))),
+        eos_token_ids=_terminator_ids(tokenizer, hf_config),
+        bos_token_id=getattr(tokenizer, "bos_token_id", None),
+        stateful=True,
+        input_name="inputIds",
+        output_name="logits",
+        causal_mask_name="causalMask",
+        write_pos_name="writePos",
+        state_layers=n_layers,
+        key_cache_prefix="keyCache",
+        value_cache_prefix="valueCache",
+        # Report the compute reality of Approach B (CPU-only, fp32 compute) regardless of the
+        # requested flags, so the Swift loader and diagnostics reflect what actually shipped.
+        compute_units="cpuOnly",
+        precision="float32",
     )
     return CoreMLRunResult(
         output_dir=config.output_dir, manifest=manifest, tokenizer_dir=tok_dir

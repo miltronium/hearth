@@ -32,23 +32,35 @@ def _manifest(source: str = "org/model", **over) -> CoreMLManifest:
     return CoreMLManifest(**base)
 
 
-def _fake_runner_factory(seen: dict, *, tokenizer_dir=None):
+def _fake_runner_factory(seen: dict, *, tokenizer_dir=None, stateful=False):
     def fake_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
         seen["source"] = config.source
         seen["compute_units"] = config.compute_units
         seen["precision"] = config.precision
         seen["max_seq_len"] = config.max_seq_len
+        seen["stateful"] = config.stateful
         # A .mlpackage is a directory bundle; write a stub to prove the path is created.
         config.output_dir.mkdir(parents=True, exist_ok=True)
         (config.output_dir / "Manifest.json").write_text("{}")
+        # Base fields the runner always knows; `extra` (stateful) may override compute/precision.
+        fields = dict(
+            source=config.source,
+            max_seq_len=config.max_seq_len,
+            compute_units=config.compute_units,
+            precision=config.precision,
+        )
+        if stateful:
+            # Mirror what `_stateful_export_runner` records for the v2 (writePos) contract.
+            fields.update(
+                stateful=True,
+                write_pos_name="writePos",
+                state_layers=4,
+                compute_units="cpuOnly",
+                precision="float32",
+            )
         return CoreMLRunResult(
             output_dir=config.output_dir,
-            manifest=_manifest(
-                source=config.source,
-                max_seq_len=config.max_seq_len,
-                compute_units=config.compute_units,
-                precision=config.precision,
-            ),
+            manifest=_manifest(**fields),
             tokenizer_dir=tokenizer_dir,
         )
 
@@ -76,6 +88,7 @@ def test_export_delegates_to_runner(tmp_path):
         "compute_units": "cpuAndNeuralEngine",
         "precision": "float16",
         "max_seq_len": 512,
+        "stateful": False,
     }
     assert (out / "Manifest.json").exists()
 
@@ -95,6 +108,32 @@ def test_export_threads_custom_settings(tmp_path):
     assert outcome.compute_units == "all"
     assert outcome.precision == "int8"
     assert outcome.max_seq_len == 1024
+
+
+def test_export_stateful_defaults_off(tmp_path):
+    seen = {}
+    outcome = export(
+        CoreMLExportConfig(source="org/model", output_dir=tmp_path / "m.mlpackage"),
+        runner=_fake_runner_factory(seen),
+    )
+    assert outcome.stateful is False
+    assert seen["stateful"] is False
+
+
+def test_export_threads_stateful_flag(tmp_path):
+    seen = {}
+    out = tmp_path / "m.mlpackage"
+    outcome = export(
+        CoreMLExportConfig(source="org/model", output_dir=out, stateful=True),
+        runner=_fake_runner_factory(seen, stateful=True),
+    )
+    assert outcome.stateful is True
+    assert seen["stateful"] is True
+    # A stateful runner writes a v2 sidecar describing the writePos contract; it round-trips.
+    manifest = CoreMLManifest.from_dict(json.loads(sidecar_paths(out)["manifest"].read_text()))
+    assert manifest.stateful is True
+    assert manifest.write_pos_name == "writePos"
+    assert manifest.state_layers == 4
 
 
 # --- Sidecar contract -------------------------------------------------------------------------
@@ -177,6 +216,51 @@ def test_sidecar_paths_are_stem_prefixed_siblings():
 def test_manifest_round_trips():
     m = _manifest(bos_token_id=1, tokenizer_files=["m.tokenizer.json"])
     assert CoreMLManifest.from_dict(m.to_dict()) == m
+
+
+def test_stateful_manifest_v2_round_trips():
+    m = _manifest(
+        stateful=True,
+        write_pos_name="writePos",
+        causal_mask_name="causalMask",
+        state_layers=24,
+        key_cache_prefix="keyCache",
+        value_cache_prefix="valueCache",
+        compute_units="cpuOnly",
+        precision="float32",
+    )
+    data = m.to_dict()
+    assert data["schema_version"] == MANIFEST_SCHEMA_VERSION == 2
+    assert data["write_pos_name"] == "writePos"
+    assert data["state_layers"] == 24
+    assert CoreMLManifest.from_dict(data) == m
+
+
+def test_manifest_v1_still_parses():
+    # A schema-v1 (Approach A) sidecar has none of the stateful-contract keys. It must still parse
+    # (back-compat), defaulting the new fields — write_pos_name=None, state_layers=None.
+    v1 = {
+        "schema_version": 1,
+        "source": "org/legacy",
+        "stateful": False,
+        "input_name": "inputIds",
+        "output_name": "logits",
+        "max_seq_len": 512,
+        "vocab_size": 100,
+        "bos_token_id": None,
+        "eos_token_ids": [2],
+        "chat_template_id": "chatml",
+        "tokenizer_files": ["legacy.tokenizer.json"],
+        "compute_units": "cpuAndNeuralEngine",
+        "precision": "float16",
+    }
+    parsed = CoreMLManifest.from_dict(v1)
+    assert parsed.source == "org/legacy"
+    assert parsed.stateful is False
+    assert parsed.write_pos_name is None
+    assert parsed.state_layers is None
+    assert parsed.causal_mask_name == "causalMask"
+    assert parsed.eos_token_ids == [2]
 
 
 def test_manifest_rejects_unknown_schema_version():
@@ -296,4 +380,40 @@ def test_cli_export_coreml_unavailable_extra(tmp_path, monkeypatch):
         env={"COLUMNS": "200"},
     )
     assert result.exit_code == 1
+    assert "uv sync --extra coreml" in result.stdout
+
+
+def test_cli_export_coreml_accepts_stateful_flag(tmp_path, monkeypatch):
+    # `--stateful` is accepted and threaded through. With the [coreml] extra absent the command
+    # still exits cleanly with the fix hint (never attempting a real conversion), proving the flag
+    # parses and reaches the runner dispatch.
+    import importlib.util
+
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "coremltools":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    result = CliRunner().invoke(
+        app,
+        [
+            "models",
+            "export-coreml",
+            "--source",
+            "org/m",
+            "--out",
+            str(tmp_path / "m.mlpackage"),
+            "--stateful",
+        ],
+        env={"COLUMNS": "200"},
+    )
+    assert result.exit_code == 1
+    assert "Approach B" in result.stdout  # the echo reflects the stateful path
     assert "uv sync --extra coreml" in result.stdout
