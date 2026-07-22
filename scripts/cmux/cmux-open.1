@@ -1,0 +1,76 @@
+.TH CMUX-OPEN 1 "2026-07-21" "HEARTH" "HEARTH cmux integration"
+.SH NAME
+cmux-open \- launch a cmux workspace in the open (non-confidential) tier
+.SH SYNOPSIS
+.B cmux-open
+.RB [ --check ]
+.RB [ --dry-run ]
+.RI [ REPO ]
+.br
+.B cmux-open --cost
+.SH DESCRIPTION
+The counterpart to
+.BR cmux-sealed (1).
+The
+.B open
+tier permits what the sealed tier forbids: cloud VMs, networked Docker, and frontier escalation.
+Because that is real egress,
+.B cmux-open
+opens the tier
+.B only
+for a repo explicitly classified
+.B open
+(ADR\-C003,
+.BR config/cmux/tiers.yaml )
+and
+.B fails closed to sealed
+for any confidential or unclassified repo. The default is sealed; the open tier is strictly opt\-in.
+.PP
+If
+.I REPO
+is omitted it defaults to the current directory. Every open decision is written to an audit log.
+.SH OPTIONS
+.TP
+.B --check
+Verify eligibility only; do not launch. A grant is not logged (a refusal always is).
+.TP
+.B --dry-run
+Verify, log the grant, and print the launch command, but do not launch.
+.TP
+.B --cost
+Show the HEARTH escalation/cost rollup for open\-tier frontier use. (Frontier spend from a pane's own
+agent is outside HEARTH's meter.)
+.SH "EXIT STATUS"
+.TP
+.B 0
+Eligible for the open tier (or --cost/--check succeeded).
+.TP
+.B 2
+Refused \(em the repo is sealed or unclassified; fail\-closed.
+.TP
+.B 64
+Usage error.
+.SH FILES
+.TP
+.B config/cmux/tiers.yaml
+Tier policy. A repo is open only via an explicit
+.B open:
+rule and no matching
+.BR sealed_override .
+.TP
+.B $CMUX_TIER_AUDIT_LOG
+Append\-only audit log of open\-tier grants and refusals (default
+.BR ~/.hearth/cmux-tier-audit.log ).
+.SH "SEE ALSO"
+.BR cmux-sealed (1),
+.B docs/cmux/RUNBOOK_open.md ,
+.B docs/cmux/ARCHITECTURE.md ,
+.B docs/cmux/DECISIONS.md
+.SH CAVEAT
+Never open a confidential repo here. The gate enforces this from
+.BR tiers.yaml ,
+but a mis\-written broad
+.B open:
+rule is dangerous \(em keep a
+.B sealed_override
+for every confidential marker.

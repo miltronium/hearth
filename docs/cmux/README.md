@@ -99,7 +99,7 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | Pane-equivalent offload to sealed HEARTH **validated** (1053 tokens saved, 0 esc); live-GUI proof folds into C3/C6 | ☑ |
 | C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); on-hardware egress-probe run pending | ◐ |
 | C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Triage **validated** on real model (3/4 panes, 0 tokens); live-socket run pending | ◐ |
-| C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Tier selection default-sealed; cloud reachable only when explicitly classified | ☐ |
+| C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Gate **demonstrated** (open opt-in only; sealed/unclassified refused + logged); live cloud run pending | ◐ |
 | C6 | `cmux/graduation` | Merge to `main` | Full integration proven, working, beneficial; RESULTS captured | ☐ |
 
 Phases are described in full in [ROADMAP.md](ROADMAP.md). This table is the at-a-glance index;
