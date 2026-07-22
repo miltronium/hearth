@@ -184,6 +184,11 @@ escalation permitted (`routing.yaml`); networked Docker allowed. Config-only; HE
 
 Only when every box is checked does `cmux/integration` merge to `main`.
 
+**Status:** ◐ **Ready for the run.** The turnkey on-hardware runbook (`docs/cmux/RUNBOOK_onhardware.md`)
+and the `docs/cmux/RESULTS.md` scaffold are written — one hands-on session closes C0 §9 + C2-live + C3
++ C4 + C5 and decides graduation. The merge/tag commands are in the runbook Part 3. `main` stays the
+working standalone HEARTH until every graduation box is green.
+
 ---
 
 ## Deferred / future (not in scope for C0–C6)
