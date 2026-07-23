@@ -46,18 +46,21 @@ if [ -z "$pids" ]; then
   exit 2
 fi
 
-echo "==> cmux egress probe — watching pids: $(echo "$pids" | tr '\n' ' ')"
-echo "    duration=${SECONDS_TO_WATCH}s  (loopback = 127.0.0.1/::1/localhost = local, OK)"
+echo "==> cmux egress probe — watching ALL processes matching '$PATTERN' (re-scanned each sample)"
+echo "    initial pids: $(echo "$pids" | tr '\n' ' ')  duration=${SECONDS_TO_WATCH}s"
+echo "    (loopback = 127.0.0.1/::1/localhost = local, OK)"
 echo "    reference denylist (AUDIT.md §5): posthog / sentry.io / *.relay.cmux.dev / cmux.com / suggestqueries / duckduckgo / bing"
 echo
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-# Sample established connections repeatedly over the window; union the results.
+# Sample established connections repeatedly over the window; union the results. cmux is MULTI-PROCESS
+# (main app + "cmux Helper" + webview/networking children), so re-scan pids EACH sample to catch
+# children spawned after start — a single-pid snapshot would miss egress in a helper.
 end=$(( $(date +%s) + SECONDS_TO_WATCH ))
 while [ "$(date +%s)" -lt "$end" ]; do
-  for p in $pids; do
+  for p in $(pgrep -f "$PATTERN" 2>/dev/null); do
     lsof -nP -iTCP -a -p "$p" -sTCP:ESTABLISHED 2>/dev/null | awk 'NR>1 {print $9}' >> "$tmp" || true
   done
   sleep 3
