@@ -26,13 +26,20 @@ Fully local; safe under the sealed tier.
    Unknown ⇒ none, so the model never produces a spurious notification.
 5. `cmux notify --surface <id> --title … --body …` for attention/info panes.
 
-## Run
+## Run — INSIDE a cmux pane
+
+cmux's automation socket only accepts **processes descended from cmux** (it injects
+`CMUX_SOCKET_PASSWORD` into the shells it spawns in panes). So the orchestrator must run **in a cmux
+pane**, not an external terminal — from outside you get `Access denied - only processes started inside
+cmux can connect`. The cmux CLI also isn't on PATH by default; the orchestrator auto-locates it
+(`$CMUX_BIN` → PATH → `/Applications/cmux.app/Contents/Resources/bin/cmux`).
 
 ```sh
-# live (needs a running cmux; set the socket for determinism)
-export CMUX_SOCKET_PATH=~/.local/state/cmux/cmux.sock
-HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py            # one sweep, notifies
+# open a pane in cmux, then in that pane:
+cmux --version                 # confirm the CLI is reachable from the pane
+cd /path/to/HEARTH
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py --dry-run  # triage only, no notify
+HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py            # one sweep, notifies
 
 # offline demo (no cmux GUI): triage 4 realistic panes on the local model
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator_demo.py
