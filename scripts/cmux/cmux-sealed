@@ -45,10 +45,25 @@ warn() { printf '  \033[33mWARN\033[0m  %s\n' "$1"; }
 
 # --- firewall install/remove (structural egress seal; needs sudo) ------------------------------
 if [ "$MODE" = "install-fw" ]; then
-  [ -f "$PF_CONF" ] || { echo "missing $PF_CONF" >&2; exit 1; }
-  echo "==> loading pf anchor '$PF_ANCHOR' (loopback-only egress for the cmux uid). Needs sudo."
-  sudo pfctl -a "$PF_ANCHOR" -f "$PF_CONF" && sudo pfctl -e 2>/dev/null || true
-  echo "==> loaded. Verify: sudo pfctl -a $PF_ANCHOR -sr"
+  SEALED_UID="${CMUX_SEALED_UID:-$(id -u)}"
+  echo "==> pf egress seal: loopback-only for uid $SEALED_UID. Needs sudo."
+  echo "    WARNING: this blocks NON-loopback traffic for that uid — the login user's browser/apps lose"
+  echo "    internet until '$0 --remove-firewall'. To scope to cmux ONLY, run cmux as a dedicated user"
+  echo "    and set CMUX_SEALED_UID to its uid."
+  rules="$(mktemp)"
+  printf 'pass quick on lo0 all\nblock drop out proto { tcp udp } from any to ! 127.0.0.0/8 user %s\nblock drop out proto { tcp udp } from any to ! ::1 user %s\n' "$SEALED_UID" "$SEALED_UID" > "$rules"
+  if sudo pfctl -a "$PF_ANCHOR" -f "$rules"; then
+    sudo pfctl -e 2>/dev/null || true   # enable pf (ignore 'already enabled')
+    rm -f "$rules"
+    echo "==> anchor '$PF_ANCHOR' loaded. ⚠ On stock macOS an anchor is ENFORCED only if /etc/pf.conf"
+    echo "    references it (a line: anchor \"$PF_ANCHOR\"). If it doesn't, these rules are DORMANT — do"
+    echo "    not trust them. The authoritative check is scripts/cmux/cmux_egress_probe.sh."
+    echo "    Reliable, app-scoped alternative (recommended): LuLu (free) or Little Snitch — block cmux."
+  else
+    rm -f "$rules"
+    echo "==> ERROR: pfctl failed to load the rules. Firewall NOT active." >&2
+    exit 1
+  fi
   exit 0
 fi
 if [ "$MODE" = "remove-fw" ]; then
@@ -78,13 +93,15 @@ else
   mandatory_ok=0
 fi
 
-# 3) MANDATORY: OS-level loopback-only egress firewall is active (the structural seal, ADR-C006 #5).
-if command -v pfctl >/dev/null 2>&1 && sudo -n pfctl -a "$PF_ANCHOR" -sr 2>/dev/null | grep -q 'block'; then
-  pass "firewall: pf anchor '$PF_ANCHOR' active with a block rule (loopback-only egress)"
-elif pfctl -a "$PF_ANCHOR" -sr 2>/dev/null | grep -q 'block'; then
-  pass "firewall: pf anchor '$PF_ANCHOR' active with a block rule"
+# 3) MANDATORY: an OS-level egress seal is present (the structural seal, ADR-C006 #5). Accept either a
+#    running app-firewall (LuLu/Little Snitch — reliable, app-scoped) or the pf anchor's block rules.
+#    NOTE: the authoritative proof of no-egress is the outcome, via scripts/cmux/cmux_egress_probe.sh.
+if pgrep -fi "lulu" >/dev/null 2>&1 || pgrep -fi "little snitch" >/dev/null 2>&1; then
+  pass "firewall: app-level egress firewall (LuLu/Little Snitch) running — ensure it is set to block cmux"
+elif { sudo -n pfctl -a "$PF_ANCHOR" -sr 2>/dev/null || pfctl -a "$PF_ANCHOR" -sr 2>/dev/null; } | grep -q 'block'; then
+  pass "firewall: pf anchor '$PF_ANCHOR' loaded — confirm it is ENFORCED with the egress probe"
 else
-  fail "firewall: pf anchor '$PF_ANCHOR' not loaded — the structural egress seal is absent. Run: $0 --install-firewall"
+  fail "firewall: no egress seal detected. Block cmux with LuLu/Little Snitch, or run '$0 --install-firewall' (pf). The egress probe is the real proof."
   mandatory_ok=0
 fi
 
