@@ -67,6 +67,7 @@ token-saving, gate-able brain cmux's agents offload to. Same hardware, both Swif
 | [AUDIT.md](AUDIT.md) | C0 egress audit: 123 findings, native-core vs cloud, the seal invariant. |
 | [RESULTS.md](RESULTS.md) | Validation results — headless (done) + on-hardware (C6) slots. |
 | **Runbooks** | [wiring](RUNBOOK_wiring.md) (C2) · [sealed](RUNBOOK_sealed.md) (C3) · [orchestrator](RUNBOOK_orchestrator.md) (C4) · [open](RUNBOOK_open.md) (C5) · [on-hardware](RUNBOOK_onhardware.md) (C6) |
+| [TODO.md](TODO.md) | **Parked work** (sealed-tier firewall hardening, C5/C6 live runs) + what's active now. |
 
 ---
 
@@ -100,10 +101,10 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | C0 | `cmux/egress-audit` | cmux egress audit ([AUDIT.md](AUDIT.md)) + `lsof` probe | Static: **done** (123 findings, all disableable). Dynamic `lsof` run: pending real-hardware exec | ◐ |
 | C1 | `cmux/adr` | ADRs ratifying the two-tier gated model | ADR-C001…C006 **Accepted**; tier-classification concrete ([tiers.example.yaml](../../config/cmux/tiers.example.yaml)) | ☑ |
 | C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | Pane-equivalent offload to sealed HEARTH **validated** (1053 tokens saved, 0 esc); live-GUI proof folds into C3/C6 | ☑ |
-| C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); on-hardware egress-probe run pending | ◐ |
+| C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); on-hardware firewall sealing **PARKED** → [TODO](TODO.md) | ◐ |
 | C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Triage **validated** on real model (3/4 panes, 0 tokens); live-socket run pending | ◐ |
-| C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Gate **demonstrated** (open opt-in only; sealed/unclassified refused + logged); live cloud run pending | ◐ |
-| C6 | `cmux/graduation` | Merge to `main` | On-hardware runbook + [RESULTS](RESULTS.md) scaffold **ready**; hardware run + graduation pending | ◐ |
+| C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Gate **demonstrated**; live cloud run **PARKED** → [TODO](TODO.md) | ◐ |
+| C6 | `cmux/graduation` | Merge to `main` | Runbook + RESULTS ready; graduation **PARKED** on sealed hardening → [TODO](TODO.md) | ◐ |
 
 Phases are described in full in [ROADMAP.md](ROADMAP.md). This table is the at-a-glance index;
 the roadmap holds the detail and acceptance criteria.
