@@ -63,7 +63,18 @@ export OSS_REPO="$HOME/oss/any/dir"
 
 export CMUX_APP="/Applications/cmux.app"                      # where you installed cmux (step 1)
 export CMUX_SOCKET_PATH="$HOME/.local/state/cmux/cmux.sock"   # cmux's socket; the probe + orchestrator target it
+
+# cmux's CLI Sentry is a SEPARATE, env-only gate (AUDIT §3 A4) — the app defaults don't cover it.
+# Export these in every shell that runs cmux / cmux-sealed, or cmux-sealed --check --strict FAILs:
+export CMUX_CLI_SENTRY_DISABLED=1
+export CMUX_CLAUDE_HOOK_SENTRY_DISABLED=1
+
+# Create the two test dirs (empty dirs are fine — see above):
+mkdir -p "$CONF_REPO" "$OSS_REPO"
 ```
+
+> **You must actually install cmux first (step 1).** If `cmux --version` says "command not found",
+> the app isn't installed — `brew install --cask cmux` (or the DMG) before anything below.
 
 Add an `open:` rule for `$OSS_REPO` (and confirm no `sealed_override` matches it):
 
@@ -75,15 +86,30 @@ cp -n config/cmux/tiers.example.yaml config/cmux/tiers.yaml   # then edit: add a
 
 ## Part 1 — Sealed tier (closes C0 §9 · C2 · C3 · C4)
 
-### 1.1 Start a sealed HEARTH + load the egress firewall
+### 1.1 Start a sealed HEARTH + set up the egress seal
 
 ```sh
 scripts/hearth_private.sh --check                 # expect: "Posture verified: no router egress path"
 scripts/hearth_private.sh &                        # sealed gateway on 127.0.0.1:8080
-scripts/cmux/cmux-sealed --install-firewall        # loads the pf loopback-only anchor (needs sudo)
-sudo pfctl -a cmux-sealed -sr                       # expect: block rules present
 ```
-**RESULTS §1.1:** paste the `--check` line and the `pfctl -sr` output.
+
+**Egress seal — pick one.** The structural seal exists because cmux's browser + iroh have no code
+off-switch (ADR-C006). Two ways to provide it:
+
+- **Recommended: an app-scoped firewall** — install **LuLu** (free, github.com/objective-see/LuLu) or
+  Little Snitch and add a rule that **blocks cmux's outbound** connections. Reliable, precise, and
+  `cmux-sealed --check` accepts a running LuLu/Little Snitch.
+- **pf (advanced)** — `scripts/cmux/cmux-sealed --install-firewall` loads a loopback-only anchor for
+  your uid. ⚠ Two caveats it prints: it blocks that uid's *entire* non-loopback egress (your browser
+  too) until `--remove-firewall`; and on stock macOS an anchor is enforced only if `/etc/pf.conf`
+  references `anchor "cmux-sealed"` — otherwise the rules are dormant. **So pf is not self-proving.**
+
+> **The authoritative proof of the seal is always the empirical probe (§1.3), not "a firewall is
+> configured."** You can even run §1.3 first with just the app-level seal (telemetry off + signed out,
+> which already disables iroh/PostHog/Sentry) to see what cmux *actually* does — then add the firewall
+> as the backstop for the no-switch paths and re-probe.
+
+**RESULTS §1.1:** note which seal you used (LuLu / Little Snitch / pf), and paste any verification output.
 
 ### 1.2 Preflight — must pass all mandatory gates
 
