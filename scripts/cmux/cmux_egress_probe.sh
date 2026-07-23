@@ -9,6 +9,12 @@
 # It does NOT itself make any network connection. It only reads local process/socket state (lsof) and,
 # if available, nettop. Safe to run on the confidential machine.
 #
+# ⚠ LIMITATION — this is a SAMPLING probe (every ~3s), so it can MISS a brief connection that opens and
+# closes between samples, or one that fires after the window ends (e.g. Sparkle delays its first update
+# check — a real case that slipped past a 150s run). A clean result here is a good sign, NOT proof.
+# The AUTHORITATIVE seal is a continuous, deny-by-default egress firewall (LuLu / Little Snitch) that
+# logs/blocks every connection attempt. Use this probe for a quick look; trust the firewall for the guarantee.
+#
 # Usage:
 #   scripts/cmux/cmux_egress_probe.sh                 # watch all cmux processes for 60s, list non-loopback conns
 #   scripts/cmux/cmux_egress_probe.sh --seconds 300   # longer capture (e.g. idle baseline)
