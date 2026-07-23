@@ -58,6 +58,7 @@ token-saving, gate-able brain cmux's agents offload to. Same hardware, both Swif
 | Doc | What's in it |
 | --- | --- |
 | **README.md** (this) | Master map, status tracker, branch model. Start here. |
+| [HANDOFF.md](HANDOFF.md) | **Resume-here session state** — read first when picking the work back up. |
 | [PROPOSAL.md](PROPOSAL.md) | Why we're doing this: problem, vision, goals/non-goals, success criteria, risks. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Cockpit/engine design, the two-tier **sealed/open** model, component mapping, the gate. |
 | [PRIVACY.md](PRIVACY.md) | The gated privacy model, fail-closed enforcement, the honest structural-vs-policy tradeoff, verification. |
