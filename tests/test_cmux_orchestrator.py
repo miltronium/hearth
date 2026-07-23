@@ -85,6 +85,11 @@ def test_run_once_dry_run_does_not_notify():
     assert client.notifications == []
 
 
+def test_default_cmux_bin_prefers_env(monkeypatch):
+    monkeypatch.setenv("CMUX_BIN", "/custom/path/cmux")
+    assert orch.default_cmux_bin() == "/custom/path/cmux"
+
+
 def test_cli_client_builds_correct_argv(monkeypatch):
     calls: list[list[str]] = []
 

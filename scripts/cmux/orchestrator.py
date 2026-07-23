@@ -21,9 +21,32 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
+
+# cmux ships its CLI *inside* the app bundle, not on PATH. Auto-locate it so the orchestrator works
+# from a pane without manual setup. NOTE: cmux's socket only accepts processes DESCENDED FROM cmux
+# (it injects CMUX_SOCKET_PASSWORD into pane shells), so the orchestrator must run INSIDE a cmux pane.
+_CMUX_BUNDLE_BINS = [
+    "/Applications/cmux.app/Contents/Resources/bin/cmux",
+    os.path.expanduser("~/Applications/cmux.app/Contents/Resources/bin/cmux"),
+]
+
+
+def default_cmux_bin() -> str:
+    """Resolve the cmux CLI: $CMUX_BIN, then PATH, then the app bundle, else bare 'cmux'."""
+    env = os.environ.get("CMUX_BIN")
+    if env:
+        return env
+    on_path = shutil.which("cmux")
+    if on_path:
+        return on_path
+    for candidate in _CMUX_BUNDLE_BINS:
+        if os.path.exists(candidate):
+            return candidate
+    return "cmux"
 
 # Pane states the local model classifies into, and how each maps to a triage priority.
 STATES = ["working", "waiting", "done", "error"]
@@ -60,8 +83,8 @@ class CmuxClient(Protocol):
 class CmuxCliClient:
     """Talks to a running cmux via its `cmux` CLI over the local Unix socket."""
 
-    def __init__(self, cmux_bin: str = "cmux", socket_path: str | None = None, timeout: float = 15.0):
-        self.base = [cmux_bin]
+    def __init__(self, cmux_bin: str | None = None, socket_path: str | None = None, timeout: float = 15.0):
+        self.base = [cmux_bin or default_cmux_bin()]
         sp = socket_path or os.environ.get("CMUX_SOCKET_PATH")
         if sp:
             self.base += ["--socket", sp]
@@ -194,14 +217,20 @@ def main() -> int:
     ap.add_argument("--lines", type=int, default=80, help="screen lines per pane to read")
     ap.add_argument("--dry-run", action="store_true", help="triage but do not send notifications")
     ap.add_argument("--socket", default=None, help="cmux socket path (else $CMUX_SOCKET_PATH)")
+    ap.add_argument("--cmux-bin", default=None, help="path to the cmux CLI (else $CMUX_BIN / PATH / app bundle)")
     args = ap.parse_args()
 
-    client = CmuxCliClient(socket_path=args.socket)
+    # cmux's socket only accepts processes descended from cmux. If we're not inside a pane, say so.
+    if not os.environ.get("CMUX_SOCKET_PASSWORD") and not os.environ.get("CMUX_SURFACE_ID"):
+        print("note: no CMUX_SOCKET_PASSWORD/CMUX_SURFACE_ID in env — run this INSIDE a cmux pane "
+              "(cmux only lets its own child processes use the socket).")
+
+    client = CmuxCliClient(cmux_bin=args.cmux_bin, socket_path=args.socket)
     classify, summarize = hearth_callables()
     try:
         results = run_once(client, classify, summarize, lines=args.lines, do_notify=not args.dry_run)
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as exc:
-        print(f"orchestrator: could not reach cmux ({exc}). Is cmux running / is --socket correct?")
+        print(f"orchestrator: could not reach cmux ({exc}). Run inside a cmux pane; check --socket/--cmux-bin.")
         return 1
     for t in results:
         flag = "🔔" if t.notified else ("· " if t.priority == "none" else "  ")
