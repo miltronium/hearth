@@ -42,13 +42,27 @@ defaults write com.cmuxterm.app SUEnableAutomaticChecks -bool false
 #    still validates the real binary, but you can re-run the AUDIT §5 host greps against that tag.
 ```
 
-Pick your test repos and export them once:
+Pick two directories to test the two tiers with, and `export` them (plus cmux's app + socket) so every
+later command can refer to them by name. **They need NOT be git repos — any directory works, even an
+empty one.** The tier classifier matches on the directory *path* (and only consults `git remote origin`
+if you write a `remote_host` rule); cmux opens any dir as a workspace (it just won't show git branch info
+for a non-repo). Contents are irrelevant here — you're validating egress and tier-gating, not doing work.
 
 ```sh
-export CONF_REPO="$HOME/path/to/a/confidential/repo"     # for the sealed tier
-export OSS_REPO="$HOME/oss/some-public-repo"             # for the open tier (add an open: rule, below)
-export CMUX_APP="/Applications/cmux.app"
-export CMUX_SOCKET_PATH="$HOME/.local/state/cmux/cmux.sock"   # deterministic socket (AUDIT map)
+# NOTE: `export` lasts for THIS terminal session only (nothing is saved to disk). If you open a new
+# terminal mid-run, re-run these four lines. Edit the paths to real directories on your machine.
+
+# SEALED-tier test (Part 1). Any dir — even empty/non-git. Unclassified ⇒ sealed (the default), so
+# nothing to configure. Use a confidential repo, or a throwaway you treat as confidential for a shakeout.
+export CONF_REPO="$HOME/path/to/any/dir"
+
+# OPEN-tier test (Part 2). Must classify `open`, so add a PATH rule matching it to config/cmux/tiers.yaml
+# below (a `remote_host` rule would need a real git remote). An empty dir is fine to test the GATE; for
+# the "cloud/Docker workspace actually runs" step, a real public git repo is more representative.
+export OSS_REPO="$HOME/oss/any/dir"
+
+export CMUX_APP="/Applications/cmux.app"                      # where you installed cmux (step 1)
+export CMUX_SOCKET_PATH="$HOME/.local/state/cmux/cmux.sock"   # cmux's socket; the probe + orchestrator target it
 ```
 
 Add an `open:` rule for `$OSS_REPO` (and confirm no `sealed_override` matches it):
@@ -125,7 +139,9 @@ source examples/cmux/sealed-pane.env               # OPENAI_BASE_URL + cmux tele
 
 ### 1.7 C4 live — orchestrator on the live socket
 
-With several panes running agents:
+With several panes running agents. (The workspace dir can be empty — the orchestrator triages each
+pane's *output*, not the repo. To exercise it, leave panes in different states: one mid-command, one at
+a `[y/N]` prompt, one finished, one showing an error — then run the sweep.)
 ```sh
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py --dry-run   # triage only, verify states
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py             # actually notify
