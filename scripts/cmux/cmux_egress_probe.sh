@@ -40,14 +40,14 @@ done
 # Hosts the static audit says a DEFAULT (unsealed) cmux reaches (AUDIT.md §5) — annotated in output.
 KNOWN_EGRESS_RE='posthog|sentry\.io|relay\.cmux\.dev|cmux\.com|objects\.githubusercontent|suggestqueries|duckduckgo|bing|githubusercontent'
 
-pids="$(pgrep -f "$PATTERN" || true)"
-if [ -z "$pids" ]; then
-  echo "==> no process matching '$PATTERN' found. Launch cmux first, then re-run." >&2
-  exit 2
-fi
-
+pids="$(pgrep -f "$PATTERN" 2>/dev/null || true)"
 echo "==> cmux egress probe — watching ALL processes matching '$PATTERN' (re-scanned each sample)"
-echo "    initial pids: $(echo "$pids" | tr '\n' ' ')  duration=${SECONDS_TO_WATCH}s"
+if [ -n "$pids" ]; then
+  echo "    initial pids: $(echo "$pids" | tr '\n' ' ')  duration=${SECONDS_TO_WATCH}s"
+else
+  echo "    no '$PATTERN' process yet — will keep watching for ${SECONDS_TO_WATCH}s."
+  echo "    LAUNCH cmux NOW to capture its startup connections."
+fi
 echo "    (loopback = 127.0.0.1/::1/localhost = local, OK)"
 echo "    reference denylist (AUDIT.md §5): posthog / sentry.io / *.relay.cmux.dev / cmux.com / suggestqueries / duckduckgo / bing"
 echo
@@ -57,14 +57,27 @@ trap 'rm -f "$tmp"' EXIT
 
 # Sample established connections repeatedly over the window; union the results. cmux is MULTI-PROCESS
 # (main app + "cmux Helper" + webview/networking children), so re-scan pids EACH sample to catch
-# children spawned after start — a single-pid snapshot would miss egress in a helper.
+# children spawned after start. We DON'T require cmux to exist at start — this lets you run the probe
+# first and launch cmux into the window (to capture launch-time telemetry). We flag it if cmux never
+# appears at all.
+saw_cmux=0
 end=$(( $(date +%s) + SECONDS_TO_WATCH ))
 while [ "$(date +%s)" -lt "$end" ]; do
-  for p in $(pgrep -f "$PATTERN" 2>/dev/null); do
-    lsof -nP -iTCP -a -p "$p" -sTCP:ESTABLISHED 2>/dev/null | awk 'NR>1 {print $9}' >> "$tmp" || true
-  done
+  found="$(pgrep -f "$PATTERN" 2>/dev/null || true)"
+  if [ -n "$found" ]; then
+    saw_cmux=1
+    for p in $found; do
+      lsof -nP -iTCP -a -p "$p" -sTCP:ESTABLISHED 2>/dev/null | awk 'NR>1 {print $9}' >> "$tmp" || true
+    done
+  fi
   sleep 3
 done
+
+if [ "$saw_cmux" -eq 0 ]; then
+  echo "==> no '$PATTERN' process appeared during the ${SECONDS_TO_WATCH}s window — nothing watched."
+  echo "    Launch cmux WHILE the probe runs, then re-run. (exit 2)"
+  exit 2
+fi
 
 # Non-loopback = anything whose remote endpoint is not 127.0.0.1 / ::1 / localhost.
 offbox="$(sort -u "$tmp" | awk -F'->' 'NF==2 {print $2}' \
