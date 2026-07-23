@@ -23,14 +23,23 @@ on the confidential box mid-session.
 
 ```sh
 # --- while ONLINE (unrestricted), one time ---
-# 1. Build + install cmux from source per its own README (submodules, zig, rust, bun, Xcode).
-#    Result: /Applications/cmux.app (or your build's path — set CMUX_APP below if different).
+# 1. Install cmux. RECOMMENDED: the official Apple-notarized app (no build toolchain, no build-time
+#    egress on your box; the on-hardware probe validates the real binary regardless of source):
+brew tap manaflow-ai/cmux && brew install --cask cmux
+#    or the DMG: https://github.com/manaflow-ai/cmux/releases/latest/download/cmux-macos.dmg
+#    (Optional, for binary==audited-source provenance: build from source per cmux's README —
+#     submodules, zig, rust, bun, Xcode; heavier, fetches deps, do it online.)
+#    Result: /Applications/cmux.app (set CMUX_APP below if your path differs).
 # 2. Pre-cache the HEARTH model so sealed mode never needs the network:
 uv run hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-# 3. Set cmux telemetry/auto-update OFF in defaults BEFORE first launch (C0 A1–A5):
+# 3. Set cmux telemetry/auto-update OFF in defaults BEFORE first launch (C0 A1–A5). cmux SPARKLE-
+#    AUTO-UPDATES by default (README: "download once"), so this is mandatory; re-apply after any
+#    `brew upgrade --cask cmux`:
 defaults write com.cmuxterm.app sendAnonymousTelemetry -bool false
 defaults write com.cmuxterm.app SUEnableAutomaticChecks -bool false
 # 4. Make sure cmux is SIGNED OUT (no account) — this alone disables cloud + iroh (AUDIT §4 #1).
+# 5. Note the installed version (`cmux --version`); if it differs from the audited main, the probe
+#    still validates the real binary, but you can re-run the AUDIT §5 host greps against that tag.
 ```
 
 Pick your test repos and export them once:
