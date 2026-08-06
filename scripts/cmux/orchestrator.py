@@ -27,8 +27,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 # cmux ships its CLI *inside* the app bundle, not on PATH. Auto-locate it so the orchestrator works
-# from a pane without manual setup. NOTE: cmux's socket only accepts processes DESCENDED FROM cmux
-# (it injects CMUX_SOCKET_PASSWORD into pane shells), so the orchestrator must run INSIDE a cmux pane.
+# from a pane without manual setup. NOTE on access: by default (automation.socketControlMode =
+# "cmuxOnly") the socket only accepts processes DESCENDED FROM cmux — it injects
+# CMUX_SOCKET_PASSWORD into pane shells — so the orchestrator has to run inside a pane. Setting the
+# mode to "password" lifts that: any local process presenting the socket password may connect, which
+# is how this runs from an ordinary terminal. See scripts/cmux/cmux-auth-env.
 _CMUX_BUNDLE_BINS = [
     "/Applications/cmux.app/Contents/Resources/bin/cmux",
     os.path.expanduser("~/Applications/cmux.app/Contents/Resources/bin/cmux"),
@@ -91,12 +94,26 @@ class CmuxCliClient:
         self.timeout = timeout
 
     def _json(self, *args: str) -> dict:
-        out = subprocess.run(self.base + ["--json", *args], capture_output=True, text=True, timeout=self.timeout)
+        # --id-format both: cmux defaults to short refs ("surface:1") and omits UUIDs entirely.
+        # Refs are positional and renumber as workspaces/surfaces come and go, so a ref captured
+        # during enumeration can resolve to a different surface — or nothing — by the time we
+        # notify against it. Asking for UUIDs gives every surface a stable identity.
+        out = subprocess.run(
+            self.base + ["--json", "--id-format", "both", *args],
+            capture_output=True, text=True, timeout=self.timeout,
+        )
         out.check_returncode()
         return json.loads(out.stdout or "{}")
 
     def _run(self, *args: str) -> None:
-        subprocess.run(self.base + list(args), capture_output=True, text=True, timeout=self.timeout).check_returncode()
+        proc = subprocess.run(self.base + list(args), capture_output=True, text=True, timeout=self.timeout)
+        if proc.returncode != 0:
+            # cmux reports failures like "Surface ref not found" on stdout with rc=1; surface that
+            # text instead of a bare CalledProcessError that says only "returned non-zero".
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            raise subprocess.CalledProcessError(
+                proc.returncode, proc.args, output=proc.stdout, stderr=detail[0] if detail else "",
+            )
 
     def list_surfaces(self) -> list[Surface]:
         surfaces: list[Surface] = []
@@ -220,10 +237,17 @@ def main() -> int:
     ap.add_argument("--cmux-bin", default=None, help="path to the cmux CLI (else $CMUX_BIN / PATH / app bundle)")
     args = ap.parse_args()
 
-    # cmux's socket only accepts processes descended from cmux. If we're not inside a pane, say so.
-    if not os.environ.get("CMUX_SOCKET_PASSWORD") and not os.environ.get("CMUX_SURFACE_ID"):
-        print("note: no CMUX_SOCKET_PASSWORD/CMUX_SURFACE_ID in env — run this INSIDE a cmux pane "
-              "(cmux only lets its own child processes use the socket).")
+    # Two ways to be allowed on the socket (see docs/cmux/RUNBOOK_orchestrator.md):
+    #   1. run INSIDE a cmux pane           — works under the default socketControlMode "cmuxOnly"
+    #   2. present the socket password      — requires socketControlMode "password"
+    # The cmux CLI also auto-reads the password from ~/.local/state/cmux/socket-control-password,
+    # so mode "password" often just works; this note only fires when neither route is evident.
+    _pw_store = os.path.expanduser("~/.local/state/cmux/socket-control-password")
+    if not (os.environ.get("CMUX_SOCKET_PASSWORD") or os.environ.get("CMUX_SURFACE_ID")
+            or os.path.exists(_pw_store)):
+        print("note: not inside a cmux pane and no socket password found — either run this in a "
+              "pane, or set Settings ▸ Automation ▸ socketControlMode to 'password' and "
+              "`source scripts/cmux/cmux-auth-env`.")
 
     client = CmuxCliClient(cmux_bin=args.cmux_bin, socket_path=args.socket)
     classify, summarize = hearth_callables()
@@ -235,7 +259,11 @@ def main() -> int:
     for t in results:
         flag = "🔔" if t.notified else ("· " if t.priority == "none" else "  ")
         print(f"{flag} [{t.state:>7}] {t.title or t.surface_id}  {('- ' + t.message) if t.message else ''}")
-    print(f"\n{sum(1 for t in results if t.notified)}/{len(results)} panes flagged for attention (local triage, 0 frontier tokens).")
+    # Count what WARRANTS attention, not what was sent — under --dry-run nothing is ever sent, so
+    # counting `notified` reported a flat 0/N and made a working sweep look like it found nothing.
+    flagged = sum(1 for t in results if t.priority != "none")
+    verb = "would be flagged" if args.dry_run else "flagged"
+    print(f"\n{flagged}/{len(results)} panes {verb} for attention (local triage, 0 frontier tokens).")
     return 0
 
 

@@ -45,7 +45,12 @@ key finding is validated; what remains is finishing the deny-by-default firewall
 
 These are the functional cockpit+engine wins; safe to do with empty test dirs (no confidential data):
 - **C2 live** — wire a real cmux pane's agent to HEARTH (MCP / OpenAI base_url), demonstrate offload.
-- **C4 live** — point `orchestrator.py` at the live cmux socket; enumerate real panes, triage, notify.
+- ✅ **C4 live — DONE 2026-08-06.** `orchestrator.py` drove the live socket: enumerated real panes,
+  triaged 4/4 correctly on-device, fired 3 real notify badges. Three live-only bugs found and fixed
+  (stale positional surface refs, `--dry-run` miscount, swallowed cmux errors). See **RESULTS §1.7**
+  and RUNBOOK_orchestrator "Live validation". Access via `socketControlMode=password` (**ADR-C007**).
+  - [ ] Remaining C4 sliver: re-run the sweep under `cmux-sealed` + probe to prove loopback-only.
+        Blocked on the parked firewall work above, not on C4 itself.
 - Anything else that makes cmux + HEARTH useful together (browser-DOM→HEARTH summarize, notification
   triage, socket-driven automation).
 

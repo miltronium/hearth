@@ -44,7 +44,20 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
 - **§1.4 pf backstop (signed-in, firewall on)** — _(paste probe result; expect still loopback-only)_
 - **§1.5 negative control** — _(paste result showing the probe DOES see egress, or "skipped")_
 - **§1.6 C2 live pane offload** — _(subtask run + confirm probe stayed clean during it)_
-- **§1.7 C4 orchestrator on live socket** — _(paste sweep output + probe result; note any live-JSON fixups)_
+- **§1.7 C4 orchestrator on live socket** — ✅ **functional half done (2026-08-06, cmux 0.64.20)**;
+  egress half still pending the §1.3 seal.
+  - Ran from an ordinary terminal via `socketControlMode=password` + `scripts/cmux/cmux-auth-env`
+    (**ADR-C007**) against 4 workspaces parked in distinct states. HEARTH classified **4/4 correctly**
+    (done / working / waiting / error), flagged **3/4**, **0 frontier tokens**; three real badges
+    confirmed with `cmux list-notifications`. Full table in
+    [RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md) "Live validation".
+  - **Live-JSON fixups (3, all fixed + regression-tested):** (1) surface refs are positional and go
+    stale between enumerate and notify → client now requests `--id-format both` and uses UUIDs;
+    (2) `--dry-run` reported a flat `0/N` flagged (counted notifications sent, not panes warranting
+    attention); (3) cmux writes errors to stdout with rc=1, so failures surfaced as a bare "non-zero
+    exit status" — `_run` now propagates cmux's message. Suite: **248 passed, 1 skipped**.
+  - ⏳ **Not yet done:** re-run the sweep under `cmux-sealed` with the probe to prove it stays
+    loopback-only. Blocked on the same parked firewall work as §1.3.
 
 ### Part 2 — Open tier
 

@@ -140,5 +140,43 @@ never build/`bun install`/`zig build` on the confidential box. Dynamic `lsof` ve
 
 ---
 
+## ADR-C007 — Socket access: `cmuxOnly` for confidential work, `password` for automation
+
+**Status:** Accepted (2026-08-06) · **Context:** C4 live run.
+
+**Context.** cmux gates its automation socket with `automation.socketControlMode`:
+
+| Mode | Who may drive the socket |
+| --- | --- |
+| `cmuxOnly` (default) | only processes **descended from cmux** — it injects `CMUX_SOCKET_PASSWORD` into pane shells |
+| `password` | any local process presenting the secret |
+| `allowAll` | anyone local, unauthenticated |
+
+Under the default, the C4 orchestrator can only run **inside a cmux pane**. That is fine for a human
+babysitting one machine, but it blocks the case the orchestrator exists for: an unattended sweep
+driven from a script, a scheduler, or an agent session that is not a cmux child.
+
+We initially recorded this as an absolute ("the orchestrator must run in a pane"). It is not — it is a
+**default**, and cmux ships a supported way to lift it.
+
+**Decision.** Keep **`cmuxOnly` as the posture for confidential/sealed work**. Use **`password`** for
+automation, on non-confidential material, via `scripts/cmux/cmux-auth-env`. **Never `allowAll`.**
+
+Password handling: cmux migrates the secret out of `cmux.json` on launch into
+`~/.local/state/cmux/socket-control-password` (mode 0600), which is authoritative. `cmux-auth-env`
+reads it at run time and exports `CMUX_SOCKET_PASSWORD`, so the secret stays out of shell history,
+committed files, and `ps` output (which `--password` would expose).
+
+**Consequences.** `password` mode trades "must be a cmux descendant" for "must be able to read a 0600
+file in `$HOME`" — so **any process running as you** can read pane screens and send keystrokes to
+panes. On a single-user Mac that is near what same-uid processes could already reach, but it is
+strictly weaker than the default, and pane contents are exactly what the sealed tier protects. Hence
+the split by tier rather than a blanket switch. This is consistent with **ADR-C004** (configure >
+wrap > patch): a supported setting, no patching. It does **not** weaken **ADR-C006** — socket control
+is local-process authorization and is orthogonal to egress; the sealed tier's guarantee still rests on
+signed-out + OS-level egress containment.
+
+---
+
 ## (Further ADRs land here as C3+ surface real constraints — e.g. the exact container-network
 ## enforcement, or an upstream cmux sealed-mode patch decision.)

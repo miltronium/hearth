@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _MOD = Path(__file__).resolve().parents[1] / "scripts" / "cmux" / "orchestrator.py"
 _spec = importlib.util.spec_from_file_location("orchestrator", _MOD)
 orch = importlib.util.module_from_spec(_spec)
@@ -106,11 +108,29 @@ def test_cli_client_builds_correct_argv(monkeypatch):
     client.send_key("surface:2", "ctrl+c")
 
     read_argv = next(c for c in calls if "read-screen" in c)
-    assert read_argv == ["cmux", "--socket", "/tmp/cmux.sock", "--json", "read-screen", "--surface", "surface:2", "--lines", "120"]
+    # --id-format both is required: without it cmux returns only positional refs ("surface:1"),
+    # which renumber as surfaces come and go, so a ref can go stale between enumerate and notify.
+    assert read_argv == ["cmux", "--socket", "/tmp/cmux.sock", "--json", "--id-format", "both",
+                         "read-screen", "--surface", "surface:2", "--lines", "120"]
     notify_argv = next(c for c in calls if "notify" in c)
     assert notify_argv == ["cmux", "--socket", "/tmp/cmux.sock", "notify", "--surface", "surface:2", "--title", "cmux: t", "--body", "body"]
     sendkey_argv = next(c for c in calls if "send-key" in c)
     assert sendkey_argv == ["cmux", "--socket", "/tmp/cmux.sock", "send-key", "--surface", "surface:2", "ctrl+c"]
+
+
+def test_cli_client_run_reports_cmux_error_text(monkeypatch):
+    """cmux writes failures like 'Surface ref not found' to stdout with rc=1. Bare
+    check_returncode() throws that away and reports only 'returned non-zero exit status 1',
+    which is what made the stale-ref bug hard to read. Keep cmux's own message."""
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="Error: Surface ref not found: surface:1\n", stderr="")
+
+    monkeypatch.setattr(orch.subprocess, "run", fake_run)
+    client = orch.CmuxCliClient(cmux_bin="cmux")
+
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        client.notify("surface:1", "t", "b")
+    assert "Surface ref not found" in excinfo.value.stderr
 
 
 def test_cli_client_list_surfaces_parses_workspaces(monkeypatch):

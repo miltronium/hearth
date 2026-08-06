@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# cmux-auth-env — export CMUX_SOCKET_PASSWORD from the local cmux config.
+#
+# WHY: cmux's control socket is ancestry-gated by default (automation.socketControlMode =
+# "cmuxOnly"), so only processes descended from cmux may use it — which forces the C4
+# orchestrator to run inside a pane. Setting the mode to "password" lets an outside process
+# (a plain terminal, a CI step, this repo's scripts) drive the socket if it presents
+# automation.socketPassword. See docs/cmux/RUNBOOK_orchestrator.md.
+#
+# The password lives ONLY in ~/.config/cmux/cmux.json (mode 600, outside this repo). This
+# script reads it at run time so the secret never lands in shell history, a committed file,
+# or a process argument list (`--password` would be visible in `ps`).
+#
+# Usage:
+#   source scripts/cmux/cmux-auth-env      # then run cmux / orchestrator.py normally
+#   scripts/cmux/cmux-auth-env --check     # verify the config is set up, print nothing secret
+#
+# PRIVACY: reads a local file, prints no secret to stdout. No network access.
+
+# NOTE: no `set -euo pipefail` at top level — this file is meant to be *sourced*, and those
+# options would leak into the caller's interactive shell (a failed grep would then kill their
+# session). Errors are handled explicitly instead.
+
+CMUX_CONFIG="${CMUX_CONFIG:-$HOME/.config/cmux/cmux.json}"
+
+_cmux_auth_read() {
+  # cmux.json is JSONC (comments allowed), so strip // line comments before parsing.
+  python3 - "$CMUX_CONFIG" <<'PY'
+import json, re, sys, pathlib
+
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    sys.exit(f"cmux-auth-env: no config at {path}")
+
+# Strip // comments that start a line (cmux's own template style); keeps "https://" intact.
+text = re.sub(r'^\s*//.*$', '', path.read_text(), flags=re.M)
+# cmux's template comments out most settings, so the last *active* entry is usually followed
+# by a comma that only made sense while the commented block was there. Drop trailing commas.
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+try:
+    cfg = json.loads(text)
+except json.JSONDecodeError as exc:
+    sys.exit(f"cmux-auth-env: {path} is not valid JSONC: {exc}")
+
+auto = cfg.get("automation") or {}
+mode = auto.get("socketControlMode", "cmuxOnly")
+
+if mode == "cmuxOnly":
+    sys.exit("cmux-auth-env: automation.socketControlMode is 'cmuxOnly' — the socket only "
+             "accepts processes started inside cmux. Set it to 'password' in Settings ▸ "
+             "Automation (or in cmux.json), then relaunch cmux.")
+
+# A socketPassword written into cmux.json is only an INPUT: on launch cmux migrates it out of
+# the config (blanking the key, stamping socketControlPasswordMigrationVersion) into a 0600
+# state file, which is the real source of truth. Read that first, fall back to the config for
+# the window before a migrating launch has happened.
+store = pathlib.Path.home() / ".local/state/cmux/socket-control-password"
+pw = ""
+if store.exists():
+    pw = store.read_text().strip()
+if not pw:
+    pw = (auto.get("socketPassword") or "").strip()
+
+if not pw:
+    sys.exit("cmux-auth-env: socketControlMode is 'password' but no password is stored. Set "
+             "one in cmux Settings ▸ Automation, or add automation.socketPassword to "
+             f"{path} and relaunch cmux so it migrates to {store}.")
+print(pw)
+PY
+}
+
+# Are we being sourced? BASH_SOURCE only exists under bash, and the user's login shell here is
+# zsh — referencing it unguarded is what broke the first version. Detect per-shell.
+_cmux_auth_sourced=0
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in *:file*) _cmux_auth_sourced=1 ;; esac
+elif [ -n "${BASH_VERSION:-}" ]; then
+  [ "${BASH_SOURCE[0]}" != "${0}" ] && _cmux_auth_sourced=1
+fi
+
+if [ "${1:-}" = "--check" ]; then
+  if _cmux_auth_read >/dev/null; then
+    echo "cmux-auth-env: OK — socket password auth configured in $CMUX_CONFIG"
+  else
+    return 1 2>/dev/null || exit 1
+  fi
+elif [ "$_cmux_auth_sourced" = "1" ]; then
+  if _cmux_auth_pw="$(_cmux_auth_read)"; then
+    CMUX_SOCKET_PASSWORD="$_cmux_auth_pw"
+    export CMUX_SOCKET_PASSWORD
+  fi
+  unset _cmux_auth_pw
+else
+  echo "cmux-auth-env: run '. $0' to export CMUX_SOCKET_PASSWORD, or pass --check." >&2
+  exit 2
+fi
+unset _cmux_auth_sourced
