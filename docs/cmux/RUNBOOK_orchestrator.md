@@ -26,17 +26,47 @@ Fully local; safe under the sealed tier.
    Unknown ⇒ none, so the model never produces a spurious notification.
 5. `cmux notify --surface <id> --title … --body …` for attention/info panes.
 
-## Run — INSIDE a cmux pane
+## Run — two ways onto the socket
 
-cmux's automation socket only accepts **processes descended from cmux** (it injects
-`CMUX_SOCKET_PASSWORD` into the shells it spawns in panes). So the orchestrator must run **in a cmux
-pane**, not an external terminal — from outside you get `Access denied - only processes started inside
-cmux can connect`. The cmux CLI also isn't on PATH by default; the orchestrator auto-locates it
+cmux gates its automation socket with `automation.socketControlMode` (Settings ▸ Automation, or
+`~/.config/cmux/cmux.json`). Three values: `cmuxOnly` (default) · `password` · `allowAll`.
+
+**Route A — inside a cmux pane (default, `cmuxOnly`).** The socket accepts only **processes descended
+from cmux**; it injects `CMUX_SOCKET_PASSWORD` into the shells it spawns. From an external terminal
+you get `Access denied - only processes started inside cmux can connect`, so the orchestrator has to
+run in a pane. Nothing to configure.
+
+**Route B — password auth (`password`), any local terminal.** Set the mode to `password` and give it
+a secret; then any local process presenting that secret may drive the socket — which is what lets the
+orchestrator run from an ordinary shell, a script, or an outside agent session.
+
+```sh
+# one-time: set the mode, then relaunch cmux so it picks it up
+#   Settings ▸ Automation ▸ Socket control mode → "Password",  or in ~/.config/cmux/cmux.json:
+#     "automation": { "socketControlMode": "password", "socketPassword": "<random secret>" }
+# On launch cmux MIGRATES the secret out of cmux.json (blanking the key, stamping
+# socketControlPasswordMigrationVersion) into ~/.local/state/cmux/socket-control-password, mode 0600.
+# That file is the source of truth from then on.
+
+. scripts/cmux/cmux-auth-env      # exports CMUX_SOCKET_PASSWORD, reading the 0600 store
+cmux ping                          # expect: PONG
+```
+
+`scripts/cmux/cmux-auth-env` reads the secret at run time so it never lands in shell history or a
+process argument list (`--password` is visible in `ps`). Source it; don't execute it.
+
+> **Security trade.** Route B is a deliberate relaxation: it swaps "must be a cmux descendant" for
+> "must be able to read a 0600 file in your home directory" — i.e. **any process running as you** can
+> drive cmux (send keystrokes to panes, read screens). On a single-user machine that is close to what
+> same-uid processes could already do, but it is strictly weaker than `cmuxOnly`. Prefer Route A for
+> confidential work; see **ADR-C007**. Never use `allowAll` — it drops authentication entirely.
+
+The cmux CLI also isn't on PATH by default; the orchestrator auto-locates it
 (`$CMUX_BIN` → PATH → `/Applications/cmux.app/Contents/Resources/bin/cmux`).
 
 ```sh
-# open a pane in cmux, then in that pane:
-cmux --version                 # confirm the CLI is reachable from the pane
+# Route A: open a pane in cmux, then in that pane.  Route B: any terminal, after sourcing cmux-auth-env.
+cmux --version                 # confirm the CLI is reachable
 cd /path/to/HEARTH
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py --dry-run  # triage only, no notify
 HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py            # one sweep, notifies
@@ -70,10 +100,40 @@ sends pane contents off-box; that would break the sealed guarantee.
 **3/4 flagged for attention, 0 frontier tokens.** Deterministic decision logic + CLI argv build:
 `tests/test_cmux_orchestrator.py`, 8 green.
 
+## Live validation (2026-08-06, cmux 0.64.20, Route B)
+
+Ran against a **real cmux** with four workspaces deliberately parked in different states, from an
+ordinary terminal (not a pane) via password auth. HEARTH triaged **all four correctly**:
+
+| Workspace | Screen | State | Result |
+| --- | --- | --- | --- |
+| oss_repo | idle shell at prompt | done | 🔔 notify (info) ✓ |
+| build-running | `[2/5] compiling module_2.rs` | working | quiet ✓ |
+| awaiting-input | `Type yes to continue:` | waiting | 🔔 notify ✓ |
+| test-failing | `FAILED: …test_escalation_denied` | error | 🔔 notify ✓ |
+
+**3/4 flagged, 0 frontier tokens**, and three real notification badges confirmed via
+`cmux list-notifications`. This closes the on-hardware C4 gate.
+
+Three things the live run corrected, all now fixed in `orchestrator.py`:
+
+1. **Surface refs are positional and go stale.** cmux returns short refs (`surface:1`) by default and
+   omits UUIDs. `notify --surface surface:1` failed with `Surface ref not found` even though
+   enumeration had just returned that ref. The client now passes `--id-format both` and uses the
+   stable UUID. *(The code already preferred `s["id"]` — it just never asked cmux to include it.)*
+2. **`--dry-run` always reported `0/N` flagged**, because the summary counted notifications *sent*
+   rather than panes *warranting* attention. A correct sweep looked like it had found nothing.
+3. **Failures were unreadable.** cmux reports errors on stdout with rc=1, so `check_returncode()`
+   surfaced only "returned non-zero exit status 1", hiding `Surface ref not found`. `_run` now
+   propagates cmux's own message.
+
+The live `list-workspaces` / `list-pane-surfaces` JSON otherwise matched the mapped shapes
+(`workspaces[].ref`, `surfaces[].ref/title/type`) — no parser rewrite was needed.
+
 ## Status & next
 
-- ✅ Orchestrator + triage on real model + tests + man page + runbook. Config-only; HEARTH untouched.
-- ⏳ On-hardware: point it at a live cmux socket and confirm the sweep is loopback-only under
-  `cmux-sealed` (shared C0 §9 / C3 / C6 dynamic run). The CLI-client parsing against the live `tree`/
-  `list-*` JSON is validated then.
-- **Next:** C5 `cmux/open-tier` (gated cloud/Docker for non-confidential repos), then C6 graduation.
+- ✅ Orchestrator + triage on real model + tests (`tests/test_cmux_orchestrator.py`, 10 green) + man
+  page + runbook. Config-only; HEARTH untouched.
+- ✅ **On-hardware live run complete** (above) — enumerate → read → triage → notify against cmux 0.64.20.
+- ⏳ Still open: confirm the sweep is **loopback-only under `cmux-sealed`** (shared C0 §9 / C3 / C6
+  dynamic run). That is part of the parked sealed-tier hardening, not a C4 gap — see [TODO.md](TODO.md).
