@@ -5,6 +5,12 @@
   "//3": "is strictly local even without the sealed profile. See docs/cmux/RUNBOOK_wiring.md.",
   "//4": "The env pins sealed/local: private routing (no remotes) + offline HF. Use an ABSOLUTE path",
   "//5": "for HEARTH_ROUTING_YAML (the MCP server's cwd is not guaranteed to be the repo).",
+  "//6": "PREREQ: `uv sync --extra mlx --extra mcp`. Without the `mcp` extra, `hearth mcp` exits with",
+  "//7": "\"The MCP server requires the 'mcp' extra.\" and Claude Code drops the server SILENTLY — the",
+  "//8": "agent just reports that no hearth tools exist, which reads like a config error. Sync BOTH",
+  "//9": "extras in one command: `uv sync --extra mcp` alone PRUNES mlx/dev and breaks the backend.",
+  "//10": "Use an ABSOLUTE `command` path (e.g. <repo>/.venv/bin/hearth) — `hearth` is only on PATH",
+  "//11": "when the venv is active, which is not guaranteed for an MCP subprocess.",
   "mcpServers": {
     "hearth": {
       "command": "hearth",

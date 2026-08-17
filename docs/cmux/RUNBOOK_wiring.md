@@ -99,12 +99,53 @@ a pane-equivalent offload to sealed HEARTH, escalation off, with measured saving
 
 ---
 
-## 5. C2 status & next
+## 5. Live pane validation (2026-08-17) — the GUI proof
+
+§4 measured the *equivalent code path*. This section closes the gap: a real coding agent, in a real
+cmux pane, offloading to local HEARTH. Harness: **`examples/cmux/pane_offload_live.sh`**.
+
+**Setup:** cmux 0.64.20 launched on a non-confidential empty test dir
+(`examples/repos/oss_repo`, untracked) with a synthetic 180-line / 13 KB `device.log`. Pane driven
+over the socket (`cmux send` / `read-screen`, `socketControlMode=password` per **ADR-C007**).
+
+| Surface | What ran in the pane | Result |
+| --- | --- | --- |
+| **OpenAI** (§2) | `source sealed-pane.env` → live request to `$OPENAI_BASE_URL` | `served_by=local`, `escalated=False`, **49** est. tokens saved. Env verified in-pane: base=`http://127.0.0.1:8080/v1`, key loaded, `CMUX_CLI_SENTRY_DISABLED=1` |
+| **MCP** (§1) | Claude Code `-p` with `--mcp-config`, offloading a `device.log` summary | **`VERDICT= OFFLOADED`** — `mcp__hearth__hearth_summarize` present in the agent's own `tool_use` records; coherent local summary returned |
+
+**The assertion is transcript-based, not self-reported.** The harness parses the agent's
+`--output-format stream-json` records for `mcp__hearth__*` rather than trusting the agent's prose —
+an early version asked the agent to print `TOOL_USED=<yes|no>` and it answered `yes`, which is
+evidence of nothing. Reproduced twice with identical verdicts.
+
+**Locality is structural, not observed:** MCP tools run `allow_escalation=False` by construction
+(`mcp/tools.py`) *and* `config/routing.private.yaml` declares `remotes: {}` with every class
+`escalate: never` — the router has no egress target to choose even if asked.
+
+### Live-only findings (3)
+
+1. **The `mcp` extra is required and fails silently.** Without it, `hearth mcp` exits with
+   `The MCP server requires the 'mcp' extra.`; Claude Code then drops the server with no error and
+   the agent reports "no hearth tools are registered" — which reads like a bad `--mcp-config` path.
+   Fixed in `examples/cmux/hearth.mcp.json` (prereq documented) + the harness's failure-mode probe.
+2. **`uv sync --extra mcp` alone PRUNES the other extras** — it removed `mlx-lm`, `transformers`,
+   `torch`, `pytest`, and `ruff`, breaking the MLX backend. Always sync extras together:
+   `uv sync --extra mlx --extra mcp --extra dev`. (Suite re-verified after: **248 passed, 1 skipped**.)
+3. **`hearth_summarize`'s `max_words` is a soft hint** — a `max_words: 25` call returned ~40 words.
+   Fine for offload, but don't rely on it for width-constrained UI (e.g. a cockpit status line).
+
+**Honest caveat:** the MCP tools take `text`, not a path, so a Claude Code pane must `Read` the file
+into its own context before handing it over. That caps the savings for the "pre-digest a large file"
+pattern — the offload saves the *generation* and downstream reasoning, not the initial read. A
+path-taking tool variant would close this; noted as a HEARTH-side improvement, not a cmux blocker.
+
+## 6. C2 status & next
 
 - ✅ MCP + OpenAI wiring artifacts (`examples/cmux/`), validated on real hardware.
 - ✅ Measured savings via the in-process demo (mirrors the MCP path).
-- ⏳ Live *GUI* proof (a real cmux pane, not the equivalent code path) folds into the C3/C6
-  on-hardware runs alongside the AUDIT §9 egress probe.
+- ✅ **Live GUI proof done 2026-08-17** (§5) — both surfaces exercised from a real pane.
+- ⏳ Egress half still pending: re-run §5 under `cmux-sealed` + probe to prove loopback-only.
+  Blocked on the parked firewall hardening (TODO.md), not on C2.
 - **Next:** C3 `cmux/sealed-profile` — the `cmux-sealed` launcher + fail-closed preflight that turns
   this wiring into an enforced sealed tier (signed-out, telemetry/Sparkle off, OS egress containment,
   reads `config/cmux/tiers.yaml`).

@@ -43,7 +43,22 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     LuLu active → then §1.3 = sealed.)_
 - **§1.4 pf backstop (signed-in, firewall on)** — _(paste probe result; expect still loopback-only)_
 - **§1.5 negative control** — _(paste result showing the probe DOES see egress, or "skipped")_
-- **§1.6 C2 live pane offload** — _(subtask run + confirm probe stayed clean during it)_
+- **§1.6 C2 live pane offload** — ✅ **functional half done (2026-08-17, cmux 0.64.20)**;
+  egress half still pending the §1.3 seal.
+  - Real cmux pane on a non-confidential empty test dir, driven over the socket
+    (`socketControlMode=password`, **ADR-C007**). Both wiring surfaces exercised live:
+    **OpenAI** — in-pane request to `$OPENAI_BASE_URL` returned `served_by=local`,
+    `escalated=False`, **49** est. frontier tokens saved;
+    **MCP** — Claude Code offloaded a 180-line/13 KB log summary, `VERDICT= OFFLOADED` with
+    `mcp__hearth__hearth_summarize` in the agent's own `tool_use` transcript (reproduced twice).
+  - Assertion is **transcript-based, not self-reported** — the harness
+    (`examples/cmux/pane_offload_live.sh`) parses `--output-format stream-json` tool_use records.
+    Locality is structural: `allow_escalation=False` + `routing.private.yaml` `remotes: {}`.
+  - **Live-only findings (3, all fixed/documented):** (1) the `mcp` extra is required and Claude Code
+    drops the server **silently** without it; (2) `uv sync --extra mcp` alone **prunes** mlx/dev —
+    sync extras together; (3) `max_words` is a soft hint (~40 words for a 25 limit). Suite after
+    the dependency churn: **248 passed, 1 skipped**. Detail in RUNBOOK_wiring §5.
+  - ⏳ **Not yet done:** confirm the probe stays clean during the run (needs the §1.3 seal).
 - **§1.7 C4 orchestrator on live socket** — ✅ **functional half done (2026-08-06, cmux 0.64.20)**;
   egress half still pending the §1.3 seal.
   - Ran from an ordinary terminal via `socketControlMode=password` + `scripts/cmux/cmux-auth-env`

@@ -44,7 +44,15 @@ key finding is validated; what remains is finishing the deny-by-default firewall
 ## ACTIVE — proceed now (no firewall needed)
 
 These are the functional cockpit+engine wins; safe to do with empty test dirs (no confidential data):
-- **C2 live** — wire a real cmux pane's agent to HEARTH (MCP / OpenAI base_url), demonstrate offload.
+- ✅ **C2 live — DONE 2026-08-17.** A real Claude Code agent in a real cmux pane offloaded a log
+  summary to local HEARTH over MCP (`VERDICT= OFFLOADED`, proven from the agent's own `tool_use`
+  transcript), and the OpenAI surface served in-pane at `served_by=local`. Harness:
+  `examples/cmux/pane_offload_live.sh`. Three live-only findings fixed/documented (silent MCP-extra
+  failure, `uv sync` extra-pruning, soft `max_words`). See **RESULTS §1.6** and RUNBOOK_wiring §5.
+  - [ ] Remaining C2 sliver: re-run the offload under `cmux-sealed` + probe to prove loopback-only.
+        Blocked on the parked firewall work above, not on C2 itself.
+  - [ ] (HEARTH-side, optional) add a path-taking `hearth_summarize` variant — today the tool takes
+        `text`, so a pane must Read the file into its own context first, capping the savings.
 - ✅ **C4 live — DONE 2026-08-06.** `orchestrator.py` drove the live socket: enumerated real panes,
   triaged 4/4 correctly on-device, fired 3 real notify badges. Three live-only bugs found and fixed
   (stale positional surface refs, `--dry-run` miscount, swallowed cmux errors). See **RESULTS §1.7**
