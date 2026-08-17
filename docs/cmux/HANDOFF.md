@@ -1,7 +1,7 @@
 # HEARTH × cmux — Session handoff / resume-here
 
 > **Read this first when resuming.** Snapshot of exactly where the cmux integration stands as of
-> **2026-08-06**, so a fresh conversation can pick up with no context loss. The full plan is
+> **2026-08-17**, so a fresh conversation can pick up with no context loss. The full plan is
 > in [README.md](README.md); this file is the "what's live right now + what to do next."
 
 ---
@@ -11,15 +11,21 @@
 - **All build phases C0–C5 are done** (headless: code + tests + docs + man pages, each on its own
   `cmux/<task>` sub-branch, merged into `cmux/integration`). **`main` is untouched** — standalone HEARTH
   still ships (**248 passed, 1 skipped**).
-- ✅ **C4 is now live-validated (2026-08-06)** — the orchestrator drove a real cmux 0.64.20, triaged
+- ✅ **C4 is live-validated (2026-08-06)** — the orchestrator drove a real cmux 0.64.20, triaged
   four panes 4/4 correctly on-device, and fired three real notify badges. **RESULTS §1.7** functional
   half is filled. Three live-only bugs were found and fixed; see below.
+- ✅ **C2 is live-validated (2026-08-17)** — a real Claude Code agent in a real cmux pane offloaded a
+  log summary to local HEARTH over MCP, proven from the agent's own `tool_use` transcript; the
+  OpenAI surface served in-pane at `served_by=local`. **RESULTS §1.6** functional half is filled.
+  Three more live-only findings fixed/documented. **Both functional tracks are now closed** —
+  the only thing left before graduation is the parked firewall sealing.
 - **The "must run inside a cmux pane" rule was wrong** — it's a *default*, not a hard gate. See
   **ADR-C007** and the two access routes in [RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md).
 - The **confidentiality lockdown (firewall sealing) is still parked** — see [TODO.md](TODO.md).
   LuLu is installed and active, so the remaining §1.3/§1.4 work is now short.
-- ⚠ **Commits are still local-only, not pushed** — **LuLu is still blocking `ssh → github.com`**
-  (verified today: `git ls-remote` times out). Allow `ssh` in LuLu, or pause it, then push.
+- ✅ **Push is unblocked** (as of 2026-08-17) — `ssh → github.com` works again and
+  `origin/cmux/integration` is level with local. The 2026-08-06 "commits are local-only / LuLu
+  blocks ssh" warning is **stale**; disregard it.
 
 ---
 
@@ -27,41 +33,32 @@
 
 ```sh
 cd /Users/miltronix/Claude/apps/HEARTH
-git branch --show-current          # expect: cmux/integration
-git log --oneline -1               # expect: 1093c63 (or later) — the C4 live-validation merge
-git log --oneline origin/cmux/integration..cmux/integration   # the UNPUSHED backlog (see below)
+git branch --show-current                                      # expect: cmux/integration
+git log --oneline origin/cmux/integration..cmux/integration     # expect: empty (level with origin)
 
-# 1) unblock git push: in LuLu, allow `ssh`→github (or pause LuLu — the lockdown is parked anyway), then:
-git push origin cmux/integration
-#    ...and push the sub-branches if you want them on origin (optional).
-
-# 2) pick up either track:
-#    functional  → live C2 offload from a pane (TODO.md "ACTIVE")
-#    graduation  → the parked firewall hardening (TODO.md "PARKED"); LuLu is already installed
+# Only track left — graduation: the parked firewall hardening (TODO.md "PARKED").
+# LuLu is already installed and active, so §1.3/§1.4 are mostly "add the cmux block rule + re-verify":
+#   1) LuLu: block cmux → any remote
+#   2) relaunch cmux, then: lsof -nP -iTCP -sTCP:ESTABLISHED -a -c cmux   # expect EMPTY -> fills §1.3
+#   3) sign into cmux with LuLu active, confirm *.relay.cmux.dev blocked  # -> fills §1.4
 ```
+
+Both functional tracks (C2 live, C4 live) are **done** — nothing functional is waiting on you.
 
 ---
 
 ## Git state (exact)
 
-- **On branch `cmux/integration`.** Working tree clean except **untracked `config/cmux/tiers.yaml`**
-  (machine-local tier policy you created via `cp`; intentionally not committed — may list private paths).
-- **`origin/cmux/integration` = `0e4668f`; local is 8 commits ahead, UNPUSHED** (latest first):
-  ```
-  1093c63 merge(cmux): C4 orchestrator live-validated — socket password auth (ADR-C007) + 3 live-only fixes
-  1cc95b3 feat(cmux): C4 orchestrator validated live — socket password auth + 3 live-only fixes
-  b9382af merge(cmux): session handoff / resume-here doc
-  032aabf docs(cmux): session handoff — resume-here snapshot for a fresh conversation
-  4a04262 merge(cmux): orchestrator auto-locates CLI + in-pane socket requirement (live finding)
-  73026b2 feat(cmux): orchestrator auto-locates cmux CLI + documents in-pane requirement
-  5924cd3 merge(cmux): park sealed-tier hardening (TODO) — proceed with functional integration
-  5249be0 docs(cmux): park sealed-tier firewall hardening; capture TODO + finding
-  ```
-  Plus local sub-branches not yet pushed: `cmux/park-lockdown`, `cmux/onhardware-findings`,
-  `cmux/orchestrator-live`, `cmux/handoff`, `cmux/socket-auth`. **Nothing is lost — it's all committed locally.**
-- **Why unpushed:** LuLu (installed for the parked sealing) now blocks `ssh → github.com:22`. Earlier
-  phases pushed fine; only LuLu changed. Fix: allow `ssh` in LuLu, or pause LuLu.
+- **On branch `cmux/integration`.** Working tree clean except two intentionally-untracked paths:
+  **`config/cmux/tiers.yaml`** (machine-local tier policy; may list private paths) and
+  **`examples/repos/`** (the empty non-confidential test dirs + throwaway live-run evidence).
+- **`origin/cmux/integration` is level with local** — everything is pushed. Some local-only
+  sub-branches remain unpushed (`cmux/handoff`, `cmux/handoff-update`, `cmux/orchestrator-live`,
+  `cmux/park-lockdown`, `cmux/socket-auth`, `cmux/c2-live`); that's optional housekeeping, and
+  their content is already merged into `cmux/integration`.
 - `main` = `75ba6ad` (untouched). Archive tag `archive/hearth-pre-cmux-2026-07-21` still restores standalone.
+- **Local venv note:** this machine now has `uv sync --extra mlx --extra mcp --extra dev` applied
+  (the `mcp` extra is required for `hearth mcp`). Syncing a single extra prunes the others.
 
 ---
 
@@ -71,7 +68,7 @@ git push origin cmux/integration
 | --- | --- | --- |
 | C0 | Egress audit ([AUDIT.md](AUDIT.md)) + probe | ✅ static (123 findings). Dynamic probe: partly run (see findings) |
 | C1 | ADRs (C001–C006) | ✅ Accepted |
-| C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved). Live pane offload: optional to redo |
+| C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved); ✅ **live pane offload done 2026-08-17** (RESULTS §1.6). Loopback-only-under-seal check still pending |
 | C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; on-hardware firewall sealing **PARKED** → TODO |
 | C4 | Orchestrator ([RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md)) | ✅ built/tested; ✅ **live run done 2026-08-06** (RESULTS §1.7). Loopback-only-under-seal check still pending |
 | C5 | Open tier ([RUNBOOK_open.md](RUNBOOK_open.md)) | ✅ gate demonstrated; live cloud run **PARKED** → TODO |
@@ -102,11 +99,41 @@ HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator.py --dry-run   # add 
    pass `--id-format both` and use the UUID. This was the actual cause of `Surface ref not found`.
 3. **cmux reports errors on stdout with rc=1**, so a plain `check_returncode()` hides them.
 
-**Next (functional):** live C2 offload from a pane (`examples/cmux/sealed-pane.env` or MCP), then
-anything else in [TODO.md](TODO.md) "ACTIVE" (browser-DOM→HEARTH summarize, notification triage).
+---
+
+## ✅ Done 2026-08-17 — C2 live pane offload
+
+**Reproduce it** (cmux running, gateway up, `uv sync --extra mlx --extra mcp --extra dev` applied):
+```sh
+# 1) sealed local gateway (loopback, no remotes, offline weights)
+HEARTH_ROUTING_YAML=config/routing.private.yaml HEARTH_HOST=127.0.0.1 HEARTH_BACKEND=mlx \
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run hearth serve
+
+# 2) from inside a cmux pane (or via `cmux send`), against a non-confidential dir:
+examples/cmux/pane_offload_live.sh device.log hearth.live.mcp.json    # expect: VERDICT= OFFLOADED
+```
+
+**Result:** both wiring surfaces exercised from a real pane. **OpenAI** — `served_by=local`,
+`escalated=False`, 49 est. tokens saved. **MCP** — a real Claude Code agent called
+`mcp__hearth__hearth_summarize` on a 180-line/13 KB log; **proven from the agent's own `tool_use`
+transcript**, reproduced twice. Suite still **248 passed, 1 skipped**.
+
+**What the live run corrected (don't re-derive):**
+1. **The `mcp` extra is required, and Claude Code drops the server SILENTLY without it.** `hearth mcp`
+   exits with `The MCP server requires the 'mcp' extra.`; the agent then reports "no hearth tools are
+   registered", which misleads you into debugging `--mcp-config` paths. Probe the server standalone.
+2. **`uv sync --extra mcp` alone PRUNES the other extras** — it stripped `mlx-lm`, `transformers`,
+   `torch`, `pytest`, `ruff`. Always `uv sync --extra mlx --extra mcp --extra dev` together.
+3. **`--output-format json` shows no tool_use records** — only the final result. Any "did it call the
+   tool?" assertion needs `--output-format stream-json --verbose`. Don't trust an agent's self-report:
+   an early harness asked it to print `TOOL_USED=yes|no` and it answered `yes`, proving nothing.
+4. **`hearth_summarize`'s `max_words` is a soft hint** (~40 words returned for a 25 limit).
+5. **MCP tools take `text`, not a path** — so a pane must Read the file into its own context first,
+   capping savings on the "pre-digest a large file" pattern. A path-taking variant would close this.
 
 **Next (to unblock graduation):** the parked firewall hardening — LuLu is already installed and
 active, so §1.3/§1.4 are now mostly a matter of adding the cmux block rule and re-verifying.
+**No functional work is outstanding.**
 
 ---
 
