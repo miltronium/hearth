@@ -178,5 +178,49 @@ signed-out + OS-level egress containment.
 
 ---
 
-## (Further ADRs land here as C3+ surface real constraints — e.g. the exact container-network
-## enforcement, or an upstream cmux sealed-mode patch decision.)
+## ADR-C008 — Seal gates must verify ENFORCEMENT, not configuration
+
+**Status:** Accepted (2026-08-17) · **Context:** firewall-hardening session; two live failures in
+one hour.
+
+**Context.** The mandatory firewall gate in `cmux-sealed --check` was written to accept a *running*
+LuLu/Little Snitch process as the structural seal (ADR-C006 #5). Hardening it on real hardware
+surfaced two distinct ways that reasoning fails — both of which reported a seal that did not exist:
+
+1. **Config lies.** LuLu was running, and the gate passed — while LuLu held an explicit
+   `ALLOW *:*` rule for `com.cmuxterm.app`. A firewall that is installed and permits the app is not
+   a seal. Reading the rule store fixed this.
+2. **Rules lie too.** With the rule corrected to `BLOCK *:*`, the rule-reading check reported
+   **SEALED** — while LuLu's network extension was `[terminated waiting to uninstall on reboot]` and
+   LuLu.app was not running. cmux connected off-box anyway (probe exit 3, `172.182.252.137:443`).
+   **A rule that nothing enforces is not a seal.**
+
+A third, independent instance of the same class appeared in the same session: cmux's
+`SUEnableAutomaticChecks` had silently regressed from `0` (set 2026-07-22) back to `1`, with no app
+update — so even a correctly-applied *app* setting does not stay applied.
+
+**Decision.** Every seal gate must verify the property it claims, as close to the observable outcome
+as it can get, and **fail closed on anything it cannot confirm**. Concretely, the layers are ordered
+by strength, and a weaker layer may never stand in for a stronger one:
+
+| Layer | Question | Verified by |
+| --- | --- | --- |
+| 1. config | is the tool configured to block? | `lulu_rule_check.py` rule scan |
+| 2. enforcement | is the enforcer actually running? | `lulu_rule_check.py --` extension liveness |
+| 3. outcome | did anything actually leave? | `cmux_egress_probe.sh` (authoritative) |
+
+`lulu_rule_check.py` implements 1+2 and returns distinct exit codes (1 = not blocked, 2 =
+undetermined, 3 = blocked-but-unenforced) so the gate can say *which* layer failed. Layer 3 remains
+the only proof; layers 1–2 exist to stop us from *claiming* a seal we never had.
+
+**Consequences.** The gate is now noisier and will refuse to launch in states it previously waved
+through — that is the point. "A security tool is installed" is demoted to evidence, not proof.
+This strengthens rather than revises **ADR-C006**: the structural seal is still required; what
+changes is that we now *check* it instead of assuming it. The same principle applies to the pf route,
+where an anchor can be loaded yet dormant because `/etc/pf.conf` never references it — the identical
+failure shape (see `cmux-sealed.pf.conf`).
+
+---
+
+## (Further ADRs land here as later phases surface real constraints — e.g. the exact
+## container-network enforcement, or an upstream cmux sealed-mode patch decision.)
