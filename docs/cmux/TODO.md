@@ -19,9 +19,20 @@ key finding is validated; what remains is finishing the deny-by-default firewall
 - The sampling probe (`cmux_egress_probe.sh`) gave a false "clean" (Sparkle fired after the window) →
   a deny-by-default firewall (LuLu / Little Snitch) is the authoritative seal, not the probe.
 
+**Progress 2026-08-17 (see RESULTS §1.3/§1.5 + ADR-C008):**
+- ✅ §1.5 negative control captured (probe exit 3 → github.com); Sparkle finding reproduced.
+- ✅ LuLu rule for cmux set to `BLOCK *:*` (was `ALLOW *:*` — the gate had been passing on that).
+- ✅ `cmux-sealed --check` firewall gate hardened: verifies the rule store **and** extension liveness
+      (`scripts/cmux/lulu_rule_check.py`, 15 tests), fails closed with distinct exit codes.
+- ❌ §1.3 **still open** — the block did not take effect: LuLu's network extension is
+      `[terminated waiting to uninstall on reboot]`, so nothing enforces the rule (probe exit 3).
+
 **TODO to finish:**
-- [ ] Install + approve **LuLu** (or Little Snitch); add a rule blocking **cmux** → any remote.
-- [ ] Re-verify: `lsof -nP -iTCP -sTCP:ESTABLISHED -a -c cmux` is **empty** with LuLu active → fill **RESULTS §1.3**.
+- [ ] **Restore LuLu enforcement** — launch LuLu.app, re-approve its system extension (System Settings
+      → General → Login Items & Extensions → Network Extensions). The extension is queued for removal,
+      so a reboot is likely needed. Until this is done **the machine has no application firewall.**
+- [ ] Re-verify: `python3 scripts/cmux/lulu_rule_check.py` exits **0** (blocked *and* enforced), then
+      `cmux_egress_probe.sh` exits **0** with cmux running → fill **RESULTS §1.3**.
 - [ ] Sign into cmux with LuLu active, confirm `*.relay.cmux.dev` (iroh) is blocked → fill **RESULTS §1.4** (backstop proof).
 - [ ] (optional) Investigate fully neutralizing Sparkle without a firewall — likely needs removing `SUFeedURL`
       from `Info.plist` (breaks notarization → re-sign) or a launch wrapper; LuLu is simpler, so low priority.

@@ -93,15 +93,46 @@ else
   mandatory_ok=0
 fi
 
-# 3) MANDATORY: an OS-level egress seal is present (the structural seal, ADR-C006 #5). Accept either a
-#    running app-firewall (LuLu/Little Snitch — reliable, app-scoped) or the pf anchor's block rules.
-#    NOTE: the authoritative proof of no-egress is the outcome, via scripts/cmux/cmux_egress_probe.sh.
-if pgrep -fi "lulu" >/dev/null 2>&1 || pgrep -fi "little snitch" >/dev/null 2>&1; then
-  pass "firewall: app-level egress firewall (LuLu/Little Snitch) running — ensure it is set to block cmux"
+# 3) MANDATORY: an OS-level egress seal is present (the structural seal, ADR-C006 #5).
+#
+#    This gate used to pass whenever a LuLu/Little Snitch PROCESS was running. That is not a seal:
+#    on 2026-08-17 this machine had LuLu running *with an explicit ALLOW *:* rule for cmux*, and the
+#    gate happily reported sealed. A running firewall that permits the app is worse than no firewall,
+#    because it manufactures confidence. So we now read LuLu's actual rule store and require a real
+#    block rule. Undetermined (unreadable store / format change) FAILS — never assume a seal.
+#
+#    NOTE: rule state still is not proof of OUTCOME. The authoritative confirmation of no-egress is
+#    scripts/cmux/cmux_egress_probe.sh reporting loopback-only while cmux runs.
+#    (The verifier's non-zero exits are VERDICTS, not errors, so they must not trip `set -e`.)
+lulu_verdict=""
+lulu_rc=2
+if [ -r /Library/Objective-See/LuLu/rules.plist ]; then
+  if lulu_verdict="$(python3 "$REPO_ROOT/scripts/cmux/lulu_rule_check.py" --app "$CMUX_BUNDLE_ID" 2>&1)"; then
+    lulu_rc=0
+  else
+    lulu_rc=$?
+  fi
+fi
+
+if [ "$lulu_rc" = 0 ]; then
+  pass "firewall: LuLu blocks '$CMUX_BUNDLE_ID' for all endpoints — confirm with the egress probe"
+elif [ "$lulu_rc" = 1 ]; then
+  fail "firewall: LuLu is present but does NOT block cmux — ${lulu_verdict%%$'\n'*}"
+  echo "         Fix: LuLu → Rules → find '$CMUX_BUNDLE_ID' → set the action to Block (or delete the"
+  echo "         allow rule so LuLu prompts, then choose Block). Re-run this check afterwards."
+  mandatory_ok=0
+elif [ "$lulu_rc" = 3 ]; then
+  # The nastiest state: the rule is RIGHT and nothing enforces it. Found live 2026-08-17.
+  fail "firewall: LuLu's rule blocks cmux but its network filter is NOT running — nothing is enforcing it"
+  echo "         ${lulu_verdict%%$'\n'*}"
+  echo "         Fix: launch LuLu.app and re-approve its system extension (System Settings → General →"
+  echo "         Login Items & Extensions → Network Extensions); a reboot may be required. Then re-check."
+  mandatory_ok=0
 elif { sudo -n pfctl -a "$PF_ANCHOR" -sr 2>/dev/null || pfctl -a "$PF_ANCHOR" -sr 2>/dev/null; } | grep -q 'block'; then
+  # No readable LuLu store; fall back to the pf anchor. Still not proof — see the pf.conf caveats.
   pass "firewall: pf anchor '$PF_ANCHOR' loaded — confirm it is ENFORCED with the egress probe"
 else
-  fail "firewall: no egress seal detected. Block cmux with LuLu/Little Snitch, or run '$0 --install-firewall' (pf). The egress probe is the real proof."
+  fail "firewall: no egress seal detected. Block cmux in LuLu/Little Snitch, or run '$0 --install-firewall' (pf). The egress probe is the real proof."
   mandatory_ok=0
 fi
 

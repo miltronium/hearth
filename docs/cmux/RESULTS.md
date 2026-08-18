@@ -39,10 +39,25 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     but the GitHub connection fired *after* the window (Sparkle delays its first check) and was caught by a
     later `lsof -nP -iTCP -sTCP:ESTABLISHED -a -c cmux` snapshot. → the sampling probe is a quick look, not
     proof; LuLu / continuous capture is authoritative.
-  - **Remediation:** install LuLu, block cmux's outbound. _(PENDING re-verify: `lsof -a -c cmux` empty with
-    LuLu active → then §1.3 = sealed.)_
+  - **Remediation attempted 2026-08-17 — STILL NOT SEALED.** LuLu's rule for `com.cmuxterm.app` was
+    changed from `ALLOW *:*` to `BLOCK *:*` (verified in the rule store). cmux was quit, relaunched,
+    and watched for 280 s: **probe exit 3**, off-box connection to `172.182.252.137:443`.
+  - **Why it failed — the finding (ADR-C008):** LuLu's network extension was
+    `[terminated waiting to uninstall on reboot]` and LuLu.app was not running, so **nothing was
+    enforcing the rule**. The rule was correct and irrelevant. Note the first version of the new
+    rule-reading check reported `SEALED` in exactly this state — which is why the check now also
+    verifies extension liveness and returns a distinct exit 3 for "blocked but unenforced".
+  - ⏳ **To close §1.3:** restore LuLu enforcement (launch LuLu.app, re-approve the system extension
+    under System Settings → General → Login Items & Extensions → Network Extensions; reboot may be
+    required — the extension is currently queued for removal), confirm
+    `lulu_rule_check.py` exits 0, then re-run the probe and expect exit 0.
 - **§1.4 pf backstop (signed-in, firewall on)** — _(paste probe result; expect still loopback-only)_
-- **§1.5 negative control** — _(paste result showing the probe DOES see egress, or "skipped")_
+- **§1.5 negative control** — ✅ **DONE 2026-08-17.** With cmux permitted (LuLu rule still `ALLOW *:*`),
+  `cmux_egress_probe.sh --seconds 75` returned **exit 3**, reporting `140.82.116.6:443` =
+  `lb-140-82-116-6-sea.github.com`. The probe demonstrably detects egress, so a later exit 0 means
+  something. This also **reproduces the 2026-07-22 Sparkle finding** 26 days later, on a machine where
+  `SUEnableAutomaticChecks` had silently regressed from `0` back to `1` with no app update
+  (same binary, same v0.64.20) — further evidence for **ADR-C006/C008** that app flags do not stay set.
 - **§1.6 C2 live pane offload** — ✅ **functional half done (2026-08-17, cmux 0.64.20)**;
   egress half still pending the §1.3 seal.
   - Real cmux pane on a non-confidential empty test dir, driven over the socket

@@ -63,7 +63,7 @@ rm -rf ~/Library/Application\ Support/cmux/
 | --- | --- | --- |
 | **tier** | repo classifies sealed (`tiers.yaml`) | an `open`-classified repo → `require-sealed` exits 3 (refused) |
 | **hearth** | `hearth_private.sh --check` passes (0 remotes) | a resolvable remote → non-zero |
-| **firewall** | pf anchor `cmux-sealed` loaded with a block rule | anchor absent → `--check` exits 2, refuses to launch |
+| **firewall** | LuLu blocks cmux **and** its filter is running (or a pf anchor with block rules) | allow-rule present, or rule present but extension dead → exits 2, refuses to launch |
 
 Advisory (WARN by default, FAIL under `--strict`): `sendAnonymousTelemetry=0`, `SUEnableAutomaticChecks=0`,
 `CMUX_CLI_SENTRY_DISABLED=1`+`CMUX_CLAUDE_HOOK_SENTRY_DISABLED=1`, no cmux auth item in keychain (best-effort signed-out).
@@ -73,6 +73,22 @@ closed (tier PASS, hearth PASS, firewall FAIL → exit 2). The tier gate refused
 repo (exit 3). Classifier: `tests/test_cmux_tier_classify.py`, 14 tests green.
 
 ---
+
+## Verifying the firewall gate (ADR-C008)
+
+The firewall gate checks three layers, weakest to strongest. **Only the third is proof.**
+
+```sh
+python3 scripts/cmux/lulu_rule_check.py          # layers 1+2: rule says block AND filter is running
+#   exit 0 = blocked and enforced      exit 1 = not blocked (allow rule, or no rule)
+#   exit 2 = undetermined              exit 3 = blocked BUT nothing is enforcing it
+scripts/cmux/cmux_egress_probe.sh --seconds 280  # layer 3: did anything actually leave?
+```
+
+Both weaker layers have been observed lying on this machine in a single session (2026-08-17):
+LuLu ran with an `ALLOW *:*` rule for cmux, and later held a correct `BLOCK *:*` rule while its
+network extension was `[terminated waiting to uninstall on reboot]`. Check the exit code, not the
+presence of the tool — and finish with the probe.
 
 ## Why pf and not just app flags (ADR-C006)
 
