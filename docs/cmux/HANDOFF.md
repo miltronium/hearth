@@ -1,7 +1,7 @@
 # HEARTH × cmux — Session handoff / resume-here
 
 > **Read this first when resuming.** Snapshot of exactly where the cmux integration stands as of
-> **2026-08-17**, so a fresh conversation can pick up with no context loss. The full plan is
+> **2026-08-19**, so a fresh conversation can pick up with no context loss. The full plan is
 > in [README.md](README.md); this file is the "what's live right now + what to do next."
 
 ---
@@ -17,17 +17,15 @@
 - ✅ **C2 is live-validated (2026-08-17)** — a real Claude Code agent in a real cmux pane offloaded a
   log summary to local HEARTH over MCP, proven from the agent's own `tool_use` transcript; the
   OpenAI surface served in-pane at `served_by=local`. **RESULTS §1.6** functional half is filled.
-  Three more live-only findings fixed/documented. **Both functional tracks are now closed** —
-  the only thing left before graduation is the parked firewall sealing.
+  Three more live-only findings fixed/documented. **Both functional tracks are now closed.**
 - **The "must run inside a cmux pane" rule was wrong** — it's a *default*, not a hard gate. See
   **ADR-C007** and the two access routes in [RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md).
-- ⚠️ **START HERE TOMORROW — LuLu is NOT enforcing on this machine.** Its network extension is
-  `[terminated waiting to uninstall on reboot]` and LuLu.app is not running, so **no application
-  firewall is active at all** (this is broader than the project). Restoring it is the single
-  blocking item; see the resume checklist.
-- **Firewall hardening advanced but §1.3 is NOT closed (2026-08-17).** The seal gate was rewritten
-  (**ADR-C008**) and **§1.5** filled, but the primary privacy gate §1.3 could not honestly be
-  claimed — the block rule was set and nothing enforced it. Details below.
+- ✅ **LuLu enforcement is RESTORED (2026-08-19).** `lulu_rule_check.py` exits **0** — `BLOCK *:*`
+  for `com.cmuxterm.app` **and** "network extension is loaded and running". The 2026-08-17
+  "no application firewall is active" blocker is **resolved**; disregard it.
+- ✅ **§1.3 — the primary privacy gate — is CLOSED (2026-08-19).** cmux launched cold under the block;
+  `cmux_egress_probe.sh --seconds 280` → **exit 0, loopback-only**, post-hoc `lsof` snapshot also empty.
+  **RESULTS §1.3** filled. The sealed tier now has its central guarantee on record.
 - ✅ **Push is unblocked** (as of 2026-08-17) — `ssh → github.com` works again and
   `origin/cmux/integration` is level with local. The 2026-08-06 "commits are local-only / LuLu
   blocks ssh" warning is **stale**; disregard it.
@@ -36,28 +34,35 @@
 
 ## Resume checklist (do these first)
 
-**Step 0 — restore LuLu enforcement (BLOCKING, needs a human + probably a reboot).**
-Launch LuLu.app → re-approve its system extension in *System Settings → General → Login Items &
-Extensions → Network Extensions* → reboot if it does not go active. Nothing else in the sealed track
-can proceed until this is done.
+**The 2026-08-17 LuLu blocker is cleared and §1.3 is closed.** Next up is **§1.4**, which needs a
+human decision (signing into cmux with the block active — your account, your call).
 
 ```sh
 cd /Users/miltronix/Claude/apps/HEARTH
-git branch --show-current                                      # expect: cmux/integration
-git log --oneline origin/cmux/integration..cmux/integration     # expect: empty (level with origin)
+git branch --show-current                                       # expect: cmux/integration
 
-# 1) confirm the firewall is genuinely enforcing (NOT just installed) — ADR-C008
-python3 scripts/cmux/lulu_rule_check.py         # want exit 0 "SEALED ... filter loaded and running"
-#    exit 1 = not blocked · exit 2 = undetermined · exit 3 = blocked but NOTHING ENFORCING it
+# 0) re-confirm the seal is still in force (check EVERY session — flags and the extension both regress)
+python3 scripts/cmux/lulu_rule_check.py                         # want exit 0 "filter loaded and running"
+defaults read com.cmuxterm.app SUEnableAutomaticChecks          # want 0 — this has self-regressed before
+CMUX_CLI_SENTRY_DISABLED=1 CMUX_CLAUDE_HOOK_SENTRY_DISABLED=1 \
+  scripts/cmux/cmux-sealed --check --strict /Users/miltronix/Claude/apps/HEARTH   # want all 7 PASS
 
-# 2) then §1.3, the primary privacy gate (the cmux rule is ALREADY set to BLOCK — left that way):
-scripts/cmux/cmux-sealed --check --strict /Users/miltronix/Claude/apps/HEARTH   # want exit 0, all PASS
-#    (as of 2026-08-17 this is 7-of-8 PASS; firewall is the only FAIL)
-osascript -e 'tell application "cmux" to quit'
+# 1) §1.4 — sign into cmux with the block active, prove the iroh relay is still blocked
 scripts/cmux/cmux_egress_probe.sh --seconds 280 &   # start FIRST, it waits for cmux
 /Applications/cmux.app/Contents/Resources/bin/cmux ~/Claude/apps/HEARTH/examples/repos/oss_repo
-#    want probe exit 0 (loopback-only) -> fills RESULTS §1.3
+#    then sign in inside the app; want probe exit 0 (no *.relay.cmux.dev) -> fills RESULTS §1.4
+
+# 2) then the two egress slivers that were only ever waiting on the seal:
+#    - re-run examples/cmux/pane_offload_live.sh under the seal   -> §1.6 egress half
+#    - re-run scripts/cmux/orchestrator.py under the seal          -> §1.7 egress half
 ```
+
+> ⚠️ **Running `--check` from a bare shell always FAILs `cli-telemetry`** — that gate reads two env
+> vars the launcher exports itself at `cmux-sealed:170`. Pass them inline (as above) or you will
+> chase a phantom failure. This is a check-mode artifact, not a real posture gap.
+
+> ⚠️ While the seal holds, **`git push` from inside a cmux pane fails** — push from an ordinary
+> terminal, which is unaffected.
 
 Both functional tracks (C2 live, C4 live) are **done** — nothing functional is waiting on you.
 Everything outstanding is validation/graduation.
@@ -86,7 +91,7 @@ Everything outstanding is validation/graduation.
 | C0 | Egress audit ([AUDIT.md](AUDIT.md)) + probe | ✅ static (123 findings). Dynamic probe: partly run (see findings) |
 | C1 | ADRs (C001–C006) | ✅ Accepted |
 | C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved); ✅ **live pane offload done 2026-08-17** (RESULTS §1.6). Loopback-only-under-seal check still pending |
-| C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; gate hardened 2026-08-17 (**ADR-C008**); on-hardware sealing **BLOCKED on LuLu enforcement** |
+| C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; gate hardened 2026-08-17 (**ADR-C008**); ✅ **on-hardware seal proven 2026-08-19** (RESULTS §1.3). §1.4 remains |
 | C4 | Orchestrator ([RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md)) | ✅ built/tested; ✅ **live run done 2026-08-06** (RESULTS §1.7). Loopback-only-under-seal check still pending |
 | C5 | Open tier ([RUNBOOK_open.md](RUNBOOK_open.md)) | ✅ gate demonstrated; live cloud run **PARKED** → TODO |
 | C6 | Graduation to `main` | ◐ runbook+RESULTS ready; **PARKED** on sealed hardening |
@@ -148,13 +153,13 @@ transcript**, reproduced twice. Suite still **248 passed, 1 skipped**.
 5. **MCP tools take `text`, not a path** — so a pane must Read the file into its own context first,
    capping savings on the "pre-digest a large file" pattern. A path-taking variant would close this.
 
-**Next (to unblock graduation):** the parked firewall hardening — LuLu is already installed and
-active, so §1.3/§1.4 are now mostly a matter of adding the cmux block rule and re-verifying.
-**No functional work is outstanding.**
+**Next (to unblock graduation):** §1.3 is now closed (2026-08-19). What remains is **§1.4** (sign in
+with the block active), the §1.6/§1.7 egress halves re-run under the seal, and §2.2's open-tier cloud
+run. **No functional work is outstanding.**
 
 ---
 
-## ◐ Done 2026-08-17 — firewall hardening (§1.5 filled, §1.3 still open)
+## ✅ Done 2026-08-17 → 2026-08-19 — firewall hardening (§1.5 and §1.3 both filled)
 
 **What shipped:** `scripts/cmux/lulu_rule_check.py` (+15 tests) and a rewritten mandatory firewall
 gate in `cmux-sealed --check`. **ADR-C008** records the principle. Suite **263 passed, 1 skipped**.
@@ -170,12 +175,13 @@ gate in `cmux-sealed --check`. **ADR-C008** records the principle. Suite **263 p
 
 → Layers are **config < enforcement < outcome**; only `cmux_egress_probe.sh` is proof.
 
-**What did NOT happen:** §1.3 was not filled and must not be back-filled from the above — the seal
-was never in force. §1.4 untouched (needs §1.3 first, plus a decision about signing in).
+**What did NOT happen on 2026-08-17:** §1.3 was not filled — the seal was never in force that day, and
+it was correctly refused rather than back-filled. §1.4 remains untouched (needs a decision about signing in).
 
-**State left deliberately:** the cmux LuLu rule is **BLOCK** (not restored to Allow) so §1.3 can be
-finished the moment enforcement is back. Note this means **`git push` from inside a cmux pane will
-fail** while the seal holds — push from an ordinary terminal, which is unaffected.
+**Closed 2026-08-19:** enforcement came back (extension live), and §1.3 was filled on a real run —
+probe **exit 0**, loopback-only. See RESULTS §1.3 for the controlled comparison that makes it a seal
+rather than a quiet app. The cmux LuLu rule stays **BLOCK**; note **`git push` from inside a cmux pane
+fails** while the seal holds — push from an ordinary terminal, which is unaffected.
 
 ---
 
@@ -184,8 +190,8 @@ fail** while the seal holds — push from an ordinary terminal, which is unaffec
 - **§1.4 (iroh relay backstop)** needs you to *sign into cmux* with the block active, to prove
   sign-out is not load-bearing. Your account → your call. Skippable, at the cost of one graduation
   criterion.
-- **When to restore the LuLu rule to Allow.** §1.6/§1.7's egress halves also need the seal active,
-  so the cheap path is: leave cmux blocked through §1.3 → §1.7, then restore once at the end.
+- **When to restore the LuLu rule to Allow.** §1.6/§1.7's egress halves still need the seal active,
+  so the cheap path is unchanged: leave cmux blocked through §1.4 → §1.7, then restore once at the end.
 
 ---
 
@@ -206,11 +212,12 @@ fail** while the seal holds — push from an ordinary terminal, which is unaffec
   `~/.config/cmux/cmux.json.20260805-164608.bak`.
 - **HEARTH operational:** MLX backend, `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` pulled to
   `~/.hearth/models`. `HEARTH_BACKEND=mlx uv run python …` / `uv run hearth …` work.
-- ⚠️ **LuLu (as of 2026-08-17): installed but NOT enforcing.** Extension state
-  `[terminated waiting to uninstall on reboot]`, LuLu.app not running. Rule store still holds
-  `BLOCK *:*` for `com.cmuxterm.app`. Restore via LuLu.app → re-approve the extension → reboot.
-  Verify with `python3 scripts/cmux/lulu_rule_check.py` (exit 0 = blocked *and* enforced).
-  It no longer blocks `ssh→github` — pushes work from an ordinary terminal.
+- ✅ **LuLu (as of 2026-08-19): installed AND enforcing.** `lulu_rule_check.py` exits 0 — extension
+  "loaded and running", rule store holds `BLOCK *:*` for `com.cmuxterm.app`. The 2026-08-17
+  `[terminated waiting to uninstall on reboot]` state is resolved. **Re-verify every session**
+  (`python3 scripts/cmux/lulu_rule_check.py`; exit 0 = blocked *and* enforced) — this machine has
+  regressed both the extension and the Sparkle flag once each already.
+  LuLu does not block `ssh→github` — pushes work from an ordinary terminal.
 - **Test dirs:** `CONF_REPO`/`OSS_REPO` were `examples/repos/{conf_repo,oss_repo}` (empty dirs are fine).
 
 ---
