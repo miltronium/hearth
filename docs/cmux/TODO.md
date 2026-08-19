@@ -24,15 +24,18 @@ key finding is validated; what remains is finishing the deny-by-default firewall
 - ✅ LuLu rule for cmux set to `BLOCK *:*` (was `ALLOW *:*` — the gate had been passing on that).
 - ✅ `cmux-sealed --check` firewall gate hardened: verifies the rule store **and** extension liveness
       (`scripts/cmux/lulu_rule_check.py`, 15 tests), fails closed with distinct exit codes.
-- ❌ §1.3 **still open** — the block did not take effect: LuLu's network extension is
-      `[terminated waiting to uninstall on reboot]`, so nothing enforces the rule (probe exit 3).
+- ❌ §1.3 was still open at end of 2026-08-17 — the block did not take effect: LuLu's network extension
+      was `[terminated waiting to uninstall on reboot]`, so nothing enforced the rule (probe exit 3).
+
+**Progress 2026-08-19 — §1.3 CLOSED (see RESULTS §1.3):**
+- ✅ LuLu enforcement restored — `lulu_rule_check.py` exits **0** (BLOCK rule *and* extension live).
+- ✅ `cmux-sealed --check --strict` → sealed posture verified, all 7 gates PASS.
+- ✅ **RESULTS §1.3 filled** — cmux launched cold under the block, `cmux_egress_probe.sh --seconds 280`
+      → **exit 0, loopback-only**; post-hoc `lsof` snapshot also empty. The 2026-08-17 (exit 3) and
+      2026-08-19 (exit 0) runs differ in exactly one variable — extension liveness — which is what
+      makes this a seal rather than a quiet app.
 
 **TODO to finish:**
-- [ ] **Restore LuLu enforcement** — launch LuLu.app, re-approve its system extension (System Settings
-      → General → Login Items & Extensions → Network Extensions). The extension is queued for removal,
-      so a reboot is likely needed. Until this is done **the machine has no application firewall.**
-- [ ] Re-verify: `python3 scripts/cmux/lulu_rule_check.py` exits **0** (blocked *and* enforced), then
-      `cmux_egress_probe.sh` exits **0** with cmux running → fill **RESULTS §1.3**.
 - [ ] Sign into cmux with LuLu active, confirm `*.relay.cmux.dev` (iroh) is blocked → fill **RESULTS §1.4** (backstop proof).
 - [ ] (optional) Investigate fully neutralizing Sparkle without a firewall — likely needs removing `SUFeedURL`
       from `Info.plist` (breaks notarization → re-sign) or a launch wrapper; LuLu is simpler, so low priority.

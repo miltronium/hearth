@@ -47,10 +47,25 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     enforcing the rule**. The rule was correct and irrelevant. Note the first version of the new
     rule-reading check reported `SEALED` in exactly this state — which is why the check now also
     verifies extension liveness and returns a distinct exit 3 for "blocked but unenforced".
-  - ⏳ **To close §1.3:** restore LuLu enforcement (launch LuLu.app, re-approve the system extension
-    under System Settings → General → Login Items & Extensions → Network Extensions; reboot may be
-    required — the extension is currently queued for removal), confirm
-    `lulu_rule_check.py` exits 0, then re-run the probe and expect exit 0.
+  - ✅ **CLOSED 2026-08-19 — SEALED.** LuLu enforcement was restored (extension no longer queued for
+    removal; `lulu_rule_check.py` exits **0** = `BLOCK *:*` for `com.cmuxterm.app` **and** "network
+    extension is loaded and running"). Preflight `cmux-sealed --check --strict` returned **sealed posture
+    verified**, all 7 gates PASS. cmux (v0.64.20, pid 96728) was launched cold against the empty
+    non-confidential `examples/repos/oss_repo` with the probe already watching:
+    `cmux_egress_probe.sh --seconds 280` → **exit 0, "only loopback/local connections observed."**
+    A post-hoc `lsof -nP -iTCP -sTCP:ESTABLISHED -a -c cmux` snapshot (the method that caught the
+    2026-07-22 false clean) was also empty. LuLu re-verified as still enforcing *after* the run.
+  - **Why this run is trustworthy — the controlled comparison.** A clean probe cannot by itself
+    distinguish "blocked" from "never attempted", and no LuLu block log was reachable on this machine
+    to prove the block fired. But the 2026-08-17 failed run and this one differ in **exactly one
+    variable**: both had the `BLOCK *:*` rule set and both had `SUEnableAutomaticChecks=0`; on
+    2026-08-17 the extension was dead (**probe exit 3**, `172.182.252.137:443`), today it is live
+    (**exit 0**). Enforcement liveness is the only thing that changed, so it is what produced the seal.
+  - **The `SUEnableAutomaticChecks=0` confound is closed by precedent:** the 2026-07-22 run had that
+    same flag at `0` and **still** egressed to GitHub via Sparkle, so flag state alone does not explain
+    today's clean result. This is the same point **ADR-C006/C008** make — flags are not the seal.
+  - **Window adequacy:** 280 s, versus the 150 s that missed Sparkle on 2026-07-22 and the 75 s in which
+    the §1.5 negative control *did* catch it. The late-Sparkle failure mode had ample room to appear.
 - **§1.4 pf backstop (signed-in, firewall on)** — _(paste probe result; expect still loopback-only)_
 - **§1.5 negative control** — ✅ **DONE 2026-08-17.** With cmux permitted (LuLu rule still `ALLOW *:*`),
   `cmux_egress_probe.sh --seconds 75` returned **exit 3**, reporting `140.82.116.6:443` =
