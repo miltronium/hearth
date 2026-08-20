@@ -20,6 +20,7 @@ all**, and LuLu here is allow-by-default (`passiveMode=true`, `allowApple`/`allo
 
 - **Full context + ordered next steps:** [FINDING_pane_egress.md](FINDING_pane_egress.md) ← start there
 - **Decision:** **ADR-C009** · **Negative result:** **RESULTS §1.8** · **Work item:** TODO "🚨 OPEN — C7"
+  · **Issue:** [miltronium/hearth#7](https://github.com/miltronium/hearth/issues/7)
 - **§1.3 still stands** — but only as a claim about `com.cmuxterm.app`; it now carries a scope warning.
   Do not cite it as workspace containment. §1.4 and the §1.6/§1.7 egress slivers are unaffected and
   still worth doing, but they are all app-scoped too.
