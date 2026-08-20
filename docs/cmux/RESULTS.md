@@ -82,7 +82,7 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
   `SUEnableAutomaticChecks` had silently regressed from `0` back to `1` with no app update
   (same binary, same v0.64.20) — further evidence for **ADR-C006/C008** that app flags do not stay set.
 - **§1.6 C2 live pane offload** — ✅ **functional half done (2026-08-17, cmux 0.64.20)**;
-  egress half still pending the §1.3 seal.
+  ✅ **egress half done (2026-08-19)** — scoped to cmux's own process, see the caveat below.
   - Real cmux pane on a non-confidential empty test dir, driven over the socket
     (`socketControlMode=password`, **ADR-C007**). Both wiring surfaces exercised live:
     **OpenAI** — in-pane request to `$OPENAI_BASE_URL` returned `served_by=local`,
@@ -96,9 +96,20 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     drops the server **silently** without it; (2) `uv sync --extra mcp` alone **prunes** mlx/dev —
     sync extras together; (3) `max_words` is a soft hint (~40 words for a 25 limit). Suite after
     the dependency churn: **248 passed, 1 skipped**. Detail in RUNBOOK_wiring §5.
-  - ⏳ **Not yet done:** confirm the probe stays clean during the run (needs the §1.3 seal).
+  - ✅ **Egress half done 2026-08-19.** Re-run under the active seal (LuLu enforcing,
+    `lulu_rule_check.py` exit 0). The offload reproduced the functional result — `VERDICT= OFFLOADED`,
+    `mcp__hearth__hearth_summarize` present in the agent's own `tool_use` transcript
+    (`TOOL_CALLS= ['Bash','Bash','Read','Read','ToolSearch','mcp__hearth__hearth_summarize']`) —
+    while `cmux_egress_probe.sh --seconds 200` returned **exit 0** and a per-pid attribution sampler
+    recorded **zero** established TCP connections for any cmux-matching process.
+  - ⚠️ **What this does NOT show (ADR-C009).** The agent driving the offload is Claude Code, which
+    talked to Anthropic throughout — the transcript records `claude-opus-5`. That traffic is invisible
+    to the probe, because `claude`/`node` are not `-c cmux` processes. **This result is scoped to
+    cmux's own process, not to the pane.** Local-only routing of the *offloaded subtask* remains
+    structural (`allow_escalation=False` + `routing.private.yaml` `remotes: {}`) — not something this
+    probe proves. See **§1.8** for the containment gate this exposes.
 - **§1.7 C4 orchestrator on live socket** — ✅ **functional half done (2026-08-06, cmux 0.64.20)**;
-  egress half still pending the §1.3 seal.
+  ✅ **egress half done (2026-08-19)** — scoped to cmux's own process, see the caveat below.
   - Ran from an ordinary terminal via `socketControlMode=password` + `scripts/cmux/cmux-auth-env`
     (**ADR-C007**) against 4 workspaces parked in distinct states. HEARTH classified **4/4 correctly**
     (done / working / waiting / error), flagged **3/4**, **0 frontier tokens**; three real badges
@@ -109,8 +120,22 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     (2) `--dry-run` reported a flat `0/N` flagged (counted notifications sent, not panes warranting
     attention); (3) cmux writes errors to stdout with rc=1, so failures surfaced as a bare "non-zero
     exit status" — `_run` now propagates cmux's message. Suite: **248 passed, 1 skipped**.
-  - ⏳ **Not yet done:** re-run the sweep under `cmux-sealed` with the probe to prove it stays
-    loopback-only. Blocked on the same parked firewall work as §1.3.
+  - ✅ **Egress half done 2026-08-19.** Sweep re-run under the active seal:
+    `cmux_egress_probe.sh --seconds 150` **exit 0**, attribution sampler empty, orchestrator `rc=0`,
+    1/1 pane triaged locally at **0 frontier tokens**. (One workspace was parked this time, versus
+    four for the 2026-08-06 functional run — this re-run is about egress, not classification.)
+  - ⚠️ **The first attempt returned a FALSE POSITIVE — probe exit 3, `108.138.246.67:443`
+    (CloudFront).** The cause was the harness, not cmux: that run omitted `HF_HUB_OFFLINE=1` /
+    `TRANSFORMERS_OFFLINE=1`, so `huggingface_hub` phoned the HF CDN from the orchestrator's **own**
+    Python process — and `pgrep -f cmux` swept that process in, because its path is
+    `scripts/cmux/orchestrator.py`. Two defects worth carrying forward:
+    (1) **the probe's pattern over-matches this repo's own tooling** — any command line containing
+    "cmux", including `scripts/cmux/*` and the probe script itself; and (2) **it unions endpoints
+    without recording which pid owned them**, so the output cannot be attributed and a harness bug
+    reads as a seal failure. Always set the offline vars when running the orchestrator under a probe;
+    consider having the probe emit `pid|comm|endpoint`. This is the mirror image of **ADR-C009**'s
+    under-matching: the same crude pattern both misses pane children (§1.8) and falsely captures our
+    own scripts.
 - **§1.8 workspace containment (pane-child egress)** — ❌ **FAILED 2026-08-19 — new gate, open.**
   The sealed workspace does **not** contain the processes running in it. From a pane in a sealed
   workspace, with `lulu_rule_check.py` at exit 0 and `cmux-sealed --check`'s firewall gate at `PASS`:
