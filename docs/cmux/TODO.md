@@ -20,7 +20,8 @@ firewall gate reported `PASS`.
 repro, three-layer root cause, what it does/doesn't invalidate, an options analysis with a
 recommendation, tooling + doc deliverables, and an ordered next-steps list. Decision: **ADR-C009**.
 Negative result recorded as **RESULTS §1.8**; **§1.3 gained a scope warning** (it stands, but only as a
-statement about `com.cmuxterm.app`).
+statement about `com.cmuxterm.app`). Tracked as
+[miltronium/hearth#7](https://github.com/miltronium/hearth/issues/7).
 
 **Start here:** reproduce it first (FINDING §9), confirm the gates still say `SEALED` at the same
 moment, *then* prototype §8.1 option 1 (dedicated sealed uid + the existing pf uid anchor) on a

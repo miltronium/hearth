@@ -2,6 +2,7 @@
 
 > **Status:** OPEN · **Severity:** high (invalidates the privacy claim people will *read into* §1.3)
 > **Found:** 2026-08-19 · **Branch:** `cmux/pane-egress-finding` · **ADR:** [ADR-C009](DECISIONS.md#adr-c009--the-seal-is-scoped-to-the-emitter-not-the-workspace)
+> **Tracking issue:** [miltronium/hearth#7](https://github.com/miltronium/hearth/issues/7) (this doc is the source of truth; the issue summarizes it)
 >
 > **Read this before putting any confidential material through cmux.** This is the resume-here doc
 > for the follow-up work; it is written so a fresh agent needs no other context.
