@@ -222,5 +222,56 @@ failure shape (see `cmux-sealed.pf.conf`).
 
 ---
 
+## ADR-C009 — The seal is scoped to the emitter, not the workspace
+
+**Status:** Accepted (2026-08-19) · **Context:** live pane-egress measurement, see
+[FINDING_pane_egress.md](FINDING_pane_egress.md).
+
+**Context.** A pane in a "sealed" cmux reached the public internet — `curl → example.com` returned
+**HTTP 200** and `python3` opened TCP to `1.1.1.1:443` — at the same moment `lulu_rule_check.py`
+returned exit 0 (`SEALED`) and `cmux-sealed --check`'s firewall gate reported `PASS`.
+
+Both statements are true because they are about different things. The LuLu rule blocks
+`com.cmuxterm.app`. A pane's `node` / `claude` / `curl` / `git` / `ssh` / `python3` are separate
+processes with their own identities, and **no rule exists for any of them**. Compounding it, LuLu on
+this machine is configured allow-by-default (`passiveMode=true` — no alerts, auto-allow;
+`allowApple=true`; `allowInstalled=true`; `blockMode=false`), so unmatched processes are permitted
+*silently*. ADR-C006 #5 asks for "a loopback-only firewall profile"; what is deployed is an
+allow-by-default firewall carrying one deny rule.
+
+The root cause is a **scope** inherited from C0: the audit enumerated *cmux's own* outbound paths
+(its threat model was "the app phones home"), so the seal invariant it produced is entirely about the
+cmux process. Neither the audit nor the launcher has any concept of a process tree — and a terminal
+emulator exists to run arbitrary programs.
+
+**Decision.** State the boundary explicitly and stop conflating the two claims:
+
+| Claim | Status |
+| --- | --- |
+| "cmux.app makes no off-box connection" | **Verified** (RESULTS §1.3). This is what the seal delivers. |
+| "work done in a sealed workspace cannot leave the machine" | **Not implemented.** Never assert it. |
+
+Consequently: **the containment boundary for confidential work must be the process tree (or uid), not
+the application.** A per-app firewall rule is disqualified as the sealed tier's primary control; it is
+demoted to defense-in-depth against cmux's own telemetry/Sparkle traffic. Until a workspace-scoped
+control exists and is probe-verified, **the sealed tier must not be described as protecting
+confidential work**, and `cmux-sealed` should not be trusted for it.
+
+This extends **ADR-C008**. That ADR ordered the layers config < enforcement < outcome; this one adds
+that an outcome check only proves the thing it *observed*. `cmux_egress_probe.sh` watches processes
+matching `-c cmux`, so it is structurally incapable of seeing a pane's `curl` — a clean probe was
+read as "the workspace is contained" when it only ever meant "the app was quiet". **Scope lies too.**
+
+**Consequences.** C3 is reopened in scope (its app-level result stands; its privacy claim does not).
+C6 graduation must not proceed on the current sealed claim. AUDIT §4's invariant needs a sixth
+condition (workspace containment); PRIVACY.md's "airtight inside the sealed tier" is aspirational and
+is marked as such. The follow-up phase, options analysis (recommended: dedicated sealed uid + the
+existing pf uid anchor, the only enumerative-free option) and acceptance gates are specified in
+[FINDING_pane_egress.md](FINDING_pane_egress.md) §8. A second, independent gap is recorded there
+(§4): nothing enforces *which agent* runs in a sealed pane, though PRIVACY.md claims the gate makes it
+impossible.
+
+---
+
 ## (Further ADRs land here as later phases surface real constraints — e.g. the exact
 ## container-network enforcement, or an upstream cmux sealed-mode patch decision.)

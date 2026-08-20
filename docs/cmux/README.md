@@ -68,7 +68,9 @@ token-saving, gate-able brain cmux's agents offload to. Same hardware, both Swif
 | [AUDIT.md](AUDIT.md) | C0 egress audit: 123 findings, native-core vs cloud, the seal invariant. |
 | [RESULTS.md](RESULTS.md) | Validation results — headless (done) + on-hardware (C6) slots. |
 | **Runbooks** | [wiring](RUNBOOK_wiring.md) (C2) · [sealed](RUNBOOK_sealed.md) (C3) · [orchestrator](RUNBOOK_orchestrator.md) (C4) · [open](RUNBOOK_open.md) (C5) · [on-hardware](RUNBOOK_onhardware.md) (C6) |
-| [TODO.md](TODO.md) | **Parked work** (sealed-tier firewall hardening, C5/C6 live runs) + what's active now. |
+| [GUIDE_app_monitoring.md](GUIDE_app_monitoring.md) | **Hand this to another agent.** Portable how-to: drive *any* app from cmux — dedicated workspace, read/tee output, answer prompts, notify, event stream, browser console. Self-contained; no HEARTH knowledge assumed. |
+| [FINDING_pane_egress.md](FINDING_pane_egress.md) | 🚨 **Open finding (C7).** The sealed tier blocks cmux's binary, **not** the processes a pane spawns — a sealed pane reached the public internet with every gate green. Evidence, root cause, options, next steps. **Read before putting confidential material through cmux.** |
+| [TODO.md](TODO.md) | **Parked work** (C7 containment, sealed-tier firewall hardening, C5/C6 live runs) + what's active now. |
 
 ---
 
@@ -102,10 +104,11 @@ Update this table as phases land. `☐` not started · `◐` in progress · `☑
 | C0 | `cmux/egress-audit` | cmux egress audit ([AUDIT.md](AUDIT.md)) + `lsof` probe | Static: **done** (123 findings, all disableable). Dynamic `lsof` run: pending real-hardware exec | ◐ |
 | C1 | `cmux/adr` | ADRs ratifying the two-tier gated model | ADR-C001…C006 **Accepted**; tier-classification concrete ([tiers.example.yaml](../../config/cmux/tiers.example.yaml)) | ☑ |
 | C2 | `cmux/wiring` | HEARTH-as-brain per pane (MCP + OpenAI base_url), config-only | Pane-equivalent offload to sealed HEARTH **validated** (1053 tokens saved, 0 esc); live-GUI proof folds into C3/C6 | ☑ |
-| C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); on-hardware firewall sealing **PARKED** → [TODO](TODO.md) | ◐ |
-| C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Triage **validated** on real model (3/4 panes, 0 tokens); live-socket run pending | ◐ |
+| C3 | `cmux/sealed-profile` | `cmux-sealed` launcher + preflight, tier classifier, pf seal, man page | Fail-closed **demonstrated** (3 gates); app-level seal **proven on hardware** 2026-08-19 (RESULTS §1.3). ⚠️ **scope reopened by C7** | ◐ |
+| C4 | `cmux/orchestrator` | Local control loop over cmux socket, HEARTH-decided | Triage **validated** on real model (3/4 panes, 0 tokens); live-socket run **done** 2026-08-06 | ◐ |
 | C5 | `cmux/open-tier` | Gated cloud/Docker tier for non-confidential work | Gate **demonstrated**; live cloud run **PARKED** → [TODO](TODO.md) | ◐ |
-| C6 | `cmux/graduation` | Merge to `main` | Runbook + RESULTS ready; graduation **PARKED** on sealed hardening → [TODO](TODO.md) | ◐ |
+| C6 | `cmux/graduation` | Merge to `main` | Runbook + RESULTS ready; graduation **PARKED** on sealed hardening **+ C7** → [TODO](TODO.md) | ◐ |
+| **C7** | `cmux/pane-egress-finding` | **Workspace containment** — contain pane *children*, not just cmux.app ([FINDING](FINDING_pane_egress.md)) | 🚨 **OPEN.** Sealed panes egress freely (RESULTS §1.8, **ADR-C009**). Gate: the in-pane probe fails closed. **Blocks C6** | ☐ |
 
 Phases are described in full in [ROADMAP.md](ROADMAP.md). This table is the at-a-glance index;
 the roadmap holds the detail and acceptance criteria.
@@ -120,3 +123,9 @@ the roadmap holds the detail and acceptance criteria.
 4. **The caller caveat still holds.** HEARTH seals the subtask on HEARTH; it does not seal a
    frontier agent cmux orchestrates. Confidential-repo panes run local/sealed agents. See PRIVACY.md.
 5. **Nothing gets lost.** Every decision, result, and dead-end lands in this directory.
+
+> ⚠️ **Honest status of #2/#3 as of 2026-08-19:** the gate protects against *cmux's own* egress, which
+> it verifiably does. It does **not** contain the processes a pane runs — a sealed pane reached the
+> public internet with every gate green. Non-negotiables #2–#4 therefore describe the design, not the
+> current implementation. **Do not put confidential material through cmux** until C7 closes:
+> [FINDING_pane_egress.md](FINDING_pane_egress.md), **ADR-C009**.

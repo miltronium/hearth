@@ -10,6 +10,23 @@ this document only covers what *changes* when cmux and its cloud/Docker capabili
 
 ---
 
+## ⚠️ Reality check (2026-08-19) — read before the tradeoff below
+
+**As implemented today, this machine offers neither of the guarantees described in this document for
+work done inside a cmux pane.** Measured: a pane in a sealed workspace reached the public internet
+(`curl → example.com` = HTTP 200) while every seal gate reported `SEALED`/`PASS`. The firewall rule is
+scoped to the `com.cmuxterm.app` binary; the processes a pane spawns are unrestricted.
+
+What the sealed tier *does* deliver, verified: **cmux's own** traffic (telemetry, Sparkle, iroh) is
+blocked. That is app-level quieting, not workspace containment.
+
+Everything below this box describes the **intended** design. Two claims in it are aspirational and are
+flagged inline: "the sealed tier still gives the airtight guarantee" (§ The honest tradeoff) and "the
+gate is designed so you can't" (§ The caller caveat). See
+[FINDING_pane_egress.md](FINDING_pane_egress.md) and **ADR-C009**; the fix is scoped as C7.
+
+---
+
 ## The honest tradeoff (read this first)
 
 Standalone HEARTH in private mode offers an **airtight** guarantee: in `routing.private.yaml`
@@ -29,6 +46,11 @@ Crucially, **the sealed tier still gives the airtight guarantee.** For a confide
 sealed workspace runs the same no-remote HEARTH plus network-less containers — the leak path does
 not exist *inside that workspace*. The gate's job is to guarantee confidential work only ever runs
 there.
+
+> ❌ **NOT TRUE AS IMPLEMENTED (2026-08-19).** This paragraph describes native panes as if they were
+> the network-less containers. They are not: a native pane's child processes have unrestricted egress,
+> measured. The claim holds only for `docker --network none` panes (ARCHITECTURE §3), which is not what
+> a sealed workspace runs today. See ADR-C009 / [FINDING_pane_egress.md](FINDING_pane_egress.md).
 
 ---
 
@@ -81,6 +103,12 @@ change this — but the sealed tier **enforces the right choice structurally**: 
 panes run local/sealed HEARTH agents, so there is no frontier context to leak into. Never run a bare
 frontier agent over confidential files in a sealed workspace — and the gate is designed so you
 can't.
+
+> ❌ **NOT IMPLEMENTED (2026-08-19).** No gate inspects what a pane launches; `cmux-sealed --check`'s
+> seven checks cover tier, HEARTH routing, firewall, telemetry, auto-update, CLI telemetry and sign-in.
+> You *can* run a bare frontier agent in a sealed pane and every gate will still pass. Until the
+> `pane-agent` gate exists (FINDING_pane_egress §8.2), "never run one" is an instruction to the
+> operator, not an enforced property.
 
 ---
 
