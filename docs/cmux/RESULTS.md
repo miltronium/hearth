@@ -66,6 +66,14 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     today's clean result. This is the same point **ADR-C006/C008** make — flags are not the seal.
   - **Window adequacy:** 280 s, versus the 150 s that missed Sparkle on 2026-07-22 and the 75 s in which
     the §1.5 negative control *did* catch it. The late-Sparkle failure mode had ample room to appear.
+  - ⚠️ **SCOPE — added 2026-08-19, read this before citing §1.3.** This result is about
+    **`com.cmuxterm.app` only**. It is **not** a workspace-containment result. Measured the same day:
+    a pane in this very sealed workspace reached the public internet (`curl → example.com` = **HTTP
+    200**) while every seal gate reported `SEALED`/`PASS` — because the LuLu rule is scoped to the cmux
+    binary, not to the processes a pane spawns, and `cmux_egress_probe.sh` only watches processes
+    matching `-c cmux`, so it cannot see a pane's `curl`. §1.3 stands as written; **do not read it as
+    "confidential work cannot leave the machine."** See [FINDING_pane_egress.md](FINDING_pane_egress.md)
+    and **ADR-C009**.
 - **§1.4 pf backstop (signed-in, firewall on)** — _(paste probe result; expect still loopback-only)_
 - **§1.5 negative control** — ✅ **DONE 2026-08-17.** With cmux permitted (LuLu rule still `ALLOW *:*`),
   `cmux_egress_probe.sh --seconds 75` returned **exit 3**, reporting `140.82.116.6:443` =
@@ -103,6 +111,23 @@ runs) are recorded from the build phases; the **on-hardware** slots are filled d
     exit status" — `_run` now propagates cmux's message. Suite: **248 passed, 1 skipped**.
   - ⏳ **Not yet done:** re-run the sweep under `cmux-sealed` with the probe to prove it stays
     loopback-only. Blocked on the same parked firewall work as §1.3.
+- **§1.8 workspace containment (pane-child egress)** — ❌ **FAILED 2026-08-19 — new gate, open.**
+  The sealed workspace does **not** contain the processes running in it. From a pane in a sealed
+  workspace, with `lulu_rule_check.py` at exit 0 and `cmux-sealed --check`'s firewall gate at `PASS`:
+
+  | Probe (sent over the socket into a live pane) | Result |
+  | --- | --- |
+  | `curl -m 8 https://example.com` (Apple-signed binary) | **http=200** — full round-trip to the public internet |
+  | `python3` → TCP `1.1.1.1:443` | **CONNECTED** |
+  | same URL from the agent's own shell (outside cmux) | `(56) CONNECT tunnel failed, response 403` |
+
+  The pane was **less contained than the agent session driving it**. Cause: LuLu rules key on
+  executable identity, no rule exists for `node`/`claude`/`curl`/`git`/`ssh`/`python3`, and LuLu here
+  is allow-by-default (`passiveMode=true`, `allowApple=true`, `allowInstalled=true`, `blockMode=false`).
+  Full evidence, root cause, options analysis and next steps:
+  [FINDING_pane_egress.md](FINDING_pane_egress.md); decision recorded as **ADR-C009**.
+  **Graduation implication:** C6 must not proceed on the current sealed claim.
+  Re-run this section once C7 workspace containment lands — the gate is "all three probes fail closed."
 
 ### Part 2 — Open tier
 

@@ -91,6 +91,23 @@ The audit collapses to a small, verifiable invariant. A **sealed** cmux workspac
 > closed** if it cannot (e.g. refuses to launch if the process is signed in, or if the firewall
 > profile isn't active).
 
+> ⚠️ **The invariant is INCOMPLETE — a 6th condition is missing (added 2026-08-19, ADR-C009).**
+> Conditions 1–5 are all about **cmux's own process**, because this audit's threat model was "the app
+> phones home". They say nothing about the arbitrary programs a pane runs — and that is what a terminal
+> is *for*. Measured: a pane in a sealed workspace reached the public internet while all five held and
+> every gate passed. The missing condition:
+>
+> **6. Workspace containment.** Every process in a sealed workspace — cmux *and all its descendants*,
+> whatever binary they are — must be unable to reach a non-loopback address, enforced at **process-tree
+> or uid** scope rather than per-application, and verified by an in-pane egress probe (not by
+> `cmux_egress_probe.sh`, which only watches processes matching `-c cmux` and structurally cannot see a
+> pane's `curl`).
+>
+> Note also that §5's "the sealed profile is an **allowlist**" is a statement of intent: the LuLu
+> deployment on this machine is allow-by-default with a single deny rule for cmux. Scope and design
+> intent both need re-verification before this invariant is trusted.
+> See [FINDING_pane_egress.md](FINDING_pane_egress.md) §8 for the fix options and acceptance gate.
+
 ---
 
 ## 5. Section C — Distinct always-on native-core hosts (the firewall denylist / allowlist input)

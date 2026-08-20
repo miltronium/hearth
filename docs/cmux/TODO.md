@@ -6,6 +6,39 @@ and the graduation gate. Pick this back up when the sealed tier matters for real
 
 ---
 
+## 🚨 OPEN — C7 workspace containment (the sealed tier does not contain panes)
+
+**Status:** found 2026-08-19, parked with full context the same day. **This is now the top-priority
+item and a graduation blocker** — it outranks the two parked items below.
+
+**The finding in one line:** the seal blocks **cmux's own binary**; it does **not** block the processes
+a pane spawns. A pane in a sealed workspace reached the public internet (`curl → example.com` =
+**HTTP 200**) while `lulu_rule_check.py` returned exit 0 (`SEALED`) and `cmux-sealed --check`'s
+firewall gate reported `PASS`.
+
+**Everything you need is in [FINDING_pane_egress.md](FINDING_pane_egress.md)** — evidence, exact
+repro, three-layer root cause, what it does/doesn't invalidate, an options analysis with a
+recommendation, tooling + doc deliverables, and an ordered next-steps list. Decision: **ADR-C009**.
+Negative result recorded as **RESULTS §1.8**; **§1.3 gained a scope warning** (it stands, but only as a
+statement about `com.cmuxterm.app`).
+
+**Start here:** reproduce it first (FINDING §9), confirm the gates still say `SEALED` at the same
+moment, *then* prototype §8.1 option 1 (dedicated sealed uid + the existing pf uid anchor) on a
+throwaway account.
+
+- [ ] Reproduce + confirm the contradiction (FINDING §9 steps 1–2)
+- [ ] Prototype uid-scoped containment; measure with an in-pane probe, not by reasoning
+- [ ] `scripts/cmux/pane_egress_probe.sh` + extend `cmux_egress_probe.sh` to cmux's descendants
+- [ ] Mandatory `workspace-containment` and `pane-agent` gates in `cmux-sealed --check`
+- [ ] `cmux-sealed --purge` (scrollback at rest, still unimplemented per PRIVACY.md)
+- [ ] Fill RESULTS §1.8 with the fixed-state re-run; amend ADR-C006; AUDIT §4 6th condition
+
+> **Until this lands: do not put confidential material through cmux.** The functional work below and
+> in "ACTIVE" remains fine on non-confidential/empty dirs — that constraint has not changed, only our
+> understanding of *why* it is necessary.
+
+---
+
 ## PARKED — Sealed-tier egress hardening (completes C3 on-hardware + §1.3/§1.4)
 
 **Status:** paused 2026-07-22 (tedious; not needed for functional work). The *design* is done and the
@@ -49,7 +82,10 @@ key finding is validated; what remains is finishing the deny-by-default firewall
 
 ## PARKED — C6 graduation to `main`
 
-**Status:** gated on the two above. Do NOT merge `cmux/integration` → `main` until:
+**Status:** gated on the two above **plus C7 workspace containment** (added 2026-08-19 — a sealed tier
+that does not contain its panes cannot graduate on a privacy claim). Do NOT merge
+`cmux/integration` → `main` until:
+- [ ] **C7 workspace containment closed (RESULTS §1.8 green)** — see the OPEN section at the top.
 - [ ] RESULTS §1.3 + §1.4 sealed (LuLu), §2.2 open workspace ran, graduation checklist all green.
 - [ ] Then follow `RUNBOOK_onhardware.md` Part 3 merge/tag commands.
 

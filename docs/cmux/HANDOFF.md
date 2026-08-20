@@ -6,6 +6,36 @@
 
 ---
 
+## ⏩ RESUME HERE (2026-08-19, later session)
+
+**The sealed tier does not contain its panes.** This supersedes "§1.3 closed, next is §1.4" as the
+top priority.
+
+A pane in a *sealed* workspace reached the public internet — `curl → example.com` = **HTTP 200**,
+`python3 → 1.1.1.1:443` connected — while `lulu_rule_check.py` returned exit 0 (`SEALED`) and
+`cmux-sealed --check`'s firewall gate reported `PASS`. The LuLu rule is scoped to the
+`com.cmuxterm.app` **binary**; a pane's `node`/`claude`/`curl`/`git`/`ssh`/`python3` have **no rules at
+all**, and LuLu here is allow-by-default (`passiveMode=true`, `allowApple`/`allowInstalled=true`,
+`blockMode=false`).
+
+- **Full context + ordered next steps:** [FINDING_pane_egress.md](FINDING_pane_egress.md) ← start there
+- **Decision:** **ADR-C009** · **Negative result:** **RESULTS §1.8** · **Work item:** TODO "🚨 OPEN — C7"
+- **§1.3 still stands** — but only as a claim about `com.cmuxterm.app`; it now carries a scope warning.
+  Do not cite it as workspace containment. §1.4 and the §1.6/§1.7 egress slivers are unaffected and
+  still worth doing, but they are all app-scoped too.
+- **C6 graduation is blocked on C7** — a sealed tier that doesn't contain its panes can't graduate on a
+  privacy claim.
+- **Do not put confidential material through cmux** until C7 closes. Non-confidential/empty dirs: fine.
+- **New doc:** [GUIDE_app_monitoring.md](GUIDE_app_monitoring.md) — portable how-to for driving any app
+  from cmux (run, read/tee output, answer prompts, notify, events, browser console), with a
+  verification ledger separating live-proven commands from `--help`-transcribed ones. Written to hand
+  to another agent.
+
+**Nothing functional is broken.** C2/C4 live-validated, suite green. Everything open is
+validation/hardening.
+
+---
+
 ## TL;DR
 
 - **All build phases C0–C5 are done** (headless: code + tests + docs + man pages, each on its own
@@ -61,8 +91,10 @@ scripts/cmux/cmux_egress_probe.sh --seconds 280 &   # start FIRST, it waits for 
 > vars the launcher exports itself at `cmux-sealed:170`. Pass them inline (as above) or you will
 > chase a phantom failure. This is a check-mode artifact, not a real posture gap.
 
-> ⚠️ While the seal holds, **`git push` from inside a cmux pane fails** — push from an ordinary
-> terminal, which is unaffected.
+> ✅ **CORRECTED 2026-08-19: `git push` from inside a cmux pane WORKS.** The earlier claim that it
+> fails under the seal was wrong — same root cause as the C7 finding: the LuLu rule covers the
+> `com.cmuxterm.app` binary, not `/usr/bin/git` running in a pane. Measured directly (a pane's `curl`
+> reached the public internet with the seal in force). Push from wherever you like.
 
 Both functional tracks (C2 live, C4 live) are **done** — nothing functional is waiting on you.
 Everything outstanding is validation/graduation.
@@ -91,10 +123,11 @@ Everything outstanding is validation/graduation.
 | C0 | Egress audit ([AUDIT.md](AUDIT.md)) + probe | ✅ static (123 findings). Dynamic probe: partly run (see findings) |
 | C1 | ADRs (C001–C006) | ✅ Accepted |
 | C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved); ✅ **live pane offload done 2026-08-17** (RESULTS §1.6). Loopback-only-under-seal check still pending |
-| C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; gate hardened 2026-08-17 (**ADR-C008**); ✅ **on-hardware seal proven 2026-08-19** (RESULTS §1.3). §1.4 remains |
+| C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; gate hardened 2026-08-17 (**ADR-C008**); ✅ **app-level seal proven 2026-08-19** (RESULTS §1.3). §1.4 remains. ⚠️ **scope reopened — see C7** |
 | C4 | Orchestrator ([RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md)) | ✅ built/tested; ✅ **live run done 2026-08-06** (RESULTS §1.7). Loopback-only-under-seal check still pending |
 | C5 | Open tier ([RUNBOOK_open.md](RUNBOOK_open.md)) | ✅ gate demonstrated; live cloud run **PARKED** → TODO |
-| C6 | Graduation to `main` | ◐ runbook+RESULTS ready; **PARKED** on sealed hardening |
+| C6 | Graduation to `main` | ◐ runbook+RESULTS ready; **PARKED** on sealed hardening **+ C7** |
+| **C7** | **Workspace containment** ([FINDING_pane_egress.md](FINDING_pane_egress.md)) | 🚨 **OPEN — found 2026-08-19.** Sealed panes egress freely (RESULTS §1.8, **ADR-C009**). Top priority; blocks C6 |
 
 ---
 
@@ -180,8 +213,12 @@ it was correctly refused rather than back-filled. §1.4 remains untouched (needs
 
 **Closed 2026-08-19:** enforcement came back (extension live), and §1.3 was filled on a real run —
 probe **exit 0**, loopback-only. See RESULTS §1.3 for the controlled comparison that makes it a seal
-rather than a quiet app. The cmux LuLu rule stays **BLOCK**; note **`git push` from inside a cmux pane
-fails** while the seal holds — push from an ordinary terminal, which is unaffected.
+rather than a quiet app. The cmux LuLu rule stays **BLOCK**.
+
+> ✅ **Corrected later the same day:** the note that used to sit here — "`git push` from inside a cmux
+> pane fails while the seal holds" — is **wrong**. The rule covers the `com.cmuxterm.app` binary, not
+> `/usr/bin/git` in a pane. Push from a pane works. This is the C7 finding in miniature; see
+> [FINDING_pane_egress.md](FINDING_pane_egress.md).
 
 ---
 
@@ -218,6 +255,11 @@ fails** while the seal holds — push from an ordinary terminal, which is unaffe
   (`python3 scripts/cmux/lulu_rule_check.py`; exit 0 = blocked *and* enforced) — this machine has
   regressed both the extension and the Sparkle flag once each already.
   LuLu does not block `ssh→github` — pushes work from an ordinary terminal.
+- ⚠️ **LuLu's own posture is allow-by-default (measured 2026-08-19)** — `/Library/Objective-See/LuLu/preferences.plist`:
+  `passiveMode=true` (no alerts; unmatched connections auto-allowed), `allowApple=true`,
+  `allowInstalled=true`, `blockMode=false`. So the *only* thing blocked on this machine is
+  `com.cmuxterm.app`, via its one explicit rule. **No rule exists for `node`/`claude`/`curl`/`git`/`ssh`/`python3`.**
+  This is the C7 root cause — ADR-C006 #5 assumes a deny-by-default profile, which is not what is deployed.
 - **Test dirs:** `CONF_REPO`/`OSS_REPO` were `examples/repos/{conf_repo,oss_repo}` (empty dirs are fine).
 
 ---
