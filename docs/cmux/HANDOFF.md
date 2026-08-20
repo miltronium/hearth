@@ -83,9 +83,10 @@ scripts/cmux/cmux_egress_probe.sh --seconds 280 &   # start FIRST, it waits for 
 /Applications/cmux.app/Contents/Resources/bin/cmux ~/Claude/apps/HEARTH/examples/repos/oss_repo
 #    then sign in inside the app; want probe exit 0 (no *.relay.cmux.dev) -> fills RESULTS §1.4
 
-# 2) then the two egress slivers that were only ever waiting on the seal:
-#    - re-run examples/cmux/pane_offload_live.sh under the seal   -> §1.6 egress half
-#    - re-run scripts/cmux/orchestrator.py under the seal          -> §1.7 egress half
+# 2) DONE 2026-08-19 — both egress slivers landed (RESULTS §1.6/§1.7, probe exit 0 each).
+#    When running the orchestrator under a probe, ALWAYS set HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1:
+#    without them huggingface_hub egresses from scripts/cmux/orchestrator.py, which `pgrep -f cmux`
+#    matches — that produced a false "NOT sealed" exit 3 (CloudFront) on the first attempt.
 ```
 
 > ⚠️ **Running `--check` from a bare shell always FAILs `cli-telemetry`** — that gate reads two env
@@ -123,9 +124,9 @@ Everything outstanding is validation/graduation.
 | --- | --- | --- |
 | C0 | Egress audit ([AUDIT.md](AUDIT.md)) + probe | ✅ static (123 findings). Dynamic probe: partly run (see findings) |
 | C1 | ADRs (C001–C006) | ✅ Accepted |
-| C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved); ✅ **live pane offload done 2026-08-17** (RESULTS §1.6). Loopback-only-under-seal check still pending |
+| C2 | HEARTH-as-brain wiring ([RUNBOOK_wiring.md](RUNBOOK_wiring.md)) | ✅ validated (1053 tokens saved); ✅ **live pane offload done 2026-08-17**; ✅ **egress half done 2026-08-19** (RESULTS §1.6, scoped to cmux's process — ADR-C009) |
 | C3 | Sealed launcher + classifier + pf/LuLu ([RUNBOOK_sealed.md](RUNBOOK_sealed.md)) | ✅ built/tested; gate hardened 2026-08-17 (**ADR-C008**); ✅ **app-level seal proven 2026-08-19** (RESULTS §1.3). §1.4 remains. ⚠️ **scope reopened — see C7** |
-| C4 | Orchestrator ([RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md)) | ✅ built/tested; ✅ **live run done 2026-08-06** (RESULTS §1.7). Loopback-only-under-seal check still pending |
+| C4 | Orchestrator ([RUNBOOK_orchestrator.md](RUNBOOK_orchestrator.md)) | ✅ built/tested; ✅ **live run done 2026-08-06**; ✅ **egress half done 2026-08-19** (RESULTS §1.7, scoped to cmux's process — ADR-C009) |
 | C5 | Open tier ([RUNBOOK_open.md](RUNBOOK_open.md)) | ✅ gate demonstrated; live cloud run **PARKED** → TODO |
 | C6 | Graduation to `main` | ◐ runbook+RESULTS ready; **PARKED** on sealed hardening **+ C7** |
 | **C7** | **Workspace containment** ([FINDING_pane_egress.md](FINDING_pane_egress.md)) | 🚨 **OPEN — found 2026-08-19.** Sealed panes egress freely (RESULTS §1.8, **ADR-C009**). Top priority; blocks C6 |
