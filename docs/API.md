@@ -130,6 +130,38 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
 
 ---
 
+## Operator UI
+
+### `GET /chat`
+
+A chat page for the operator, served by the gateway itself. Open
+`http://127.0.0.1:8080/chat` after `hearth serve`. Same origin as `/v1/chat/completions`,
+so **no CORS middleware exists and none is needed**.
+
+- **Self-contained.** One inline HTML document — no CDN script, no web font, no external
+  stylesheet or image. The page issues exactly two requests, both relative: `/v1/models`
+  and `/v1/chat/completions`. `tests/test_gateway_chat_ui.py` greps the served bytes and
+  fails on any off-origin reference, because a single font request from a page discussing
+  bank statements would be an egress channel.
+- **Unauthenticated route, no credential in the document.** A browser navigation cannot
+  send an `Authorization` header, so `/chat` is not behind `require_token`. The token is
+  therefore *not* injected server-side: that would turn `GET /chat` into an
+  unauthenticated token-disclosure endpoint, downgrading a `0600` file to no permission
+  at all. Instead the operator pastes `~/.hearth/token` into the page once; it lives in
+  `localStorage` on the loopback origin and is sent as a bearer header per request.
+  **All `/v1/*` routes keep their auth dependency unchanged.**
+- **Streaming.** Uses SSE (`stream: true`), rendering deltas as they arrive and honouring
+  the `[DONE]` sentinel. `401`/`422`/`5xx` and mid-stream `error` events render as text
+  rather than hanging.
+- **Provenance.** Each reply shows the `hearth` telemetry — `served_by` (“served
+  on-device” / “served remotely”), `model`, `backend`, `adapter` — and a visible
+  **Truncated** warning when `finish_reason == "length"`.
+
+The route is static markup; it exposes no data and grants no capability a caller without
+a token did not already have. See `src/hearth/gateway/chat_ui.py` for the full rationale.
+
+---
+
 ## Error model
 
 Standard OpenAI-style error envelope, plus a `hearth.code` for HEARTH-specific cases:

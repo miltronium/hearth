@@ -32,6 +32,7 @@ from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
 from ..serving import ModelManager
 from .auth import require_token
+from .chat_ui import register_chat_ui
 from .json_mode import (
     InvalidJsonResponseError,
     UnsupportedResponseFormatError,
@@ -289,6 +290,11 @@ def create_app(
             ],
             answer=result.answer,
         )
+
+    # Operator chat UI at GET /chat: static, self-contained, no credential in the document
+    # and no auth dependency (a browser navigation cannot send a bearer header). It changes
+    # nothing about /v1/* auth — see hearth.gateway.chat_ui and docs/API.md.
+    register_chat_ui(app)
 
     return app
 
