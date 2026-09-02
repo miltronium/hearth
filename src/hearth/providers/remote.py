@@ -18,7 +18,15 @@ import os
 from collections.abc import Iterator
 
 from ..router.policy import RemoteConfig
-from .base import Capabilities, GenRequest, GenResult, Message, ResourceEstimate
+from .base import (
+    Capabilities,
+    GenRequest,
+    GenResult,
+    Message,
+    ResourceEstimate,
+    StreamDelta,
+    normalize_finish_reason,
+)
 
 
 class RemoteUnavailableError(RuntimeError):
@@ -52,6 +60,20 @@ class RemoteProvider:
             yield from self._anthropic_stream(req)
         elif self.config.protocol == "openai":
             yield from self._openai_stream(req)
+        else:
+            raise RemoteUnavailableError(f"unknown remote protocol: {self.config.protocol!r}")
+
+    def stream_deltas(self, req: GenRequest) -> Iterator[StreamDelta]:
+        """Stream text deltas, then the remote's own stop reason.
+
+        An escalated request can be truncated by ``max_tokens`` exactly like a local one, so
+        the remote's reason (Anthropic's ``stop_reason``, OpenAI's ``finish_reason``) is
+        threaded through rather than assumed to be a clean stop.
+        """
+        if self.config.protocol == "anthropic":
+            yield from self._anthropic_stream_deltas(req)
+        elif self.config.protocol == "openai":
+            yield from self._openai_stream_deltas(req)
         else:
             raise RemoteUnavailableError(f"unknown remote protocol: {self.config.protocol!r}")
 
@@ -106,12 +128,25 @@ class RemoteProvider:
             backend=self.name,
             prompt_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
             completion_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            # Anthropic spells the cap "max_tokens"; everything else is a natural stop.
+            finish_reason=normalize_finish_reason(getattr(msg, "stop_reason", None)),
         )
 
     def _anthropic_stream(self, req: GenRequest) -> Iterator[str]:
         client = self._anthropic_client()
         with client.messages.stream(**self._anthropic_kwargs(req)) as stream:
             yield from stream.text_stream
+
+    def _anthropic_stream_deltas(self, req: GenRequest) -> Iterator[StreamDelta]:
+        client = self._anthropic_client()
+        with client.messages.stream(**self._anthropic_kwargs(req)) as stream:
+            for text in stream.text_stream:
+                yield StreamDelta(text=text)
+            # The accumulated final message carries the stop_reason for the whole turn.
+            final = stream.get_final_message()
+        yield StreamDelta(
+            finish_reason=normalize_finish_reason(getattr(final, "stop_reason", None))
+        )
 
     # -- openai-compatible (httpx) ----------------------------------------------------
 
@@ -151,7 +186,8 @@ class RemoteProvider:
         )
         resp.raise_for_status()
         data = resp.json()
-        text = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        text = choice["message"]["content"]
         usage = data.get("usage", {})
         return GenResult(
             text=(text or "").strip(),
@@ -159,13 +195,20 @@ class RemoteProvider:
             backend=self.name,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            finish_reason=normalize_finish_reason(choice.get("finish_reason")),
         )
 
     def _openai_stream(self, req: GenRequest) -> Iterator[str]:
+        for delta in self._openai_stream_deltas(req):
+            if delta.text:
+                yield delta.text
+
+    def _openai_stream_deltas(self, req: GenRequest) -> Iterator[StreamDelta]:
         import json
 
         import httpx
 
+        raw_reason: str | None = None
         with httpx.stream(
             "POST",
             self._openai_url(),
@@ -180,9 +223,12 @@ class RemoteProvider:
                 payload = line[len("data: ") :]
                 if payload == "[DONE]":
                     break
-                delta = json.loads(payload)["choices"][0]["delta"].get("content")
+                choice = json.loads(payload)["choices"][0]
+                raw_reason = choice.get("finish_reason") or raw_reason
+                delta = (choice.get("delta") or {}).get("content")
                 if delta:
-                    yield delta
+                    yield StreamDelta(text=delta)
+        yield StreamDelta(finish_reason=normalize_finish_reason(raw_reason))
 
 
 def _split_system(messages: list[Message]) -> tuple[str, list[dict]]:

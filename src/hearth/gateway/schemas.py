@@ -25,12 +25,25 @@ class HearthRequestOptions(BaseModel):
     adapter: str | None = None
 
 
+class ResponseFormat(BaseModel):
+    """OpenAI ``response_format``. ``type`` is kept a plain ``str`` on purpose.
+
+    A ``Literal`` would reject an unsupported value as a generic 422 body-validation
+    error; the route checks it instead and answers with a named error saying *which*
+    formats HEARTH implements (see :mod:`hearth.gateway.json_mode`). Either way the field
+    can no longer be dropped on the floor, which is what silently ignoring it amounted to.
+    """
+
+    type: str = "text"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str = "auto"
     messages: list[ChatMessage]
     max_tokens: int = 512
     temperature: float = 0.7
     stream: bool = False
+    response_format: ResponseFormat | None = None
     hearth: HearthRequestOptions | None = None
 
 
@@ -53,7 +66,10 @@ class ChatChoiceMessage(BaseModel):
 class ChatChoice(BaseModel):
     index: int = 0
     message: ChatChoiceMessage
-    finish_reason: str = "stop"
+    # Required, deliberately: this used to default to "stop", so a generation cut off at
+    # max_tokens was reported to the caller as a clean completion. There is no safe default
+    # for "why did this end" — the provider's real reason must be threaded in.
+    finish_reason: str
 
 
 class Usage(BaseModel):

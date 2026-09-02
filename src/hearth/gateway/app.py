@@ -27,11 +27,18 @@ from ..observability.metrics import (
     get_metrics,
 )
 from ..providers import select_provider
-from ..providers.base import GenRequest, Message, ModelProvider
+from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
 from ..serving import ModelManager
 from .auth import require_token
+from .json_mode import (
+    InvalidJsonResponseError,
+    UnsupportedResponseFormatError,
+    json_instruction,
+    parse_json_object,
+    resolve_format,
+)
 from .schemas import (
     ChatChoice,
     ChatChoiceMessage,
@@ -171,15 +178,28 @@ def create_app(
         intent = opts.intent if opts else None
         allow_escalation = opts.allow_escalation if opts else True
         adapter = opts.adapter if opts else None
+        # response_format is validated before anything is generated: an unsupported value
+        # is a bad request, not something to quietly downgrade to plain text.
+        try:
+            response_format = resolve_format(req.response_format)
+        except UnsupportedResponseFormatError as exc:
+            return _response_format_error(str(exc))
+        messages = (
+            json_instruction(req.messages)
+            if response_format == "json_object"
+            else req.messages
+        )
         gen_req = GenRequest(
-            messages=[Message(role=m.role, content=m.content) for m in req.messages],
+            messages=[Message(role=m.role, content=m.content) for m in messages],
             model=req.model,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
         )
         if req.stream:
             return StreamingResponse(
-                _stream_sse(router, gen_req, intent, allow_escalation, adapter),
+                _stream_sse(
+                    router, gen_req, intent, allow_escalation, adapter, response_format
+                ),
                 media_type="text/event-stream",
             )
 
@@ -195,11 +215,23 @@ def create_app(
         result = routed.result
         rec = routed.record
         total = result.prompt_tokens + result.completion_tokens
+        # JSON mode validates before responding: a truncated object is unparseable, so this
+        # turns the worst failure shape (plausible-looking partial data) into a named error.
+        if response_format == "json_object":
+            try:
+                parse_json_object(result.text, result.finish_reason)
+            except InvalidJsonResponseError as exc:
+                return _json_mode_error(str(exc), exc.content, result.finish_reason)
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
             created=int(time.time()),
             model=result.model,
-            choices=[ChatChoice(message=ChatChoiceMessage(content=result.text))],
+            choices=[
+                ChatChoice(
+                    message=ChatChoiceMessage(content=result.text),
+                    finish_reason=result.finish_reason,
+                )
+            ],
             usage=Usage(
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
@@ -314,6 +346,41 @@ def _provider_error(message: str) -> JSONResponse:
     )
 
 
+def _response_format_error(message: str) -> JSONResponse:
+    """OpenAI-style 400 envelope for an unsupported ``response_format`` (docs/API.md)."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "param": "response_format",
+                "code": "hearth.response_format.unsupported",
+            }
+        },
+    )
+
+
+def _json_mode_error(message: str, content: str, finish_reason: str) -> JSONResponse:
+    """422 envelope for a ``json_object`` completion that doesn't parse.
+
+    The offending completion rides along in the additive ``hearth`` block: the caller
+    needs to see what the model actually produced (and whether ``max_tokens`` cut it off)
+    to decide between retrying, raising the cap, or splitting the request.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "message": message,
+                "type": "invalid_json_response",
+                "code": "hearth.response_format.invalid_json",
+            },
+            "hearth": {"finish_reason": finish_reason, "content": content},
+        },
+    )
+
+
 def _sse(payload: object) -> str:
     """Serialize one payload as an SSE ``data:`` event."""
     if isinstance(payload, str):
@@ -331,12 +398,19 @@ def _stream_sse(
     intent: str | None,
     allow_escalation: bool,
     adapter: str | None,
+    response_format: str = "text",
 ):
     """Yield OpenAI-compatible SSE chunks, then a final hearth chunk, then ``[DONE]``.
 
     The router decides (classify/gate) up front; the chosen provider streams the text.
-    The final chunk carries real ``served_by``/``escalated``/savings telemetry, and a
-    :class:`RequestRecord` is written to the metrics store when the stream completes.
+    The final chunk carries real ``served_by``/``escalated``/savings telemetry plus the
+    provider's own ``finish_reason``, so a stream cut off at ``max_tokens`` reports
+    ``"length"`` exactly as the non-streaming path does. A :class:`RequestRecord` is
+    written to the metrics store when the stream completes.
+
+    Under ``response_format="json_object"`` deltas still stream as they arrive (a client
+    asked to stream), and the accumulated text is validated once at the end: an
+    unparseable object is reported as a trailing error event before ``[DONE]``.
     """
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
@@ -367,7 +441,7 @@ def _stream_sse(
     adapter_path = (
         None
         if decision.would_escalate
-        else router._resolve_adapter(adapter, decision.task_class)
+        else router._resolve_adapter(adapter, decision.task_class, decision.model)
     )
     stream_req = GenRequest(
         messages=gen_req.messages,
@@ -388,23 +462,27 @@ def _stream_sse(
     )
 
     started = time.perf_counter()
-    text_len = 0
-    for delta in provider.stream(stream_req):
-        if not delta:
+    parts: list[str] = []
+    finish_reason = "stop"
+    for event in iter_stream(provider, stream_req):
+        if event.finish_reason:
+            finish_reason = event.finish_reason
+        if not event.text:
             continue
-        text_len += len(delta)
+        parts.append(event.text)
         yield _sse(
             ChatCompletionChunk(
                 id=chunk_id,
                 created=created,
                 model=decision.model,
-                choices=[base_choice(ChatChunkDelta(content=delta))],
+                choices=[base_choice(ChatChunkDelta(content=event.text))],
             )
         )
     latency_ms = (time.perf_counter() - started) * 1000.0
+    text = "".join(parts)
 
     # Estimate tokens from streamed text (~4 chars/token) without a second tokenizer pass.
-    completion_tokens = max(1, text_len // 4)
+    completion_tokens = max(1, len(text) // 4)
     prompt_tokens = max(1, sum(len(m.content) for m in gen_req.messages) // 4)
     served_by = "remote" if decision.would_escalate else "local"
     if served_by == "remote":
@@ -434,7 +512,7 @@ def _stream_sse(
             id=chunk_id,
             created=created,
             model=decision.model,
-            choices=[base_choice(ChatChunkDelta(), finish="stop")],
+            choices=[base_choice(ChatChunkDelta(), finish=finish_reason)],
             hearth=HearthTelemetry(
                 served_by=served_by,
                 backend=provider.name,
@@ -445,6 +523,22 @@ def _stream_sse(
             ),
         )
     )
+    # Post-hoc validation for JSON mode: the deltas are already out, so the honest move is
+    # to tell the client the object they just assembled is not usable, not to stay quiet.
+    if response_format == "json_object":
+        try:
+            parse_json_object(text, finish_reason)
+        except InvalidJsonResponseError as exc:
+            yield _sse(
+                {
+                    "error": {
+                        "message": str(exc),
+                        "type": "invalid_json_response",
+                        "code": "hearth.response_format.invalid_json",
+                    },
+                    "hearth": {"finish_reason": finish_reason},
+                }
+            )
     yield _sse("[DONE]")
 
 

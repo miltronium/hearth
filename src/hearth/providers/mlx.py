@@ -9,7 +9,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
-from .base import Capabilities, GenRequest, GenResult, ResourceEstimate
+from .base import (
+    FINISH_STOP,
+    Capabilities,
+    FinishReason,
+    GenRequest,
+    GenResult,
+    ResourceEstimate,
+    StreamDelta,
+    normalize_finish_reason,
+)
 
 
 class MLXUnavailableError(RuntimeError):
@@ -98,24 +107,25 @@ class MLXProvider:
         self._model, self._tokenizer = self._load_variant(selected)
 
     def generate(self, req: GenRequest) -> GenResult:
-        self._ensure_loaded(req.adapter)
-        from mlx_lm import generate as mlx_generate
+        """Run a completion, reporting whether it ended at EOS or at the ``max_tokens`` cap.
 
-        prompt = self._format_prompt(req.messages)
-        text = mlx_generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=req.max_tokens,
-            verbose=False,
+        Built on :meth:`stream_deltas` rather than ``mlx_lm.generate``: the latter returns
+        only the decoded string, which is exactly the information loss that let a truncated
+        answer be reported as a clean stop.
+        """
+        deltas = list(self.stream_deltas(req))
+        text = "".join(d.text for d in deltas).strip()
+        finish_reason = next(
+            (d.finish_reason for d in reversed(deltas) if d.finish_reason), FINISH_STOP
         )
-        text = self._strip_terminators(text)
+        prompt = self._format_prompt(req.messages)
         return GenResult(
-            text=text.strip(),
+            text=text,
             model=self.model_id,
             backend=self.name,
             prompt_tokens=len(self._tokenizer.encode(prompt)),
             completion_tokens=len(self._tokenizer.encode(text)),
+            finish_reason=finish_reason,
         )
 
     def stream(self, req: GenRequest) -> Iterator[str]:
@@ -125,20 +135,44 @@ class MLXProvider:
         first terminator marker and never leaks it — a LoRA-tuned model that fails to stop at
         EOS can emit the literal marker mid-stream (see :meth:`_clean_stream`).
         """
+        for delta in self.stream_deltas(req):
+            if delta.text:
+                yield delta.text
+
+    def stream_deltas(self, req: GenRequest) -> Iterator[StreamDelta]:
+        """Stream cleaned text deltas, then the real stop reason from ``mlx-lm``.
+
+        ``mlx_lm.stream_generate`` tags each ``GenerationResponse`` with ``finish_reason``
+        (``None`` while generating, then ``"stop"`` at an EOS token or ``"length"`` at the
+        ``max_tokens`` cap); we pass that through so the gateway never has to guess. When
+        :meth:`_clean_stream` cuts early at a literal terminator marker the loop ends before
+        mlx-lm reports anything — that *is* an end-of-turn, so it normalizes to ``"stop"``.
+        """
         self._ensure_loaded(req.adapter)
         from mlx_lm import stream_generate
 
         prompt = self._format_prompt(req.messages)
-        chunks = (
-            response.text
+        # Populated as responses are consumed; read after _clean_stream drains (or cuts).
+        raw_reason: list[str | None] = [None]
+
+        def chunks() -> Iterator[str]:
             for response in stream_generate(
                 self._model,
                 self._tokenizer,
                 prompt=prompt,
                 max_tokens=req.max_tokens,
-            )
-        )
-        yield from self._clean_stream(chunks)
+            ):
+                raw_reason[0] = getattr(response, "finish_reason", None)
+                yield response.text
+
+        for text in self._clean_stream(chunks()):
+            yield StreamDelta(text=text)
+        yield StreamDelta(finish_reason=self._finish_reason(raw_reason[0]))
+
+    @staticmethod
+    def _finish_reason(raw: str | None) -> FinishReason:
+        """Normalize mlx-lm's ``finish_reason`` onto the OpenAI vocabulary."""
+        return normalize_finish_reason(raw)
 
     def _clean_stream(self, chunks: Iterable[str]) -> Iterator[str]:
         """Yield cleaned text deltas from raw model ``chunks`` (pure; no model needed).

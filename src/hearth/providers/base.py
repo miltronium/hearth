@@ -10,7 +10,26 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
+
+# Why a generation ended, in OpenAI's vocabulary. ``"length"`` means the backend stopped
+# because it hit ``max_tokens`` — the caller is holding a *truncated* answer and must be
+# able to tell. Reporting ``"stop"`` for a capped generation is the silent-truncation bug
+# this type exists to make impossible.
+FinishReason = Literal["stop", "length"]
+
+FINISH_STOP: FinishReason = "stop"
+FINISH_LENGTH: FinishReason = "length"
+
+
+def normalize_finish_reason(raw: str | None) -> FinishReason:
+    """Map a backend's stop reason onto :data:`FinishReason`.
+
+    Backends spell truncation differently (mlx-lm says ``"length"``, Anthropic says
+    ``"max_tokens"``); everything else — an EOS token, a stop sequence, a stream that
+    ended before the backend reported anything — is a natural stop.
+    """
+    return FINISH_LENGTH if raw in ("length", "max_tokens") else FINISH_STOP
 
 
 @dataclass(frozen=True)
@@ -44,6 +63,23 @@ class GenResult:
     backend: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Why generation ended. Defaults to a natural stop so a provider that cannot tell
+    # keeps working; every provider that *can* tell is expected to report honestly.
+    finish_reason: FinishReason = FINISH_STOP
+
+
+@dataclass(frozen=True)
+class StreamDelta:
+    """One event from a streaming generation.
+
+    Text deltas carry ``text`` and no reason; the single terminal event carries the
+    :data:`FinishReason` and no text. Splitting them this way lets a streaming backend
+    report truncation the same way :class:`GenResult` does, so the streaming and
+    non-streaming paths cannot drift.
+    """
+
+    text: str = ""
+    finish_reason: FinishReason | None = None
 
 
 @dataclass(frozen=True)
@@ -89,3 +125,24 @@ class ModelProvider(Protocol):
     def footprint(self, model_id: str) -> ResourceEstimate:
         """Estimate the resource footprint of ``model_id`` under this backend."""
         ...
+
+    # Optional extension, deliberately *not* part of the structural contract above so
+    # third-party providers keep satisfying it: a backend that knows why streaming ended
+    # also implements ``stream_deltas(req) -> Iterator[StreamDelta]``. Callers reach it
+    # through :func:`iter_stream`, which falls back to :meth:`stream` for the rest.
+
+
+def iter_stream(provider: ModelProvider, req: GenRequest) -> Iterator[StreamDelta]:
+    """Stream ``req`` through ``provider`` as :class:`StreamDelta` events.
+
+    Prefers the provider's ``stream_deltas`` (which reports the real stop reason) and
+    falls back to the plain :meth:`~ModelProvider.stream` contract, terminating that with
+    a natural stop — the most a text-only stream can honestly claim.
+    """
+    rich = getattr(provider, "stream_deltas", None)
+    if rich is not None:
+        yield from rich(req)
+        return
+    for text in provider.stream(req):
+        yield StreamDelta(text=text)
+    yield StreamDelta(finish_reason=FINISH_STOP)
