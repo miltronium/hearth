@@ -43,6 +43,27 @@ def build_server(tools: HearthTools | None = None):
         """Draft prose/boilerplate (e.g. a commit message) from an instruction, locally."""
         return tools.draft(instruction, context=context)
 
+    # Path-taking variants — the agent passes a path and never holds the content. Gated by
+    # the HEARTH_FILE_ROOTS allowlist in hearth.mcp.files (deny-by-default when unset).
+
+    @mcp.tool(name="hearth_summarize_file")
+    def hearth_summarize_file(path: str, max_words: int | None = None) -> str:
+        """Summarize a local file WITHOUT reading it into your context. HEARTH opens it
+        itself; the path must be inside a HEARTH_FILE_ROOTS directory."""
+        return tools.summarize_file(path, max_words=max_words)
+
+    @mcp.tool(name="hearth_classify_file")
+    def hearth_classify_file(path: str, labels: list[str]) -> str:
+        """Classify a local file into one of the given labels without reading it into your
+        context. The path must be inside a HEARTH_FILE_ROOTS directory."""
+        return tools.classify_file(path, labels)
+
+    @mcp.tool(name="hearth_extract_file")
+    def hearth_extract_file(path: str, fields: list[str]) -> dict[str, str]:
+        """Extract the named fields from a local file without reading it into your context.
+        Returns a field->value map. The path must be inside a HEARTH_FILE_ROOTS directory."""
+        return tools.extract_file(path, fields)
+
     @mcp.tool(name="hearth_rag_query")
     def hearth_rag_query(
         collection: str, query: str, k: int = 6, answer: bool = False

@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     # warmup logs and continues in degraded mode — serve never blocks forever on it.
     warmup: bool = True
 
+    # Filesystem allowlist for the path-taking MCP tools (docs/PRIVACY.md, "the caller
+    # caveat"): a colon-separated list of directories those tools may read *under*. Those
+    # tools are an arbitrary-file-read primitive handed to an agent, so this is deny-by-
+    # default — an empty value (the default) refuses every file read. There is no implicit
+    # root; the operator opts in per directory, e.g.
+    #   HEARTH_FILE_ROOTS=/Users/me/statements:/Users/me/work/confidential
+    file_roots: str = ""
+    # Hard ceiling (bytes) on a single file those tools will read, so a huge file can't
+    # blow up memory or the local model's context. Files above it are refused, not truncated.
+    file_max_bytes: int = 2_000_000
+
     # Root for runtime state (token, model cache, logs).
     home: Path = Path.home() / ".hearth"
 

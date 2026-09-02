@@ -103,8 +103,10 @@ These are the functional cockpit+engine wins; safe to do with empty test dirs (n
   - [x] Remaining C2 sliver **DONE 2026-08-19** — offload re-run under the active seal:
         `VERDICT= OFFLOADED`, probe exit 0, attribution sampler empty (RESULTS §1.6). Note the
         result is scoped to cmux's own process; the pane's agent still reached Anthropic (ADR-C009).
-  - [ ] (HEARTH-side, optional) add a path-taking `hearth_summarize` variant — today the tool takes
-        `text`, so a pane must Read the file into its own context first, capping the savings.
+  - [x] (HEARTH-side) path-taking variants **DONE 2026-09-02** — `hearth_summarize_file` /
+        `hearth_classify_file` / `hearth_extract_file` take a path, so a pane no longer has to Read
+        the file into its own context. Gated by the deny-by-default `HEARTH_FILE_ROOTS` allowlist
+        (`src/hearth/mcp/files.py`); see docs/PRIVACY.md "Path-taking tools".
 - ✅ **C4 live — DONE 2026-08-06.** `orchestrator.py` drove the live socket: enumerated real panes,
   triaged 4/4 correctly on-device, fired 3 real notify badges. Three live-only bugs found and fixed
   (stale positional surface refs, `--dry-run` miscount, swallowed cmux errors). See **RESULTS §1.7**

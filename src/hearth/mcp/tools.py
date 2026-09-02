@@ -5,6 +5,14 @@ so they can be unit-tested against the echo router with only core deps installed
 drives HEARTH's router in-process with ``allow_escalation=False`` — the delegation is
 strictly local, so an agent offloading work here never spends its frontier budget.
 
+Each tool comes in two shapes. The ``text``-taking ones are the original: the caller passes
+content it already holds. The ``*_file`` ones take a **path** and let HEARTH open the file
+itself, so an agent can offload work on a confidential file without ever reading it into its
+own context — see docs/PRIVACY.md, "the caller caveat". Because that makes them a file-read
+primitive in an agent's hands, every one of them goes through
+:func:`hearth.mcp.files.read_text_file`, which is deny-by-default and allowlisted by
+``HEARTH_FILE_ROOTS``.
+
 :func:`build_toolset` wires a :class:`HearthTools` bound to a shared router + RAG index;
 :mod:`hearth.mcp.server` registers each bound method as an MCP tool. Every function returns
 plain strings / small dicts so the MCP layer can serialize them trivially.
@@ -19,6 +27,7 @@ from ..memory import RagIndex, SQLiteVectorStore, select_embedder
 from ..providers import select_provider
 from ..providers.base import GenRequest, Message
 from ..router import Router
+from .files import read_text_file
 
 
 def _route_local(router: Router, prompt: str, intent: str) -> str:
@@ -41,11 +50,14 @@ class HearthTools:
 
     Constructed via :func:`build_toolset`. Kept as an object (not module-level functions)
     so the router/RAG index are injectable — tests pass an echo router, the server passes
-    the configured one, and both exercise the identical logic.
+    the configured one, and both exercise the identical logic. ``settings`` is only
+    consulted by the ``*_file`` tools (for the ``HEARTH_FILE_ROOTS`` allowlist and the size
+    cap); left ``None`` it resolves from the environment at call time.
     """
 
     router: Router
     rag: RagIndex
+    settings: Settings | None = None
 
     def summarize(self, text: str, max_words: int | None = None) -> str:
         """Summarize ``text`` locally. ``max_words`` caps the requested length when given."""
@@ -105,6 +117,43 @@ class HearthTools:
             "answer": result.answer,
         }
 
+    # -- path-taking variants -----------------------------------------------------------
+    #
+    # The counterparts to the tools above, for the case where the caller must NOT see the
+    # content. Each one reads the file here, locally, through the allowlisted reader and
+    # then runs the identical local prompt — so the only thing that crosses back to the
+    # agent is the task's result (a summary, a label, the requested fields), never the
+    # file. Refusals raise hearth.mcp.files.FileAccessError, whose messages quote the path
+    # and the reason but never the content.
+
+    def summarize_file(self, path: str, max_words: int | None = None) -> str:
+        """Summarize the file at ``path`` locally, without the caller ever reading it.
+
+        ``path`` must resolve inside a directory listed in ``HEARTH_FILE_ROOTS``; see
+        :func:`hearth.mcp.files.read_text_file` for the full set of checks.
+        """
+        return self.summarize(self._read_file(path), max_words=max_words)
+
+    def classify_file(self, path: str, labels: list[str]) -> str:
+        """Classify the file at ``path`` into one of ``labels``, reading it locally."""
+        if not labels:
+            raise ValueError("classify_file requires at least one label")
+        return self.classify(self._read_file(path), labels)
+
+    def extract_file(self, path: str, fields: list[str]) -> dict[str, str]:
+        """Extract ``fields`` from the file at ``path``, reading it locally.
+
+        Returns the same ``{field: value}`` shape as :meth:`extract`, so only the values
+        the caller actually asked for come back — not the surrounding file.
+        """
+        if not fields:
+            raise ValueError("extract_file requires at least one field")
+        return self.extract(self._read_file(path), fields)
+
+    def _read_file(self, path: str) -> str:
+        """Read ``path`` under this toolset's settings (the allowlisted local read)."""
+        return read_text_file(path, settings=self.settings)
+
 
 def build_toolset(
     settings: Settings | None = None,
@@ -123,7 +172,7 @@ def build_toolset(
         store=SQLiteVectorStore(settings=settings),
         router=router,
     )
-    return HearthTools(router=router, rag=rag)
+    return HearthTools(router=router, rag=rag, settings=settings)
 
 
 def _parse_fields(raw: str, fields: list[str]) -> dict[str, str]:

@@ -72,6 +72,7 @@ Tools the HEARTH MCP server exposes:
 | `hearth_extract` | Pull structured fields from text locally |
 | `hearth_rag_query` | Retrieve grounded chunks from a local collection instead of pasting whole files |
 | `hearth_draft` | First-draft boilerplate/commit messages locally |
+| `hearth_summarize_file` `hearth_classify_file` `hearth_extract_file` | Same three, but you pass a **path** — HEARTH opens the file locally so the content never enters your context. Requires `HEARTH_FILE_ROOTS` (see docs/PRIVACY.md, "Path-taking tools"); reads are refused without it. |
 
 **Workflow pattern:** for a big task, let Claude *orchestrate* (the reasoning) while HEARTH
 *does the bulk reads/summaries* (the volume). Claude asks HEARTH to pre-digest large inputs,

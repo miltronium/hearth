@@ -49,6 +49,34 @@ path for the confidential repo; let it offload subtasks to HEARTH's local model 
 subtasks stay fully on-device (with escalation off). HEARTH is the on-device sink, not a shield
 in front of a frontier agent.
 
+### Path-taking tools — closing the caveat for files
+
+For the common case where the sensitive thing *is a file*, the MCP server also exposes
+**path-taking** tools — `hearth_summarize_file`, `hearth_classify_file`, `hearth_extract_file`
+(`mcp/files.py`, `mcp/tools.py`). The agent passes a **path**; HEARTH opens the file itself,
+locally, and only the task's result (a summary, a label, the requested fields) crosses back. The
+agent never holds a byte of the content, so nothing to un-send.
+
+That makes them an arbitrary-file-read primitive in an agent's hands, so they are gated:
+
+| Control | Behavior |
+| --- | --- |
+| **Allowlist, deny by default** | `HEARTH_FILE_ROOTS` (colon-separated dirs) is the *only* way to enable reads. Unset ⇒ every read refused. No implicit root — not CWD, not `$HOME`. |
+| **Full resolution first** | The path is `expanduser()`-ed and `resolve()`-d (flattening `..`, following symlinks) and the **result** must be inside a resolved root — so a traversal or a symlink planted inside a root escapes nothing. |
+| **Type + size** | Regular files only (directories, devices, FIFOs refused); over `HEARTH_FILE_MAX_BYTES` (default 2 MB) is refused, not truncated. |
+| **Formats** | Plain text (`.txt`, `.md`, `.log`, `.rst`, extension-less) and `.csv` today; anything else is refused by name. PDF/XLSX/JSON are one handler + one table entry away (`mcp/files.py`). |
+| **Errors** | Refusals name the path and the reason and **never quote file content** — the error travels back to the agent we're keeping the content from. |
+
+```sh
+# Enable for one directory, then let the agent summarize without ever reading it:
+export HEARTH_FILE_ROOTS="$HOME/statements"
+#   agent: hearth_summarize_file(path="~/statements/aug.csv")
+```
+
+Note this closes the *file* half of the caveat only. An agent that pastes confidential text it
+already read into `hearth_summarize` is still leaking — the path-taking tool is what you point it
+at instead.
+
 ## Data at rest
 
 - **RAG index** — `hearth rag ingest` writes the **raw chunk text** to
