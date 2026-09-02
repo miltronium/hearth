@@ -59,20 +59,13 @@ def test_adapters_list_renders(tmp_path):
     assert "candidate" in result.stdout
 
 
-def test_adapters_promote_refused_without_gate(tmp_path):
-    # candidate=0.5 does NOT beat incumbent=0.9 → gate fails → promote refused.
-    _seed_adapter(tmp_path)
-    result = runner.invoke(
-        app,
-        ["adapters", "promote", "extract-1", "--candidate-score", "0.5",
-         "--incumbent-score", "0.9"],
-        env=_env(tmp_path),
-    )
-    assert result.exit_code == 1
-    assert "refused" in result.stdout.lower()
+def test_adapters_promote_rejects_an_operator_typed_score(tmp_path):
+    """The hole that docs/RESULTS.md's promotion went through: two floats and a promise.
 
-
-def test_adapters_promote_succeeds_when_gate_passes(tmp_path):
+    ``--candidate-score``/``--incumbent-score`` named no golden set, no metric and no
+    model — the gate compared two numbers the operator chose (LEARNING_plan F3). The flags
+    now exit 2 with a pointer at the measured path rather than promoting anything.
+    """
     _seed_adapter(tmp_path)
     result = runner.invoke(
         app,
@@ -80,15 +73,32 @@ def test_adapters_promote_succeeds_when_gate_passes(tmp_path):
          "--incumbent-score", "0.80"],
         env=_env(tmp_path),
     )
-    assert result.exit_code == 0
-    assert "promoted" in result.stdout.lower()
+    assert result.exit_code == 2
+    assert "removed" in result.stdout.lower()
+    from hearth.registry import AdapterStore
+
+    store = AdapterStore(path=tmp_path / ".hearth" / "adapters.json")
+    assert store.get("extract-1").status == "candidate"  # nothing was promoted
 
 
-def test_adapters_promote_requires_candidate_score(tmp_path):
+def test_adapters_promote_requires_a_report_and_a_prereg(tmp_path):
     _seed_adapter(tmp_path)
     result = runner.invoke(app, ["adapters", "promote", "extract-1"], env=_env(tmp_path))
     assert result.exit_code == 1
-    assert "candidate-score" in result.stdout
+    assert "--report" in result.stdout and "--prereg" in result.stdout
+
+
+def test_adapters_promote_rejects_an_unusable_report(tmp_path):
+    _seed_adapter(tmp_path)
+    bad = tmp_path / "report.json"
+    bad.write_text('{"candidate": {"task": "extract"}}')
+    result = runner.invoke(
+        app,
+        ["adapters", "promote", "extract-1", "--report", str(bad), "--prereg", str(bad)],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 1
+    assert "unusable eval report" in result.stdout.lower()
 
 
 def test_adapters_retire(tmp_path):

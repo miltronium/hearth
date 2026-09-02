@@ -118,31 +118,57 @@ class AdapterStore:
         self,
         adapter_id: str,
         *,
-        gate_passed: bool,
+        gate_passed: bool | None = None,
         proof: dict[str, object] | None = None,
+        gate: object | None = None,
     ) -> AdapterEntry:
         """Promote a candidate to **promoted** — only if the eval gate passed (ADR-006).
 
-        ``gate_passed`` is the caller's assertion that the candidate beat the incumbent
-        (see :func:`hearth.training.eval.beats_incumbent`); ``proof`` records the scores
-        behind that assertion. Refuses with :class:`GateNotPassedError` when the gate
-        didn't pass — this is the promotion safety guarantee. Any previously-promoted
-        adapter for the same task is retired so exactly one is promoted per task.
+        Two ways to show the gate passed, and the store records which one was used:
+
+        * ``gate`` — a :class:`hearth.training.eval.GateResult`. The verdict and the whole
+          statistical proof (test, p-value, interval, baselines, golden sha, config
+          fingerprint) are taken from it. This is the verified path.
+        * ``gate_passed`` + ``proof`` — the legacy caller assertion. Still honoured so
+          existing callers keep working, but the stored proof is stamped
+          ``gate: "unverified"`` so a weak gate is never indistinguishable from a strong one
+          in the audit trail (LEARNING_plan §3.3).
+
+        Refuses with :class:`GateNotPassedError` when the gate didn't pass — this is the
+        promotion safety guarantee. Any previously-promoted adapter for the same task is
+        retired so exactly one is promoted per task.
         """
+        if gate is not None:
+            if gate_passed is not None:
+                raise AdapterError(
+                    "pass either 'gate' (a GateResult) or 'gate_passed', not both"
+                )
+            gate_passed = bool(gate.passed)
+            gate_proof = gate.as_proof() if hasattr(gate, "as_proof") else {}
+            merged = dict(proof or {})
+            merged.update(gate_proof)
+            proof = merged
+        if gate_passed is None:
+            raise AdapterError("promote requires 'gate' (a GateResult) or 'gate_passed'")
+
         entries = self._load()
         entry = self._require(entries, adapter_id)
         if entry.status == STATUS_RETIRED:
             raise AdapterError(f"cannot promote a retired adapter: {adapter_id!r}")
         if not gate_passed:
+            reason = ""
+            if gate is not None:
+                reason = f": {getattr(gate, 'reason', '')}"
             raise GateNotPassedError(
                 f"refusing to promote {adapter_id!r}: eval gate not passed "
-                "(candidate did not beat the incumbent)"
+                f"(candidate did not beat the incumbent){reason}"
             )
         for other in entries.values():
             if other.task == entry.task and other.status == STATUS_PROMOTED:
                 other.status = STATUS_RETIRED
         entry.status = STATUS_PROMOTED
         entry.promotion_proof = dict(proof or {})
+        entry.promotion_proof.setdefault("gate", "unverified")
         entry.promotion_proof.setdefault("gate_passed", True)
         self._save(entries)
         return entry

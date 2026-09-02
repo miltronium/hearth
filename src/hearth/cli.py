@@ -8,6 +8,7 @@ Phase 0/1 commands:
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
   * ``hearth train …``      — LoRA fine-tune → register a candidate adapter (Phase 4)
   * ``hearth adapters …``   — adapter registry: ``list`` / ``promote`` / ``retire`` (Phase 4)
+  * ``hearth prereg …``     — pre-register the eval bar before training (ADR-006)
   * ``hearth plugins list`` — third-party plugins discovered via entry points (Phase 7)
   * ``hearth mcp``          — MCP server for agent offload (Phase 5, needs ``[mcp]`` extra)
   * ``hearth stats``        — token-savings / escalation rollups (Phase 2)
@@ -43,6 +44,8 @@ rag_app = typer.Typer(help="Local RAG: ingest paths into a collection and query 
 app.add_typer(rag_app, name="rag")
 adapters_app = typer.Typer(help="LoRA adapter registry: list, promote, and retire adapters.")
 app.add_typer(adapters_app, name="adapters")
+prereg_app = typer.Typer(help="Pre-registration: declare the eval bar before training.")
+app.add_typer(prereg_app, name="prereg")
 plugins_app = typer.Typer(help="Third-party plugins discovered via entry points (Phase 7).")
 app.add_typer(plugins_app, name="plugins")
 console = Console()
@@ -63,14 +66,18 @@ def _adapter_store():
 def _load_golden_set(path: Path, task: str):
     """Load a golden set from a JSONL file of ``{"prompt", "expected"}`` rows.
 
-    An optional leading dataset header line (``kind == hearth.dataset.header``) is skipped,
-    so a file produced by ``hearth.training.dataset`` and a bare hand-written list both work.
+    An optional leading header line (``kind == hearth.dataset.header`` or
+    ``hearth.golden.header``) is skipped, so a file produced by ``hearth.training.dataset``
+    and a bare hand-written list both work. A ``hearth.golden.header`` may carry a
+    ``version`` label, which rides along in the report; the set's *identity* is always its
+    content sha, so an unversioned file is still pinnable (LEARNING_plan §3.1).
     """
     import json
 
     from .training.eval import GoldenExample, GoldenSet
 
     examples = []
+    version = ""
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -78,12 +85,15 @@ def _load_golden_set(path: Path, task: str):
         obj = json.loads(line)
         if obj.get("kind") == "hearth.dataset.header":
             continue
+        if obj.get("kind") == "hearth.golden.header":
+            version = str(obj.get("version", ""))
+            continue
         if "prompt" not in obj or "expected" not in obj:
             raise ValueError('each golden row needs "prompt" and "expected" fields')
         examples.append(GoldenExample(prompt=obj["prompt"], expected=obj["expected"]))
     if not examples:
         raise ValueError("golden set is empty")
-    return GoldenSet(task=task, examples=examples)
+    return GoldenSet(task=task, examples=examples, version=version)
 
 
 @app.command()
@@ -564,27 +574,75 @@ def eval_adapter(
         None, "--system", help="Optional system prompt sent with every example."
     ),
     max_tokens: int = typer.Option(64, "--max-tokens", help="Max tokens per generation."),
+    temperature: float = typer.Option(
+        0.0,
+        "--temperature",
+        help="Decode temperature. 0.0 (greedy): a re-rollable score is not a measurement.",
+    ),
+    allow_sampling: bool = typer.Option(
+        False, "--allow-sampling", help="Permit --temperature > 0 (scores become re-rollable)."
+    ),
     base: str = typer.Option(
         None, "--base", help="Base model id (default: the adapter's recorded base_model)."
     ),
+    alpha: float = typer.Option(
+        0.05, "--alpha", help="Significance level (a --prereg overrides it)."
+    ),
+    margin: float = typer.Option(
+        0.0, "--margin", help="Minimum effect the candidate must exceed (a --prereg overrides it)."
+    ),
+    min_n: int = typer.Option(
+        30, "--min-n", help="Minimum golden-set size the gate licenses (--prereg overrides it)."
+    ),
+    prereg: Path = typer.Option(
+        None, "--prereg", help="Pre-registration YAML: required by --promote, and its bar wins."
+    ),
+    report_json: Path = typer.Option(
+        None, "--report-json", help="Write the reports + gate result here (feeds promote)."
+    ),
+    recheck: bool = typer.Option(
+        False,
+        "--check-determinism",
+        help="Re-generate a few golden prompts and refuse if the answers differ.",
+    ),
     promote: bool = typer.Option(
-        False, "--promote", help="Promote the candidate if it beats the incumbent (eval-gated)."
+        False, "--promote", help="Promote the candidate if the gate passes (needs --prereg)."
     ),
 ) -> None:
     """Score a candidate adapter against a golden set and (optionally) promote it (ADR-006).
 
     Wires the candidate through the provider's per-request adapter slot (``GenRequest.adapter``),
-    scores it with the objective metric, compares against the currently-promoted adapter for
-    the task (the incumbent), and prints both scores plus the gate result. With ``--promote``
-    a candidate that beats the incumbent is promoted through the same gate as
-    ``hearth adapters promote`` — so a bare "eval --promote" never wins on a regression.
+    scores it with the objective metric at ``temperature=0`` and compares it against the
+    incumbent — **and when no adapter is promoted for the task, the incumbent is the base
+    model**, never a bare "any score above zero" (LEARNING_plan F2). The comparison is paired
+    over the per-example vectors and must clear ``alpha``; the candidate must also beat the
+    empty / majority-label / copy-input baselines. ``--promote`` additionally requires a
+    ``--prereg`` that is git-committed and matches this run.
 
     Real scoring needs the MLX backend (``HEARTH_BACKEND=mlx``) + a cached base model; the
     echo backend runs the plumbing offline but won't produce meaningful scores.
     """
+    import json as _json
+    from datetime import UTC, datetime
+
     from .config import Settings
     from .registry import AdapterError
-    from .training.eval import beats_incumbent, score_candidate
+    from .training.eval import (
+        EvalConfig,
+        GateProvenanceError,
+        baseline_reports,
+        check_determinism,
+        evaluate_gate,
+        score_candidate,
+    )
+    from .training.prereg import PreRegError, load_prereg, verify_committed
+
+    if temperature > 0.0 and not allow_sampling:
+        console.print(
+            "[red]Refusing to score at temperature > 0:[/red] the gate would be re-rollable. "
+            "Use --temperature 0 (default), or --allow-sampling to measure anyway."
+        )
+        raise typer.Exit(code=1)
 
     store = _adapter_store()
     entry = store.get(adapter_id)
@@ -603,82 +661,302 @@ def eval_adapter(
         console.print(f"[red]Golden set error:[/red] {exc}")
         raise typer.Exit(code=1) from None
 
+    registration = None
+    if prereg is not None:
+        try:
+            registration = load_prereg(prereg)
+        except PreRegError as exc:
+            console.print(f"[red]Pre-registration error:[/red] {exc}")
+            raise typer.Exit(code=1) from None
+
     base_model = base or entry.base_model
     # Fresh Settings() (not the lru_cached get_settings) so HEARTH_BACKEND is read per call.
     provider = select_provider(Settings())
+    config = EvalConfig.for_system(system, temperature=temperature, max_tokens=max_tokens)
+    measured_at = datetime.now(tz=UTC).isoformat(timespec="seconds")
 
-    def _generate_with(adapter_path: str):
+    def _generate_with(adapter_path: str | None):
         def _gen(prompt: str) -> str:
             messages = []
             if system:
                 messages.append(Message(role="system", content=system))
             messages.append(Message(role="user", content=prompt))
             req = GenRequest(
-                messages=messages, model=base_model, max_tokens=max_tokens, adapter=adapter_path
+                messages=messages,
+                model=base_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                adapter=adapter_path,
             )
             return provider.generate(req).text
 
         return _gen
 
+    def _score(adapter_path: str | None, model_id: str):
+        return score_candidate(
+            golden_set,
+            _generate_with(adapter_path),
+            metric=metric,
+            model_id=model_id,
+            config=config,
+            measured_at=measured_at,
+        )
+
     try:
-        candidate = score_candidate(golden_set, _generate_with(candidate_path), metric=metric)
+        candidate = _score(candidate_path, f"{base_model}+{adapter_id}")
     except ValueError as exc:  # unknown metric
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
-    # Score the incumbent (the promoted adapter for this task, if any and not the candidate).
-    incumbent = None
+    if recheck:
+        drift = check_determinism(golden_set, _generate_with(candidate_path))
+        if drift:
+            console.print(
+                f"[red]Non-deterministic generation:[/red] {len(drift)} prompt(s) produced a "
+                "different answer on a second pass — this score cannot gate a promotion."
+            )
+            raise typer.Exit(code=1)
+
+    # The incumbent. No promoted adapter for the task does NOT mean "anything wins": the
+    # base model becomes the incumbent and has to be beaten (LEARNING_plan F2).
     incumbent_entry = store.promoted_for(entry.task)
     if incumbent_entry is not None and incumbent_entry.id != adapter_id:
-        incumbent_path = store.resolve_path(incumbent_entry.id)
-        incumbent = score_candidate(
-            golden_set, _generate_with(incumbent_path), metric=metric
-        )
+        incumbent_id = incumbent_entry.id
+        incumbent_role = "incumbent"
+        incumbent = _score(store.resolve_path(incumbent_id), f"{base_model}+{incumbent_id}")
+    else:
+        incumbent_id = base_model
+        incumbent_role = "base"
+        incumbent = _score(None, base_model)
 
-    passed = beats_incumbent(candidate, incumbent)
+    baselines = baseline_reports(
+        golden_set, metric=metric, config=config, measured_at=measured_at
+    )
+    test = "auto"
+    if registration is not None:
+        problems = registration.mismatches(candidate)
+        if problems:
+            console.print(
+                "[red]This run is not the registered experiment:[/red] " + "; ".join(problems)
+            )
+            raise typer.Exit(code=1)
+        alpha, margin, min_n, test = (
+            registration.alpha,
+            registration.min_effect,
+            registration.min_n,
+            registration.test,
+        )
+        missing = [b for b in registration.must_beat_baselines if b not in baselines]
+        if missing:
+            console.print(
+                "[red]Pre-registered baseline(s) not available:[/red] " + ", ".join(missing)
+            )
+            raise typer.Exit(code=1)
+        baselines = {b: baselines[b] for b in registration.must_beat_baselines}
+
+    try:
+        gate = evaluate_gate(
+            candidate,
+            incumbent,
+            incumbent_role=incumbent_role,
+            baselines=baselines,
+            margin=margin,
+            alpha=alpha,
+            min_n=min_n,
+            test=test,
+            candidate_id=adapter_id,
+            incumbent_id=incumbent_id,
+        )
+    except (GateProvenanceError, ValueError) as exc:
+        console.print(f"[red]Gate refused to compare:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
     table = Table(title=f"hearth eval — {entry.task}", show_header=True, header_style="bold")
     table.add_column("adapter")
     table.add_column("role")
     table.add_column(f"{candidate.metric} score")
     table.add_row(adapter_id, "candidate", f"{candidate.score:.4f}")
-    if incumbent is not None:
-        table.add_row(incumbent_entry.id, "incumbent", f"{incumbent.score:.4f}")
-    else:
-        table.add_row("—", "incumbent", "none")
+    table.add_row(incumbent_id, incumbent_role, f"{incumbent.score:.4f}")
+    for name, report in sorted(baselines.items()):
+        table.add_row("—", f"baseline:{name}", f"{report.score:.4f}")
     console.print(table)
+
+    stat = f"{gate.test} p={gate.p_value:.4f}" if gate.p_value is not None else gate.test
+    if gate.test == "mcnemar_exact":
+        stat += f" (b={gate.b}, c={gate.c})"
+    elif gate.ci_low is not None:
+        stat += f" (ci {gate.ci_low:+.4f}..{gate.ci_high:+.4f})"
     console.print(
-        f"gate: [{'green' if passed else 'red'}]{'PASS' if passed else 'FAIL'}[/] "
-        f"(n={candidate.n})"
+        f"gate: [{'green' if gate.passed else 'red'}]{'PASS' if gate.passed else 'FAIL'}[/] "
+        f"n={gate.n} alpha={gate.alpha:g} {stat}"
+    )
+    if not gate.passed:
+        for reason in gate.reasons:
+            console.print(f"  [yellow]·[/yellow] {reason}")
+    console.print(
+        f"[dim]golden_sha={candidate.golden_sha[:12]} "
+        f"config={candidate.config_fingerprint}[/dim]"
     )
 
+    if report_json is not None:
+        payload = {
+            "candidate": candidate.to_json(),
+            "incumbent": incumbent.to_json(),
+            "incumbent_role": incumbent_role,
+            "incumbent_id": incumbent_id,
+            "candidate_id": adapter_id,
+            "baselines": {k: v.to_json() for k, v in baselines.items()},
+            "gate": gate.as_proof(),
+        }
+        Path(report_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(report_json).write_text(
+            _json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        console.print(f"[dim]report written to {report_json}[/dim]")
+
     if not promote:
-        if passed:
-            inc = f" --incumbent-score {incumbent.score:g}" if incumbent is not None else ""
+        if gate.passed:
             console.print(
-                f"[dim]promote with:[/dim] hearth adapters promote {adapter_id} "
-                f"--candidate-score {candidate.score:g}{inc}"
+                "[dim]promote with:[/dim] hearth eval "
+                f"{adapter_id} --golden {golden} --prereg <committed prereg> --promote"
             )
         return
 
-    if not passed:
+    if registration is None:
         console.print(
-            "[red]Promotion refused:[/red] candidate did not beat the incumbent."
+            "[red]Promotion refused:[/red] --promote requires --prereg. The bar has to be "
+            "declared and committed before the measurement (docs/LEARNING_plan.md §3.4); "
+            "scaffold one with `hearth prereg init`."
         )
         raise typer.Exit(code=1)
-    proof = {
-        "candidate_score": candidate.score,
-        "incumbent_score": incumbent.score if incumbent is not None else None,
-        "gate_passed": True,
-    }
+    status = verify_committed(registration.path)
+    if not status.committed:
+        console.print(f"[red]Promotion refused:[/red] {status.reason}")
+        raise typer.Exit(code=1)
+    if not gate.passed:
+        console.print(f"[red]Promotion refused:[/red] {gate.reason}")
+        raise typer.Exit(code=1)
+
+    proof = dict(registration.as_proof())
+    proof["prereg_committed"] = True
+    proof["prereg_commit"] = status.commit
+    proof["measured_at"] = candidate.measured_at
     try:
-        store.promote(adapter_id, gate_passed=True, proof=proof)
+        store.promote(adapter_id, gate=gate, proof=proof)
     except AdapterError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(
-        f"[green]Promoted[/green] {adapter_id} (gate passed, candidate={candidate.score:.4f})."
+        f"[green]Promoted[/green] {adapter_id} (gate passed, candidate={candidate.score:.4f}, "
+        f"p={gate.p_value:.4f})."
     )
+
+
+@prereg_app.command("init")
+def prereg_init(
+    task: str = typer.Option(..., "--task", help="Task class the adapter serves."),
+    golden: Path = typer.Option(..., "--golden", help="Golden set JSONL to pin by content sha."),
+    out: Path = typer.Option(None, "--out", help="Write here instead of printing to stdout."),
+    metric: str = typer.Option("exact", "--metric", help="Objective metric: 'exact' or 'f1'."),
+    max_tokens: int = typer.Option(64, "--max-tokens", help="Registered generation max tokens."),
+    system: str = typer.Option(None, "--system", help="System prompt (hashed into the config)."),
+    alpha: float = typer.Option(0.05, "--alpha", help="Registered significance level."),
+    min_effect: float = typer.Option(0.0, "--min-effect", help="Minimum lift that would count."),
+    min_n: int = typer.Option(30, "--min-n", help="Minimum golden-set size."),
+) -> None:
+    """Scaffold a pre-registration for a golden set — then fill in the prose and commit it.
+
+    The generated file pins the golden set by content sha and the decode parameters by
+    fingerprint, so the harness can later prove the run it gated was the run that was
+    registered. The hypothesis / stopping rule / kill condition are left blank on purpose:
+    a bar written by the tool is not a pre-registration.
+    """
+    from .training.prereg import template
+
+    try:
+        golden_set = _load_golden_set(golden, task=task)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]Golden set error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    text = template(
+        task=task,
+        golden_sha=golden_set.sha,
+        golden_version=golden_set.version,
+        n=len(golden_set),
+        metric=metric,
+        max_tokens=max_tokens,
+        system=system,
+        alpha=alpha,
+        min_effect=min_effect,
+        min_n=min_n,
+    )
+    if out is None:
+        console.print(text)
+        return
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(text, encoding="utf-8")
+    console.print(
+        f"Wrote [cyan]{out}[/cyan]. Fill in hypothesis/stopping_rule/kill_condition, then "
+        "[bold]git commit[/bold] it — an uncommitted prereg cannot gate a promotion."
+    )
+
+
+@prereg_app.command("check")
+def prereg_check(
+    path: Path = typer.Argument(..., help="Pre-registration YAML to validate."),
+    golden: Path = typer.Option(
+        None, "--golden", help="Also check this golden set still hashes to the registered sha."
+    ),
+) -> None:
+    """Validate a pre-registration and report whether git has it committed and unmodified."""
+    from .training.prereg import PreRegError, load_prereg, verify_committed
+
+    try:
+        registration = load_prereg(path)
+    except PreRegError as exc:
+        console.print(f"[red]Pre-registration error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    table = Table(title=f"prereg — {path}", show_header=True, header_style="bold")
+    table.add_column("field")
+    table.add_column("value")
+    table.add_row("task", registration.task)
+    table.add_row("metric", registration.metric)
+    table.add_row("golden_sha", registration.golden_sha[:16])
+    table.add_row("alpha", f"{registration.alpha:g}")
+    table.add_row("min_effect", f"{registration.min_effect:g}")
+    table.add_row("min_n", str(registration.min_n))
+    table.add_row("test", registration.test)
+    table.add_row("baselines", ", ".join(registration.must_beat_baselines))
+    table.add_row("config", registration.generation.fingerprint)
+    table.add_row("prereg_sha", registration.sha[:16])
+    console.print(table)
+
+    ok = True
+    if golden is not None:
+        try:
+            golden_set = _load_golden_set(golden, task=registration.task)
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]Golden set error:[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        if golden_set.sha != registration.golden_sha:
+            console.print(
+                f"[red]Golden set has changed:[/red] {golden} now hashes to "
+                f"{golden_set.sha[:16]}, registered {registration.golden_sha[:16]}"
+            )
+            ok = False
+        else:
+            console.print(f"[green]Golden set matches[/green] ({len(golden_set)} examples).")
+
+    status = verify_committed(registration.path)
+    if status.committed:
+        console.print(f"[green]git: committed[/green] at {status.commit[:12]} and unmodified.")
+    else:
+        console.print(f"[red]git: not committed[/red] — {status.reason}")
+        ok = False
+    if not ok:
+        raise typer.Exit(code=1)
 
 
 @adapters_app.command("list")
@@ -715,47 +993,123 @@ def adapters_list(
 @adapters_app.command("promote")
 def adapters_promote(
     adapter_id: str = typer.Argument(..., help="Adapter id to promote."),
+    report: Path = typer.Option(
+        None, "--report", help="Eval report JSON written by `hearth eval --report-json`."
+    ),
+    prereg: Path = typer.Option(
+        None, "--prereg", help="Committed pre-registration YAML declaring the bar."
+    ),
     candidate_score: float = typer.Option(
-        None, "--candidate-score", help="Candidate eval score (proves it beat the incumbent)."
+        None, "--candidate-score", hidden=True, help="REMOVED — a typed score is not evidence."
     ),
     incumbent_score: float = typer.Option(
-        None, "--incumbent-score", help="Incumbent eval score (omit if no incumbent)."
+        None, "--incumbent-score", hidden=True, help="REMOVED — a typed score is not evidence."
     ),
 ) -> None:
-    """Promote a candidate — refused unless the eval gate passed (ARCHITECTURE §7, ADR-006).
+    """Promote a candidate from a measured eval report (ARCHITECTURE §7, ADR-006).
 
-    Promotion requires proof the candidate beat the incumbent. Supply ``--candidate-score``
-    (and ``--incumbent-score`` when one exists); the gate (``beats_incumbent``) must pass or
-    this refuses. This is the safety guarantee: a bare "promote" never wins.
+    The gate is **recomputed here** from the persisted per-example vectors under the bar in
+    the committed pre-registration — the report is evidence, not a verdict to be trusted.
+    Both ``--report`` and ``--prereg`` are required; the normal path is
+    ``hearth eval --prereg <file> --promote``, which measures and promotes in one step.
+
+    ``--candidate-score`` / ``--incumbent-score`` are gone. They let an operator type two
+    floats and promote on them, with no golden set, no metric, and no measurement behind
+    either number (LEARNING_plan F3) — that was the path the promotion in docs/RESULTS.md
+    actually used.
     """
-    from .registry import AdapterError, GateNotPassedError
-    from .training.eval import EvalReport, beats_incumbent
+    import json as _json
 
-    if candidate_score is None:
-        console.print("[red]--candidate-score is required to prove the eval gate passed.[/red]")
+    from .registry import AdapterError, GateNotPassedError
+    from .training.eval import EvalReport, GateProvenanceError, evaluate_gate
+    from .training.prereg import PreRegError, load_prereg, verify_committed
+
+    if candidate_score is not None or incumbent_score is not None:
+        console.print(
+            "[red]--candidate-score/--incumbent-score have been removed.[/red] An "
+            "operator-typed score is not evidence: it names no golden set, no metric and no "
+            "model. Measure instead:\n"
+            "  hearth eval <adapter> --golden <set> --prereg <committed prereg> --promote"
+        )
+        raise typer.Exit(code=2)
+    if report is None or prereg is None:
+        console.print(
+            "[red]Promotion requires --report and --prereg.[/red] Produce the report with "
+            "`hearth eval ... --report-json <file>`, or promote directly with "
+            "`hearth eval ... --prereg <file> --promote`."
+        )
         raise typer.Exit(code=1)
 
-    candidate = EvalReport(task="", metric="cli", score=candidate_score)
-    incumbent = (
-        EvalReport(task="", metric="cli", score=incumbent_score)
-        if incumbent_score is not None
-        else None
-    )
-    gate_passed = beats_incumbent(candidate, incumbent)
-    proof = {
-        "candidate_score": candidate_score,
-        "incumbent_score": incumbent_score,
-        "gate_passed": gate_passed,
-    }
     try:
-        _adapter_store().promote(adapter_id, gate_passed=gate_passed, proof=proof)
-    except GateNotPassedError as exc:
-        console.print(f"[red]Promotion refused:[/red] {exc}")
+        payload = _json.loads(Path(report).read_text(encoding="utf-8"))
+        candidate = EvalReport.from_json(payload["candidate"])
+        incumbent = EvalReport.from_json(payload["incumbent"])
+        baselines = {
+            name: EvalReport.from_json(obj)
+            for name, obj in (payload.get("baselines") or {}).items()
+        }
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        console.print(f"[red]Unusable eval report:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    try:
+        registration = load_prereg(prereg)
+    except PreRegError as exc:
+        console.print(f"[red]Pre-registration error:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+    status = verify_committed(registration.path)
+    if not status.committed:
+        console.print(f"[red]Promotion refused:[/red] {status.reason}")
+        raise typer.Exit(code=1)
+    problems = registration.mismatches(candidate)
+    if problems:
+        console.print(
+            "[red]Promotion refused:[/red] the report is not the registered experiment — "
+            + "; ".join(problems)
+        )
+        raise typer.Exit(code=1)
+
+    missing = [b for b in registration.must_beat_baselines if b not in baselines]
+    if missing:
+        console.print(
+            "[red]Promotion refused:[/red] report is missing pre-registered baseline(s): "
+            + ", ".join(missing)
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        gate = evaluate_gate(
+            candidate,
+            incumbent,
+            incumbent_role=payload.get("incumbent_role", "incumbent"),
+            baselines={b: baselines[b] for b in registration.must_beat_baselines},
+            margin=registration.min_effect,
+            alpha=registration.alpha,
+            min_n=registration.min_n,
+            test=registration.test,
+            candidate_id=adapter_id,
+            incumbent_id=payload.get("incumbent_id", ""),
+        )
+    except (GateProvenanceError, ValueError) as exc:
+        console.print(f"[red]Gate refused to compare:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    proof = dict(registration.as_proof())
+    proof["prereg_committed"] = True
+    proof["prereg_commit"] = status.commit
+    proof["measured_at"] = candidate.measured_at
+    try:
+        _adapter_store().promote(adapter_id, gate=gate, proof=proof)
+    except GateNotPassedError:
+        console.print(f"[red]Promotion refused:[/red] {gate.reason}")
         raise typer.Exit(code=1) from None
     except AdapterError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
-    console.print(f"[green]Promoted[/green] {adapter_id} (gate passed).")
+    console.print(
+        f"[green]Promoted[/green] {adapter_id} (gate passed, {gate.test} "
+        f"p={gate.p_value:.4f}, n={gate.n})."
+    )
 
 
 @adapters_app.command("retire")
