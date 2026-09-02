@@ -1,0 +1,52 @@
+# SYNTHETIC statement data — invented for this example, not derived from any real account.
+# Merchant strings imitate the shapes real processors emit (SQ */TST*/AMZN Mktp prefixes,
+# store numbers, ACH descriptors, autopay memos) so the tier-1 model has realistic noise to
+# work through. `expected_category` is the hand-written answer key; `difficulty` marks the
+# rows chosen to be genuinely ambiguous (see README.md § "The hard cases").
+date,description,amount,expected_category,difficulty
+2026-06-01,ACH DEPOSIT NORTHWIND LOGISTICS PAYROLL PPD ID:1234567890,3184.22,income,easy
+2026-06-01,SQ *BLUE RIDGE COFFEE ASHEVILLE NC,-6.75,dining,easy
+2026-06-02,SAFEWAY #1842 04412 PORTLAND OR,-87.43,groceries,easy
+2026-06-02,SHELL OIL 57445283309,-52.10,transport,easy
+2026-06-03,NETFLIX.COM 866-579-7172 CA,-22.99,subscriptions,easy
+2026-06-03,PG&E WEB ONLINE PMT AUTOPAY 800-743-5000,-143.87,utilities,easy
+2026-06-04,SQ *THE DAILY GRIND,-4.25,dining,easy
+2026-06-04,AMZN Mktp US*RT4KJ2LM3 AMZN.COM/BILL WA,-34.19,shopping,hard
+2026-06-05,TST* SABOR LATINO - 15TH,-41.60,dining,hard
+2026-06-05,TRADER JOE'S #189 QPS,-62.88,groceries,easy
+2026-06-06,VENMO PAYMENT 1029384756 J RIVERA,-75.00,transfer,easy
+2026-06-06,UBER *TRIP HELP.UBER.COM,-18.42,transport,easy
+2026-06-07,UBER *EATS 8005928996 CA,-31.07,dining,hard
+2026-06-08,CVS/PHARMACY #08812 Q03,-14.99,healthcare,hard
+2026-06-08,COMCAST CABLE COMM AUTOPAY 800-COMCAST,-89.00,utilities,easy
+2026-06-09,SQ *FARMERS MKT STALL 12,-23.50,groceries,hard
+2026-06-10,APPLE.COM/BILL 866-712-7753 CA,-2.99,subscriptions,hard
+2026-06-10,COSTCO WHSE #0472 HAYWARD CA,-212.44,groceries,hard
+2026-06-11,CHEVRON 0093847 SAN JOSE CA,-47.88,transport,easy
+2026-06-11,MONTHLY MAINTENANCE FEE,-12.00,fees,easy
+2026-06-12,PAYPAL *STEAMGAMES 4029357733,-59.99,shopping,hard
+2026-06-13,ONLINE TRANSFER TO SAV ...4471 REF#IB0P9X,-500.00,transfer,easy
+2026-06-14,WHOLEFDS MKT 10259,-104.31,groceries,easy
+2026-06-14,SPOTIFY USA 8778873755 NY,-11.99,subscriptions,easy
+2026-06-15,ACH DEPOSIT NORTHWIND LOGISTICS PAYROLL PPD ID:1234567890,3184.22,income,easy
+2026-06-15,DR JULIA MENDES DDS PC,-180.00,healthcare,easy
+2026-06-16,LYFT *RIDE THU 6PM,-14.30,transport,easy
+2026-06-16,SQ *SWEETGREEN 1701 MARKET,-15.85,dining,easy
+2026-06-17,TARGET 00021384 SAN LEANDRO CA,-78.22,shopping,hard
+2026-06-18,FOREIGN TRANSACTION FEE,-1.14,fees,easy
+2026-06-18,BOOKS INC BERKELEY 5104862,-28.60,shopping,easy
+2026-06-19,EAST BAY MUD AUTOPAY WATER SVC,-61.20,utilities,easy
+2026-06-20,SQ *ROVING BARBER CO,-45.00,shopping,hard
+2026-06-21,AT&T *WIRELESS PAYMENT 800-331-0500,-95.44,utilities,easy
+2026-06-21,CHECKCARD 0620 GOOGLE *YouTubePremium,-13.99,subscriptions,easy
+2026-06-22,ZELLE PAYMENT TO M OKONKWO JPM99183,-220.00,transfer,easy
+2026-06-22,PHARMACA #12 BERKELEY CA,-31.75,healthcare,hard
+2026-06-23,SQ *TAQUERIA GUADALAJARA #3,-26.40,dining,easy
+2026-06-24,76 - CIRCLE K #2298,-38.90,transport,hard
+2026-06-24,OVERDRAFT PROTECTION XFER FEE,-10.00,fees,easy
+2026-06-25,ACH CREDIT STRIPE TRANSFER ST-X4K2 CONSULTING,950.00,income,hard
+2026-06-26,KAISER PERMANENTE MEMBER PMT,-95.00,healthcare,easy
+2026-06-27,SAFEWAY FUEL #4471,-44.05,transport,hard
+2026-06-28,REI #018 BERKELEY CA,-142.90,shopping,easy
+2026-06-29,ANNUAL MEMBERSHIP FEE,-95.00,fees,easy
+2026-06-30,MTA*NYCT PAYGO,-2.90,transport,hard

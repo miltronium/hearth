@@ -34,6 +34,24 @@ models:
     capabilities: [chat]
     source: mlx-community/Qwen2.5-Coder-14B-Instruct-4bit
 
+  # General-instruct workhorse (non-coder) — financial synthesis, categorization, narrative.
+  - id: mlx-community/Qwen2.5-14B-Instruct-4bit
+    backend: mlx
+    quant: 4bit
+    context: 32768
+    ram_gb: 9.0
+    capabilities: [chat]
+    source: mlx-community/Qwen2.5-14B-Instruct-4bit
+
+  # Small fine-tuning target — high-volume structured tasks (categorize, extract) after LoRA.
+  - id: mlx-community/Qwen2.5-3B-Instruct-4bit
+    backend: mlx
+    quant: 4bit
+    context: 32768
+    ram_gb: 2.0
+    capabilities: [chat]
+    source: mlx-community/Qwen2.5-3B-Instruct-4bit
+
   # Deterministic pseudo-model — the echo backend. No weights, always available; keeps
   # the walking skeleton servable with no MLX installed and nothing downloaded.
   - id: echo

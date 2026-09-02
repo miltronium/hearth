@@ -26,11 +26,20 @@ _ESCALATE_MODES = ("never", "on_low_confidence", "always")
 
 @dataclass(frozen=True)
 class ClassRule:
-    """Policy for one task class: where it runs and when it escalates."""
+    """Policy for one task class: where it runs, when it escalates, and on which model.
+
+    ``local_model`` is the per-class rung of a **local model ladder**: a small fast model for
+    high-volume structured classes (``classify``, ``extract``) and a larger one for synthesis
+    (``summarize``, ``draft``, ``reason``, ``chat``). It is optional — ``None`` (or ``"auto"``)
+    means "no opinion", and resolution falls through to ``defaults.local_model`` and then the
+    registry default exactly as it did before the field existed. See
+    :meth:`hearth.router.route.Router._local_model` for the full order.
+    """
 
     backend: str = "local"
     escalate: str = "never"
     threshold: float = 0.6
+    local_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,18 +98,40 @@ def default_policy_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "routing.yaml"
 
 
-def load_policy(path: Path | None = None) -> RoutingPolicy:
-    """Load and validate the routing policy, falling back to safe defaults on any error."""
+def _known_model_ids() -> set[str] | None:
+    """Servable model ids from the registry, or ``None`` when it can't be read.
+
+    Used to reject a per-class ``local_model`` that names a model nobody can serve — the
+    error belongs at config-load time, not at generation time. Deliberately best-effort: an
+    unreadable *registry* must not veto an otherwise valid *routing* config, so we skip the
+    check rather than fail closed on an unrelated file's problem.
+    """
+    try:
+        from ..registry import get_registry
+
+        return {entry.id for entry in get_registry().list()}
+    except Exception as exc:  # noqa: BLE001 — registry trouble ⇒ skip the check, don't veto
+        logger.warning("model registry unreadable; skipping local_model validation: %s", exc)
+        return None
+
+
+def load_policy(path: Path | None = None, known_models: set[str] | None = None) -> RoutingPolicy:
+    """Load and validate the routing policy, falling back to safe defaults on any error.
+
+    ``known_models`` overrides the set of ids a per-class ``local_model`` is checked against
+    (default: the model registry). Tests inject it to stay off ``config/models.yaml``.
+    """
     path = path or default_policy_path()
     try:
         raw = yaml.safe_load(path.read_text()) or {}
-        return _parse(raw)
+        known = known_models if known_models is not None else _known_model_ids()
+        return _parse(raw, known_models=known)
     except (OSError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
         logger.warning("invalid or missing routing.yaml (%s); using safe defaults: %s", path, exc)
         return _safe_defaults()
 
 
-def _parse(raw: dict) -> RoutingPolicy:
+def _parse(raw: dict, known_models: set[str] | None = None) -> RoutingPolicy:
     """Parse a raw dict into a validated policy. Raises on structural problems."""
     d = raw.get("defaults", {}) or {}
     defaults = Defaults(
@@ -120,10 +151,23 @@ def _parse(raw: dict) -> RoutingPolicy:
             raise ValueError(f"class {name!r}: backend must be one of {_BACKENDS}, got {backend!r}")
         if escalate not in _ESCALATE_MODES:
             raise ValueError(f"class {name!r}: escalate must be one of {_ESCALATE_MODES}")
+        local_model = spec.get("local_model")
+        if local_model is not None:
+            local_model = str(local_model)
+            # Fail here, not at generation time: a typo'd rung of the ladder is a config bug
+            # and should read as one. "auto" is the explicit "fall through to defaults" value
+            # and names no model, so it is never looked up.
+            unknown = known_models is not None and local_model not in known_models
+            if unknown and local_model != "auto":
+                raise ValueError(
+                    f"class {name!r}: local_model {local_model!r} is not in the model "
+                    f"registry (config/models.yaml); known ids: {sorted(known_models)}"
+                )
         classes[name] = ClassRule(
             backend=backend,
             escalate=escalate,
             threshold=float(spec.get("threshold", 0.6)),
+            local_model=local_model,
         )
 
     remotes: dict[str, RemoteConfig] = {}

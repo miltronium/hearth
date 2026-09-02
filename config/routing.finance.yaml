@@ -1,0 +1,48 @@
+# HEARTH FINANCE routing — a NO-EGRESS profile with a two-tier LOCAL model ladder.
+#
+# Same privacy guarantee as config/routing.private.yaml, expressed the same way as data:
+# EVERY task class runs `local` and escalates `never`, and there are ZERO remotes defined —
+# the router has nowhere to send a task even if a request explicitly asks to escalate.
+# Financial statements never leave this machine. See docs/PRIVACY.md.
+#
+# What this profile adds on top of `private`: a per-class `local_model`, so one policy file
+# expresses a *ladder* of local models rather than a single one.
+#
+#   tier 1 — Qwen2.5-3B-Instruct-4bit  (~2 GB, fast)  high-volume structured work:
+#            classify, extract, rank. One call per transaction; wants throughput, not prose.
+#   tier 2 — Qwen2.5-14B-Instruct-4bit (~9 GB, ~15 s cold load)  synthesis:
+#            summarize, draft, reason, chat, code. A handful of calls; wants quality.
+#
+# Model resolution order (first hit wins), see Router._local_model:
+#   explicit request model -> class local_model -> defaults.local_model -> registry default
+#
+# Every id below must exist in config/models.yaml; an unknown one is rejected when the
+# policy loads, not when generation is attempted.
+#
+# ARITHMETIC IS NOT A TASK CLASS. Totals and per-category aggregates are computed in Python
+# by the caller (examples/finance/run_finance_ladder.py) and handed to tier 2 as facts. No
+# model on this ladder is ever asked to add up money.
+#
+# Point HEARTH at this file with:  HEARTH_ROUTING_YAML=config/routing.finance.yaml
+# Verify the seal with:            HEARTH_ROUTING_YAML=config/routing.finance.yaml \
+#                                    scripts/hearth_private.sh --check
+
+defaults:
+  local_model: auto                # each class pins its own rung; this is the fallback
+  remote: none                     # names a remote that does not exist -> remote_for() == None
+  remote_budget_tokens_per_day: 0  # no remote budget at all
+
+classes:
+  # --- tier 1: small + fast, one call per row -------------------------------------------
+  classify: { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
+  extract:  { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
+  rank:     { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
+
+  # --- tier 2: larger, a handful of calls -----------------------------------------------
+  summarize: { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }
+  draft:     { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }
+  reason:    { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }
+  chat:      { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }
+  code:      { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }
+
+remotes: {}   # no escalation targets exist — the router cannot egress a task

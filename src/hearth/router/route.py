@@ -28,7 +28,7 @@ from ..observability.metrics import (
 )
 from ..providers.base import GenRequest, GenResult, ModelProvider
 from .classify import classify
-from .policy import RoutingPolicy, get_policy
+from .policy import ClassRule, RoutingPolicy, get_policy
 
 logger = logging.getLogger("hearth.router")
 
@@ -122,7 +122,7 @@ class Router:
         """Classify + apply policy/confidence/budget gates. Does not execute (dry-run)."""
         task_class, method = classify(req.messages, intent=intent)
         rule = self.policy.rule_for(task_class)
-        local_model = self._local_model(req)
+        local_model = self._local_model(req, rule)
 
         # A class pinned to `remote` (e.g. reason) escalates by class policy.
         base_backend = rule.backend
@@ -214,7 +214,7 @@ class Router:
         # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
         adapter_path = None
         if not decision.would_escalate:
-            adapter_path = self._resolve_adapter(adapter, decision.task_class)
+            adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
 
         started = time.perf_counter()
         result = self._generate(provider, decision, req, adapter_path)
@@ -289,13 +289,24 @@ class Router:
             logger.error("provider %s failed to generate: %s", provider.name, exc)
             raise ProviderError(f"provider {provider.name!r} failed: {exc}") from exc
 
-    def _local_model(self, req: GenRequest) -> str:
-        """Local model to serve with: an explicit non-'auto' request model wins over policy.
+    def _local_model(self, req: GenRequest, rule: ClassRule) -> str:
+        """Local model to serve this request with — where the local model *ladder* resolves.
 
-        Resolution order: explicit request model → policy ``local_model`` → registry default.
+        Resolution order, first hit wins:
+
+          1. an explicit non-``auto`` request model — a client pin always wins;
+          2. the class rule's ``local_model`` — the per-class rung (e.g. a small fast model
+             for ``classify``/``extract``, a larger one for ``summarize``/``draft``);
+          3. ``defaults.local_model`` from the routing policy;
+          4. the model registry's default id.
+
+        A rule with no ``local_model`` (or ``"auto"``) is a no-op: steps 3–4 decide exactly
+        as they did before the field existed, so existing configs are unaffected.
         """
         if req.model and req.model not in ("auto", ""):
             return req.model
+        if rule.local_model and rule.local_model != "auto":
+            return rule.local_model
         configured = self.policy.defaults.local_model
         if configured and configured != "auto":
             return configured
@@ -307,14 +318,26 @@ class Router:
         cfg = self.policy.remote_for()
         return cfg.model if cfg else self.policy.defaults.remote
 
-    def _resolve_adapter(self, requested: str | None, task_class: str) -> str | None:
+    def _resolve_adapter(
+        self, requested: str | None, task_class: str, model: str | None = None
+    ) -> str | None:
         """Resolve the adapter to actually load for a local request → an on-disk path.
 
         Resolution:
           * an explicit ``requested`` id (``hearth.adapter``) wins — served behind the A/B
             flag even if it's still a candidate (ARCHITECTURE §5);
-          * otherwise the promoted adapter for the task class serves by default, if any;
+          * otherwise the promoted adapter for the task class serves by default, **if it was
+            trained on the model actually being served**;
           * else ``None`` (base weights).
+
+        The base-model check matters once a class pins its own ``local_model``: a ladder can
+        route a class to a different base than its promoted adapter was tuned on (e.g. a
+        7B-trained ``classify`` adapter landing on a 3B rung), and LoRA weights of the wrong
+        shape fail at generation time — every request then pays a doomed load plus the
+        degrade-and-retry in :meth:`_generate`. Skipping the mismatch keeps that cost off the
+        request; an explicitly requested adapter is still honoured, since that is a
+        deliberate operator choice. ``model=None`` means "caller didn't say what is serving",
+        which skips the check and preserves the pre-ladder behaviour.
 
         Returns ``None`` (and never raises) when there's no adapter store or the requested
         id can't be resolved — routing must not fail because an adapter is missing; it
@@ -327,7 +350,18 @@ class Router:
             if requested:
                 return store.resolve_path(requested, allow_candidate=True)
             promoted = store.promoted_for(task_class)
-            return store.resolve_path(promoted.id) if promoted else None
+            if promoted is None:
+                return None
+            if model is not None and promoted.base_model and promoted.base_model != model:
+                logger.debug(
+                    "adapter %s was trained on %s but %s is served by %s; serving base weights",
+                    promoted.id,
+                    promoted.base_model,
+                    task_class,
+                    model,
+                )
+                return None
+            return store.resolve_path(promoted.id)
         except Exception:  # noqa: BLE001 — degrade to base weights; never fail the request
             logger.warning("adapter %r unresolved; serving base weights", requested)
             return None

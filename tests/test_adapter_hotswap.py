@@ -6,7 +6,7 @@ from __future__ import annotations
 from hearth.observability.budget import BudgetAccountant
 from hearth.observability.metrics import MetricsStore
 from hearth.providers.base import Capabilities, GenRequest, GenResult, Message
-from hearth.registry import AdapterStore
+from hearth.registry import AdapterStore, get_registry
 from hearth.router import Router, RoutingPolicy
 from hearth.router.classify import TASK_CLASSES
 from hearth.router.policy import ClassRule, Defaults
@@ -73,8 +73,14 @@ def test_explicit_candidate_adapter_is_resolved_and_passed(tmp_path):
 
 def test_promoted_adapter_serves_by_default_for_its_class(tmp_path):
     store = AdapterStore(path=tmp_path / "adapters.json")
+    # Registered against the base this policy actually serves — auto-attach requires the
+    # match (see test_promoted_adapter_skipped_when_base_model_differs).
     store.register(
-        "extract-1", base_model="b", task="extract", train_run_id="r", adapter_path="/a/extract-1"
+        "extract-1",
+        base_model=get_registry().default_id,
+        task="extract",
+        train_run_id="r",
+        adapter_path="/a/extract-1",
     )
     store.promote("extract-1", gate_passed=True)
     provider = RecordingProvider()
@@ -82,6 +88,49 @@ def test_promoted_adapter_serves_by_default_for_its_class(tmp_path):
 
     # No explicit adapter → the promoted adapter for the classified task is selected.
     router.route(_req(), intent="extract")
+    assert provider.seen_adapters == ["/a/extract-1"]
+
+
+def test_promoted_adapter_skipped_when_base_model_differs(tmp_path):
+    """A per-class ``local_model`` rung can move a class off the base its adapter was tuned
+    on; LoRA weights of the wrong shape fail at generation, so the mismatch is skipped."""
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register(
+        "extract-1",
+        base_model="mlx-community/Some-7B-Instruct-4bit",
+        task="extract",
+        train_run_id="r",
+        adapter_path="/a/extract-1",
+    )
+    store.promote("extract-1", gate_passed=True)
+    provider = RecordingProvider()
+    policy = RoutingPolicy(
+        defaults=Defaults(),
+        classes={"extract": ClassRule(local_model="mlx-community/Some-3B-Instruct-4bit")},
+        remotes={},
+    )
+    router = Router(
+        local_provider=provider,
+        policy=policy,
+        budget=BudgetAccountant(1000),
+        metrics=MetricsStore(),
+        adapters=store,
+    )
+
+    router.route(_req(), intent="extract")
+    assert provider.seen_adapters == [None]  # base weights, not a doomed adapter load
+
+
+def test_explicit_adapter_request_overrides_the_base_model_check(tmp_path):
+    """An operator asking for a specific adapter by id is a deliberate A/B choice."""
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register(
+        "extract-1", base_model="b", task="extract", train_run_id="r", adapter_path="/a/extract-1"
+    )
+    provider = RecordingProvider()
+    router = _router(provider, store)
+
+    router.route(_req(), intent="extract", adapter="extract-1")
     assert provider.seen_adapters == ["/a/extract-1"]
 
 

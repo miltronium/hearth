@@ -10,9 +10,15 @@
 #   remote_budget_tokens_per_day  per-UTC-day cap on remote tokens (budget accountant)
 #
 # classes.<name>:
-#   backend    local | remote        where the class runs by default
-#   escalate   never | on_low_confidence | always
-#   threshold  confidence floor for on_low_confidence classes (0..1)
+#   backend      local | remote      where the class runs by default
+#   escalate     never | on_low_confidence | always
+#   threshold    confidence floor for on_low_confidence classes (0..1)
+#   local_model  optional per-class local model id — one rung of a *local model ladder*
+#                (e.g. a small fast model for classify/extract, a larger one for
+#                summarize/draft). Must exist in config/models.yaml or the policy is
+#                rejected at load time. Omit (or "auto") to inherit defaults.local_model.
+#                Resolution order: request model -> class local_model -> defaults
+#                .local_model -> registry default. See config/routing.finance.yaml.
 #
 # remotes.<name>:
 #   protocol   anthropic | openai    anthropic uses the official SDK; openai is generic
