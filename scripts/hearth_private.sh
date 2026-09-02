@@ -24,8 +24,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-ROUTING="config/routing.private.yaml"
-export HEARTH_ROUTING_YAML="$REPO_ROOT/$ROUTING"
+# Which no-egress profile to seal. Defaults to routing.private.yaml; an inherited
+# HEARTH_ROUTING_YAML (or --profile PATH) selects another — e.g. routing.finance.yaml, the
+# two-tier local ladder. Honouring an override is SAFE because it does not weaken the gate:
+# step 2 below re-runs every no-egress assertion against whatever profile is actually
+# selected, and fails closed if it leaks. Sealing only the profile this script hardcoded,
+# while the operator runs a different one, is the more dangerous option — it verifies
+# something other than the thing being run (docs/TIERS.md, ADR-C008).
+ROUTING="${HEARTH_ROUTING_YAML:-config/routing.private.yaml}"
+case "${1:-}" in --profile) ROUTING="${2:?--profile needs a path}"; shift 2 ;; esac
+case "$ROUTING" in /*) : ;; *) ROUTING="$REPO_ROOT/$ROUTING" ;; esac
+[ -f "$ROUTING" ] || { echo "error: routing profile not found: $ROUTING" >&2; exit 1; }
+export HEARTH_ROUTING_YAML="$ROUTING"
 export HEARTH_HOST="127.0.0.1"
 export HEARTH_BACKEND="mlx"
 export HF_HUB_OFFLINE=1
