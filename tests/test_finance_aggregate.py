@@ -148,6 +148,21 @@ def test_a_caller_owning_merchant_knowledge_can_supply_its_own_key():
 BANNED_CALLS = frozenset(
     {"system", "popen", "urlopen", "socket", "connect", "sendall", "eval", "exec", "__import__"}
 )
+# `connect` above is aimed at sockets, but the name is not unique to them: `sqlite3.connect`
+# is the ordinary way to open a local database file and reaches nothing. Exempting it by its
+# full dotted spelling keeps the ban meaningful while letting the local store be written the
+# way anyone would expect — an over-broad rule that forces obscure workarounds ends up
+# weakening itself, because the next person just deletes it.
+EXEMPT_DOTTED = frozenset({"sqlite3.connect"})
+
+
+def _dotted(func: ast.AST) -> str:
+    """Render a call target as its dotted source spelling, e.g. ``sqlite3.connect``."""
+    if isinstance(func, ast.Attribute):
+        return f"{_dotted(func.value)}.{func.attr}" if func.value else func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
 BANNED_IMPORTS = frozenset(
     {"socket", "ssl", "http", "urllib", "requests", "httpx", "aiohttp", "subprocess", "ftplib",
      "smtplib", "telnetlib", "xmlrpc", "asyncio"}
@@ -182,5 +197,7 @@ def test_no_module_can_reach_a_shell_or_a_dynamic_import():
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func = node.func
+                if _dotted(func) in EXEMPT_DOTTED:
+                    continue
                 name = getattr(func, "attr", None) or getattr(func, "id", None)
                 assert name not in BANNED_CALLS, f"{path.name} calls {name}"

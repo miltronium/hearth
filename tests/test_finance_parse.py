@@ -365,7 +365,10 @@ def test_a_mapping_that_does_not_fit_the_header_fails_before_any_row_is_read():
 
 
 def test_a_repeated_mapped_column_name_fails_closed():
-    rows = [["Posting Date", "Description", "Amount", "Amount"], ["03/01/2026", "X", "1.00", "2.00"]]
+    rows = [
+        ["Posting Date", "Description", "Amount", "Amount"],
+        ["03/01/2026", "X", "1.00", "2.00"],
+    ]
     with pytest.raises(MappingError, match="repeats mapped column"):
         parse_rows(rows, SAVINGS_MAPPING)
 
