@@ -77,11 +77,26 @@ coreml = [
 mcp = [
     "mcp>=1.2",
 ]
+# Extra document formats for the path-taking file tools (mcp/files.py): XLSX via openpyxl
+# and text-layer PDF via pypdf. Install with:  uv sync --extra files
+# Both are imported lazily inside their format handlers, so the core install stays light and
+# text/CSV/JSON keep working without them; a handler whose library is missing raises a
+# FileAccessError naming this extra rather than a raw ImportError.
+files = [
+    "openpyxl>=3.1",
+    "pypdf>=5.0",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.8",
+    # The [files] parsers are also dev deps: mcp/files.py is a security boundary, and its
+    # refusal paths (scanned PDF, uncached formulas, no content in an error) are only
+    # actually exercised when the parsers are present. Tests importorskip so a core-only
+    # environment still passes.
+    "openpyxl>=3.1",
+    "pypdf>=5.0",
 ]
 
 [project.scripts]

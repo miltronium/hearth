@@ -45,6 +45,9 @@ def build_server(tools: HearthTools | None = None):
 
     # Path-taking variants — the agent passes a path and never holds the content. Gated by
     # the HEARTH_FILE_ROOTS allowlist in hearth.mcp.files (deny-by-default when unset).
+    # Formats come from that reader, not from here: text, CSV, JSON, XLSX and text-layer
+    # PDF all arrive through the same three tools, so the MCP surface never grows a
+    # per-format variant an agent would have to choose between.
 
     @mcp.tool(name="hearth_summarize_file")
     def hearth_summarize_file(path: str, max_words: int | None = None) -> str:

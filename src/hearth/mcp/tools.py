@@ -11,7 +11,8 @@ itself, so an agent can offload work on a confidential file without ever reading
 own context — see docs/PRIVACY.md, "the caller caveat". Because that makes them a file-read
 primitive in an agent's hands, every one of them goes through
 :func:`hearth.mcp.files.read_text_file`, which is deny-by-default and allowlisted by
-``HEARTH_FILE_ROOTS``.
+``HEARTH_FILE_ROOTS``. That reader is where format support lives — text, CSV, JSON, XLSX
+and text-layer PDF — so the tools below stay format-agnostic and gain a new one for free.
 
 :func:`build_toolset` wires a :class:`HearthTools` bound to a shared router + RAG index;
 :mod:`hearth.mcp.server` registers each bound method as an MCP tool. Every function returns
@@ -123,8 +124,10 @@ class HearthTools:
     # content. Each one reads the file here, locally, through the allowlisted reader and
     # then runs the identical local prompt — so the only thing that crosses back to the
     # agent is the task's result (a summary, a label, the requested fields), never the
-    # file. Refusals raise hearth.mcp.files.FileAccessError, whose messages quote the path
-    # and the reason but never the content.
+    # file. Every format the reader understands (text, CSV, JSON, XLSX, text-layer PDF)
+    # therefore works here without a per-format tool. Refusals raise
+    # hearth.mcp.files.FileAccessError, whose messages quote the path and the reason but
+    # never the content.
 
     def summarize_file(self, path: str, max_words: int | None = None) -> str:
         """Summarize the file at ``path`` locally, without the caller ever reading it.
