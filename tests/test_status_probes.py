@@ -71,11 +71,16 @@ def test_weights_in_the_hub_cache_are_loadable(tmp_path: Path):
     assert fact.data["loadable_by_provider"] is True
 
 
-def test_a_pulled_model_outside_the_hub_cache_is_flagged_invisible(tmp_path: Path):
-    """The trap: ``hearth models pull`` writes to ~/.hearth/models, mlx-lm reads elsewhere.
+def test_a_pulled_model_outside_the_hub_cache_is_still_loadable(tmp_path: Path):
+    """Weights in ~/.hearth/models are loadable even when HF_HUB_CACHE points elsewhere.
 
-    Downloaded is a configuration; loadable is the outcome. Only the second serves a request,
-    so a probe that reported "present" here would be reporting the wrong thing.
+    This used to be the trap — ``hearth models pull`` wrote to ~/.hearth/models while
+    mlx-lm read the hub cache, so a pulled model was unreachable. The provider now resolves
+    HEARTH's own directory FIRST (providers/mlx.py:resolve_local_model) before falling
+    through to huggingface_hub's chain, so this probe must agree: downloaded is a
+    configuration, loadable is the outcome, and the outcome changed when the rule did.
+    A probe that still reported INVISIBLE here would itself be reporting a posture the
+    code does not have — the exact failure this tool exists to catch.
     """
     root, hub, home = tmp_path / "repo", tmp_path / "hub", tmp_path / "home"
     (root / "config").mkdir(parents=True)
@@ -85,11 +90,11 @@ def test_a_pulled_model_outside_the_hub_cache_is_flagged_invisible(tmp_path: Pat
 
     section = probe_models(root=root, home=home, environ={"HF_HUB_CACHE": str(hub)})
     fact = next(f for f in section.facts if f.name == "org/model-a")
-    assert fact.level == LEVEL_WARN
-    assert "INVISIBLE" in fact.value
+    assert fact.level == LEVEL_OK
+    assert "loadable" in fact.value
     assert fact.data["in_hearth_models"] is True
-    assert fact.data["loadable_by_provider"] is False
-    assert "HF_HUB_CACHE" in fact.detail
+    assert fact.data["loadable_by_provider"] is True
+    assert "models_dir" in fact.detail
 
 
 def test_pointing_hf_hub_cache_at_the_hearth_dir_makes_it_loadable(tmp_path: Path):

@@ -239,21 +239,22 @@ def probe_models(
                 continue  # the echo pseudo-model has nothing to download
             in_hub = hub.get(source)
             in_pulled = pulled.get(source)
-            loadable = bool(in_hub and in_hub.present) or (
-                same_dir and bool(in_pulled and in_pulled.present)
-            )
+            # The provider resolves HEARTH's own models_dir FIRST
+            # (providers/mlx.py:resolve_local_model) and only then falls through to
+            # huggingface_hub's HF_HUB_CACHE -> HF_HOME -> default chain. So weights in
+            # either directory are genuinely loadable; this probe must agree with that
+            # rule, or the status tool becomes another thing that reports a posture the
+            # code does not actually have.
+            in_pulled_ok = bool(in_pulled and in_pulled.present)
+            loadable = bool(in_hub and in_hub.present) or in_pulled_ok
             if loadable:
-                w = in_hub if (in_hub and in_hub.present) else in_pulled
+                from_hearth = in_pulled_ok and not (in_hub and in_hub.present)
+                w = in_pulled if from_hearth else in_hub
                 level, value = LEVEL_OK, f"on disk, loadable ({_human_bytes(w.total_bytes)})"
-                detail = f"{w.path}"
-            elif in_pulled and in_pulled.present:
-                level = LEVEL_WARN
-                size = _human_bytes(in_pulled.total_bytes)
-                value = f"pulled but INVISIBLE to the provider ({size})"
-                detail = (
-                    f"weights are in {in_pulled.path} but HF_HUB_CACHE does not point there, "
-                    f"so mlx-lm will look in {hub_dir} and try to download again "
-                    f"(set HF_HUB_CACHE={models_dir})"
+                detail = f"{w.path}" + (
+                    " (resolved from HEARTH's models_dir, not the hub cache)"
+                    if from_hearth and not same_dir
+                    else ""
                 )
             else:
                 level, value = LEVEL_WARN, "registered, NO weights on disk"

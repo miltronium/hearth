@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
+from ..config import get_settings
 from .base import (
     FINISH_STOP,
     Capabilities,
@@ -30,6 +31,40 @@ def mlx_available() -> bool:
     import importlib.util
 
     return importlib.util.find_spec("mlx_lm") is not None
+
+
+def resolve_local_model(model_id: str) -> str:
+    """Return a local snapshot path for ``model_id`` if HEARTH has one, else ``model_id``.
+
+    ``hearth models pull`` downloads into ``settings.models_dir`` (``~/.hearth/models``),
+    but ``mlx_lm.load`` asks huggingface_hub, which resolves ``HF_HUB_CACHE`` ->
+    ``HF_HOME/hub`` -> ``~/.cache/huggingface/hub`` and knows nothing about HEARTH. The two
+    halves never agreed: a freshly pulled model was invisible to the provider unless the
+    operator happened to export ``HF_HUB_CACHE`` themselves, so ``hearth models pull X``
+    followed by a run would report X missing — or quietly serve a *different* model that
+    happened to sit in the default cache.
+
+    Resolution is explicit rather than by mutating ``os.environ``: a hidden global would
+    make this module disagree with anything that inspects the environment (such as
+    ``scripts/hearth_status.py``), which is the class of bug this is fixing. HEARTH's own
+    directory is checked first; anything else falls through to huggingface_hub's normal
+    resolution, so a model in the default cache still loads and an operator who set
+    ``HF_HUB_CACHE`` deliberately is unaffected.
+    """
+    try:  # deferred: huggingface_hub is only present with the mlx/embeddings extras
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return model_id
+    models_dir = get_settings().models_dir
+    if not models_dir.is_dir():
+        return model_id
+    try:
+        return snapshot_download(
+            repo_id=model_id, cache_dir=str(models_dir), local_files_only=True
+        )
+    except Exception:
+        # Not in HEARTH's directory (or not a repo id at all — it may already be a path).
+        return model_id
 
 
 class MLXProvider:
@@ -72,7 +107,7 @@ class MLXProvider:
         from mlx_lm import load  # deferred heavy import
 
         kwargs = {"adapter_path": adapter} if adapter else {}
-        loaded = load(self.model_id, **kwargs)
+        loaded = load(resolve_local_model(self.model_id), **kwargs)
         self._ensure_stop_tokens(loaded[1])
         self._cache[key] = loaded
         return loaded
