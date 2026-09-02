@@ -46,10 +46,12 @@ library **lazily inside the handler**, so the core install stays light — ``ope
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import importlib
 import io
 import json
+import logging
 import stat
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time
@@ -274,6 +276,28 @@ def _read_xlsx(data: bytes, requested: str) -> str:
     return "\n\n".join(blocks)
 
 
+@contextlib.contextmanager
+def _silenced(logger_name: str):
+    """Suppress a third-party logger for the duration of a parse.
+
+    The exception paths in this module are careful never to quote file content back to the
+    caller, because that exception travels to the very agent we are keeping the content away
+    from. A library's *logger* bypasses that entirely: pypdf, handed a file that is not a PDF,
+    writes ``invalid pdf header: b'<the first five bytes of your file>'`` straight to stderr
+    before any exception is raised. Those bytes are the document. Silencing the logger for the
+    duration of the parse closes the one channel the try/except cannot reach.
+    """
+    logger = logging.getLogger(logger_name)
+    previous, previously_propagated = logger.level, logger.propagate
+    logger.setLevel(logging.CRITICAL + 1)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+        logger.propagate = previously_propagated
+
+
 def _read_pdf(data: bytes, requested: str) -> str:
     """Extract a PDF's **text layer** — and refuse a scan rather than returning near-nothing.
 
@@ -288,14 +312,15 @@ def _read_pdf(data: bytes, requested: str) -> str:
     """
     pypdf = _import_optional("pypdf", "PDF")
     try:
-        reader = pypdf.PdfReader(io.BytesIO(data))
-        if reader.is_encrypted:
-            # An empty user password is common on statements; anything else we can't open.
-            if not reader.decrypt(""):
-                raise FileAccessError(
-                    f"PDF is password-protected and cannot be opened: {requested!r}"
-                )
-        pages = [(page.extract_text() or "") for page in reader.pages]
+        with _silenced("pypdf"):
+            reader = pypdf.PdfReader(io.BytesIO(data))
+            if reader.is_encrypted:
+                # An empty user password is common on statements; anything else we can't open.
+                if not reader.decrypt(""):
+                    raise FileAccessError(
+                        f"PDF is password-protected and cannot be opened: {requested!r}"
+                    )
+            pages = [(page.extract_text() or "") for page in reader.pages]
     except FileAccessError:
         raise
     except Exception:

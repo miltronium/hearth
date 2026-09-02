@@ -772,3 +772,28 @@ def test_summarize_file_refuses_a_scanned_pdf_instead_of_summarizing_nothing(tmp
     with pytest.raises(FileAccessError) as excinfo:
         tools.summarize_file(str(root / "scan.pdf"))
     assert "OCR" in str(excinfo.value)
+
+def test_a_malformed_pdf_leaks_nothing_to_stderr(tmp_path, root, capfd):
+    """pypdf logs the file's first bytes; the try/except cannot reach that channel.
+
+    Handed something that is not a PDF, pypdf writes ``invalid pdf header: b'<first five
+    bytes>'`` to stderr before raising. Those bytes are the document. Every other refusal path
+    in this module is careful never to quote content back to the caller — an exception travels
+    to the very agent we are keeping the content away from — and a library logger would have
+    been the one hole left. Asserting on the captured stream rather than on the exception,
+    because the exception was already clean while the leak was happening.
+    """
+    pytest.importorskip("pypdf")
+    target = root / "statement.pdf"
+    target.write_bytes(b"CANARYACCOUNT 12345 BALANCE 99999")
+    settings = _settings(tmp_path, [root])
+
+    capfd.readouterr()  # drop anything buffered before the call under test
+    with pytest.raises(FileAccessError) as exc:
+        read_text_file(target, settings=settings)
+    captured = capfd.readouterr()
+
+    assert "CANARY" not in str(exc.value)
+    assert "CANARY" not in captured.err
+    assert "CANARY" not in captured.out
+    assert captured.err == ""
