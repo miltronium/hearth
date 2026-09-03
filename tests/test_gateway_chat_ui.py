@@ -144,3 +144,25 @@ def test_no_cors_middleware_was_added(client):
         },
     )
     assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+
+
+def test_the_bare_origin_redirects_to_the_chat_page(client):
+    """Opening http://127.0.0.1:8080 should land on the UI, not a 404.
+
+    Pinned because it did not, the first time this shipped: the operator started the daemon,
+    opened the root, and got two 404s that read as a broken server rather than a wrong path.
+    """
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/chat"
+
+
+def test_the_redirect_does_not_bypass_auth_on_the_api(tmp_path):
+    """The redirect is navigational only — /v1/* keeps its token requirement.
+
+    Uses the auth-ON client deliberately: the shared `client` fixture runs with auth off, so
+    asserting against it would have passed without proving anything.
+    """
+    auth_client, _ = _auth_client(tmp_path)
+    assert auth_client.get("/", follow_redirects=False).status_code == 307
+    assert auth_client.post("/v1/chat/completions", json={"messages": []}).status_code == 401

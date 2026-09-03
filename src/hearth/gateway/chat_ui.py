@@ -49,7 +49,7 @@ from __future__ import annotations
 from typing import Final
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 # One string, no build step, no dependencies. Kept here rather than in a template file so
 # the no-egress test can grep exactly the bytes the route serves.
@@ -417,3 +417,14 @@ def register_chat_ui(app: FastAPI) -> None:
     def chat_ui() -> HTMLResponse:
         """Self-contained local chat UI (no external requests, no injected token)."""
         return HTMLResponse(content=chat_ui_html())
+
+    @app.get("/", include_in_schema=False)
+    def root() -> RedirectResponse:
+        """Send the bare origin to the UI.
+
+        Somebody who starts the daemon and opens http://127.0.0.1:8080 means the chat page;
+        a 404 there reads as "the server is broken" rather than "you want /chat", and that is
+        exactly what happened the first time this shipped. 307 rather than 301 so a browser
+        never caches the redirect and a future root route is not shadowed by history.
+        """
+        return RedirectResponse(url="/chat", status_code=307)

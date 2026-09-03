@@ -422,3 +422,85 @@ Related: `docs/PRIVACY.md` (the threat model and the caller caveat) · `docs/TIE
 there is no remote backend to escalate to) · `docs/APEX_seam.md` §5 (why HEARTH parses
 structure and never infers financial semantics) · `examples/finance/README.md` (the two-tier
 ladder, measured, on synthetic data) · `docs/LEARNING_plan.md` §2 (the flywheel).
+
+---
+
+## Appendix A. Drafting a mapping with the local model — `scripts/hearth_map_draft.py`
+
+§2 says to author the mapping from headers alone, and that stays true: **headers are safe to
+share, values are not.** But some of the mapping cannot be settled from headers at all. Whether
+`03/04/2026` is March or April, whether a "Debit" column carries magnitudes or signed values,
+whether `(50.00)` occurs anywhere in the file — those live in the cells. A cloud agent
+structurally cannot help you with them, because helping means reading your transactions. A
+**local** model may read them freely. That asymmetry is the whole reason HEARTH exists, and
+this tool is it pointed at the one job that needs it:
+
+```sh
+HEARTH_FILE_ROOTS=~/hearth-statements \
+  uv run --no-sync python scripts/hearth_map_draft.py ~/hearth-statements/incoming
+```
+
+It walks the directory, groups files by header signature (one mapping per format, not per
+file), and writes a **draft** YAML per format into `~/hearth-statements/mappings/` — or
+wherever `--out` points. A draft is not a mapping. It is a proposal you review.
+
+### What decides what
+
+| Decided in code, from every row | Proposed by the local model | Left to you |
+|---|---|---|
+| `date_format` — exhaustively; **AMBIGUOUS** if the file never disambiguates | which numeric column is the amount vs a running balance | `sign`, always |
+| numeric vs text vs date vs empty per column | which text column is the description | whichever fields came back `AMBIGUOUS` / `UNRESOLVED` |
+| `negative_notation` — parens and trailing minus, as they actually occur | which of two date columns dates the transaction | whether a "Balance" column really is the account balance |
+| `decimal_separator` / `thousands_separator`, by trial | a name for the format (a label; it changes no number) | |
+| debit/credit pair vs one signed column | | |
+
+The model is **never asked for the date format.** That is deliberate and it is the most
+important line in the tool: reconciliation cannot catch a wrong date format. Sums do not depend
+on dates, so `%m/%d/%Y` where `%d/%m/%Y` was meant passes every arithmetic check you have while
+silently filing transactions in the wrong months. It is the one semantic error with no
+downstream gate, so it is settled by scanning **every** row — one `25/12` anywhere in the file
+settles it — and when nothing in the file settles it, the draft says `AMBIGUOUS` and **refuses
+to load** until you choose. Do not "just pick the usual one".
+
+Everything the model proposes is validated against the measurements before it is written: a
+column name it did not copy exactly, or one whose measured type contradicts the role, is
+dropped and the field is left `UNRESOLVED`.
+
+### What runs before a draft is written
+
+Every complete draft is trial-parsed against the real files with `parse_rows` and reconciled.
+**A draft that cannot parse its own file is not written** — you get the row and column it
+failed on, never the parser's message (that message quotes the cell). Where only the date
+format or the description column is still open, the draft is parsed under *every* candidate for
+them; neither changes a total, which is exactly why neither is proved by doing so.
+
+No control total is ever invented. The sum in the draft is labelled `unverified`, and it is:
+supply the real one when you ingest (§4.1).
+
+### Reading a draft
+
+The comment block at the top of each file lists every field under **MECHANICALLY DETERMINED**,
+**PROPOSED BY THE LOCAL MODEL**, or **NOT SETTLED**, with the evidence for each — then the
+verification, then a numbered list of what to confirm. Work through that list, replace every
+`AMBIGUOUS` and `UNRESOLVED`, delete the `notes:` line, and the file becomes an ordinary
+mapping. `sign` is on the confirm list every time, including when a running balance settled it:
+arithmetic can only catch a reversed sign against a control total, and none was supplied.
+
+An existing file is **never** overwritten without `--force`. Your reviewed mapping outranks a
+fresh draft, permanently.
+
+### Privacy, and the flags
+
+The tool reads values — locally, and that is the point — but it never prints one. Stdout gets
+headers, measured types, counts and the model's structural conclusions, because stdout is what
+ends up pasted into a chat window. The trial-parse total is written into the draft (local,
+where a reviewer needs it) and reaches the terminal only under `--show-total`.
+
+- `--no-model` — mechanical determination only. Model-proposed fields stay `UNRESOLVED`; the
+  draft is still written, still says so, and is never quietly worse.
+- `--model <id>` — a specific local model (default: the registry default). It runs at
+  temperature 0 so the same file drafts the same way twice.
+- If mlx or the weights are missing, this is the `--no-model` path with a note saying why.
+
+Reads go through `read_table`, so `HEARTH_FILE_ROOTS` gates this tool exactly as it gates
+everything else. It has no privileges of its own.
