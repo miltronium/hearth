@@ -31,6 +31,7 @@ from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
 from ..serving import ModelManager
+from .agent_route import register_agent_route
 from .auth import require_token
 from .chat_ui import register_chat_ui
 from .json_mode import (
@@ -290,6 +291,11 @@ def create_app(
             ],
             answer=result.answer,
         )
+
+    # The bounded agent loop at POST /v1/hearth/agent: authenticated like every other /v1
+    # route, read-only vetted tools only, budgets clamped server-side, streamed step by step.
+    # See hearth.gateway.agent_route and docs/AGENT.md §9.
+    register_agent_route(app)
 
     # Operator chat UI at GET /chat: static, self-contained, no credential in the document
     # and no auth dependency (a browser navigation cannot send a bearer header). It changes

@@ -59,11 +59,15 @@ def test_chat_page_makes_no_external_requests(client):
 
 
 def test_chat_page_calls_only_same_origin_paths():
-    """Every fetch target is a relative path on this gateway."""
+    """Every fetch target is a relative path on this gateway.
+
+    An exact set, not a subset: a new endpoint appearing in this page is a decision, and it
+    should have to be made here rather than slipping in under a looser assertion.
+    """
     html = chat_ui_html()
     targets = re.findall(r"""fetch\(\s*["']([^"']+)["']""", html)
     assert targets, "expected the page to call the gateway"
-    assert set(targets) == {"/v1/models", "/v1/chat/completions"}
+    assert set(targets) == {"/v1/models", "/v1/chat/completions", "/v1/hearth/agent"}
 
 
 def test_chat_page_streams_and_surfaces_truncation():
@@ -81,6 +85,99 @@ def test_chat_page_streams_and_surfaces_truncation():
     assert "hearth.backend" in html
     # Error paths are rendered, not hung on.
     assert "401" in html and "422" in html
+
+
+# -- agent mode ---------------------------------------------------------------------------
+
+
+def test_agent_mode_defaults_to_off_in_the_served_markup(client):
+    """The toggle ships unchecked, and a browser with no stored preference gets plain chat.
+
+    Asserted on the served bytes rather than on "we didn't set it": the default is what the
+    document says, and the document is what an operator's first visit renders. Both halves
+    matter — an unchecked box that a script ticks on load is still on by default.
+    """
+    html = client.get("/chat").text
+    tag = re.search(r"<input[^>]*id=\"agentmode\"[^>]*>", html)
+    assert tag, "the agent-mode toggle is missing from the page"
+    assert "checked" not in tag.group(0), "agent mode must ship OFF"
+
+    # And the stored preference has to say "on" explicitly; anything else (absent, corrupt,
+    # localStorage unavailable) falls to the safe side.
+    assert 'window.localStorage.getItem(AGENT_KEY) === "on"' in html
+    assert re.search(r"catch \(e\) \{ return false; \}", html)
+
+
+def test_agent_mode_off_touches_only_chat_completions():
+    """With the toggle off the page is the page that shipped before agent mode existed."""
+    html = chat_ui_html()
+    # The single branch: nothing agent-shaped runs unless agentOn() is true.
+    assert "if (agentOn()) { runAgent(text); return; }" in html
+    # /v1/hearth/agent is reachable from exactly one function, and that function is the
+    # branch above — not from send(), not from loadModels().
+    assert html.count('fetch("/v1/hearth/agent"') == 1
+
+
+def test_agent_mode_renders_every_step_in_the_conversation():
+    """Tool, arguments and observation, per step — the operator sees which files opened."""
+    html = chat_ui_html()
+    assert "hearth.agent.step" in html
+    assert "stepTurn" in html
+    assert 'ev.tool + "(" + JSON.stringify(ev.arguments || {}) + ")"' in html
+    assert "ev.observation" in html
+    assert "observation_truncated" in html
+    # File content is untrusted input: it must never become markup. The assertion is on
+    # assignment, not on the word — the module comment explaining the rule mentions it.
+    assert not re.search(r"\.(?:innerHTML|outerHTML)\s*=", html)
+    assert "insertAdjacentHTML" not in html
+    assert "document.write" not in html
+
+
+def test_a_run_that_stopped_short_never_renders_as_an_answer():
+    """The `finish_reason` lesson at the presentation layer (CLAUDE.md §3).
+
+    `AgentRun` refuses to carry an answer it did not earn; the last place that guarantee can
+    be thrown away is the page that draws it, so the page must gate on `completed` and say
+    plainly that a partial trace is not a result.
+    """
+    html = chat_ui_html()
+    assert "if (ev.completed && ev.answer)" in html
+    assert "NOT AN ANSWER" in html
+    assert "partial trace, not a result" in html
+    assert "stopped: " in html  # the stop reason is rendered, every run
+    # A stream that dies before the terminal event is reported, not read as an empty answer.
+    assert "without a stop reason" in html
+
+
+def test_agent_mode_warns_about_prompt_injection_where_the_operator_will_see_it():
+    """The note is in the UI, next to the toggle — not buried in a doc nobody opens.
+
+    Bounded, not eliminated, is the honest framing and the wording has to say both halves:
+    a warning that only lists mitigations reads as an all-clear.
+    """
+    html = chat_ui_html()
+    assert "content becomes model input" in html
+    assert "shaped like an instruction can steer the run" in html
+    assert "they do not eliminate it" in html
+    assert "read-only, no shell, no writes, no network" in html
+    # It is attached to agent mode, so it appears exactly when the risk does.
+    assert 'class="agentbar"' in html
+    assert "body.agent .agentbar" in html
+
+
+def test_the_agent_route_is_reachable_from_the_page_and_still_needs_a_token(tmp_path):
+    """The UI's new endpoint is authenticated like the rest of /v1 — the page is not a way in."""
+    auth_client, settings = _auth_client(tmp_path)
+    token = get_or_create_token(settings)
+    assert (
+        auth_client.post("/v1/hearth/agent", json={"task": "read my files"}).status_code == 401
+    )
+    ok = auth_client.post(
+        "/v1/hearth/agent",
+        json={"task": "read my files"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert ok.status_code == 200
 
 
 def test_chat_route_needs_no_token_and_leaks_none(tmp_path):

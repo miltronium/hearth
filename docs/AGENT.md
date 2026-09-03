@@ -1,7 +1,9 @@
 # HEARTH — The local agent loop, and the ceiling it is built against
 
-**Status:** Implemented and tested (`src/hearth/agent/`, 124 tests, all offline). Not yet wired
-to the CLI or the gateway — it is a library a caller assembles deliberately.
+**Status:** Implemented and tested (`src/hearth/agent/`, 124 tests, all offline), and reachable
+from the CLI as `hearth agent` (§8) and over the gateway as `POST /v1/hearth/agent` (§9). It
+remains a library a caller assembles deliberately; the command and the route are two such
+callers, not two more implementations.
 **Date:** 2026-09-02.
 **Scope:** the tool protocol, prompt-based tool calling on local weights, the bounds and how
 they surface, the audit transcript, the security model, how to add a tool, and — at length —
@@ -397,9 +399,12 @@ Four rules for a tool that a 3B model can actually use:
 - **No escalation, ever.** Not to PCC, not to a frontier model. If a local model cannot do it,
   the run stops and says so; the human-carried alternative is `src/hearth/handoff/`
   (`docs/TIERS.md`).
-- **Not wired to the CLI or gateway.** Exposing this over HTTP means deciding who may pass
-  `vetted_only=False` and what a hostile task string can reach through the tools. That is a
-  separate decision and it has not been made.
+- **No way to disable vetting from a command line.** `hearth agent` has no `--unvetted` flag
+  and no parameter that could carry one (§8).
+- **No way to disable vetting over HTTP either.** `POST /v1/hearth/agent` (§9) exposes the loop
+  but not that choice: `vetted_only=True` is a literal in the route and the request model
+  forbids unknown fields, so the decision stays with someone editing Python rather than with
+  anyone who can reach the socket.
 
 ---
 
@@ -416,3 +421,223 @@ Four rules for a tool that a 3B model can actually use:
    (`docs/TIERS.md` §4). The transcript is nearly the envelope's `LocalAttempt` already. Not
    wired, because it should not be automatic.
 4. **What does a write agent need?** At minimum a dry-run diff a human approves. Not started.
+
+---
+
+## 8. Running it: `hearth agent`
+
+```sh
+HEARTH_FILE_ROOTS=~/statements hearth agent "list the CSV files and tell me how many there are"
+```
+
+`src/hearth/cli.py`, tested in `tests/test_cli_agent.py` (20 tests, offline, no model). The
+command is a caller of the library and nothing more: it assembles a toolset, builds one
+`Agent`, runs it, and renders the `AgentRun`. It adds no capability the library does not have.
+
+### 8.1 The exit code is the stop reason
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | the model answered — and only then |
+| `1` | the run stopped at a bound or a failure; `stopped_reason` and `detail` are printed, and there is no answer to print |
+| `2` | the agent was never started: an impossible bound, or a toolset that could reach nothing |
+
+This is §2.4 carried out to a shell. `AgentRun` cannot hold an answer unless it was answered,
+so a run that hit `max_iterations` prints `NO ANSWER — the run stopped because
+'max_iterations'` and exits non-zero. **A pipeline must not be able to read an exhausted budget
+as a conclusion**, and `hearth agent … && do_something_with_it` is exactly that pipeline. The
+`--json` document carries the same verdict in `completed`, and both renderings exit through
+one statement, so they cannot disagree.
+
+### 8.2 Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--max-iterations` | 8 | `Budget.max_iterations` |
+| `--max-seconds` | 180 | `Budget.max_seconds` |
+| `--max-tokens` | 24 000 | `Budget.max_total_tokens` — prompt *and* completion, every step |
+| `--collection` | — | offer `rag_search`, pinned to that indexed collection |
+| `--finance` / `--no-finance` | on | offer the ledger tools when a ledger exists |
+| `--steps` / `--no-steps` | on | the step table: tool, arguments, truncated observation, tokens, timings |
+| `--full` | off | the loop's own `transcript()` (raw model output per step) instead of the table |
+| `--json` | off | the whole run as one JSON document on stdout, and nothing else |
+
+**Why the transcript is on by default.** §2.5: an agent's conclusion the operator cannot trace
+back to its steps is a claim, not a result. Off by default would mean the normal way to run this
+is the way that hides the evidence. Observations in the table are capped hard
+(`AGENT_OBSERVATION_PREVIEW`) on top of the loop's own `max_observation_chars`, so one large
+read cannot bury the run it is supposed to make checkable; `--json` has the full observations
+the model saw.
+
+### 8.3 There is no `--unvetted`
+
+`vetted_only` stays `True` and is not plumbed to a flag. Vetting is by **code location** (§4)
+precisely so a tool cannot lie about what it is; a switch that turned it off from a command line
+would hand that back to whoever writes the command line — including a script, a `Makefile`, or a
+pasted one-liner. A caller who needs their own tool writes Python against the library and takes
+the responsibility explicitly (§5.1).
+
+`tests/test_cli_agent.py` asserts this twice, on the surface *and* on the outcome: no parameter
+or rendered option of the command mentions vetting, **and** the kwargs the command actually
+constructs its `Agent` with are replayed against a tool declared in the test file, which must
+raise `UnvettedToolError`. Checking only for the absence of a flag would be checking the command
+line while the construction could still pass `vetted_only=False` — `CLAUDE.md` §3 again.
+
+### 8.4 Deny-by-default is reported before the loop starts
+
+The file tools refuse everything when `HEARTH_FILE_ROOTS` names no existing directory, so an
+agent asked to read a directory would otherwise spend its whole budget discovering it may read
+nothing — eight turns of refusals, and a fluent apology at the end. The command resolves the
+roots up front and says so, naming the variable:
+
+```
+No readable file roots. read_file and list_files are deny-by-default and will refuse every
+path: HEARTH_FILE_ROOTS is unset, and there is no implicit root — not the current directory,
+not $HOME.
+```
+
+The check is on the roots that **resolved**, not on whether the variable is set, so a typo'd
+root is caught by the same gate rather than reading as configured. With no roots *and* no other
+collaborator the run is refused outright (exit `2`) — such an agent could only assert. With a
+ledger or a `--collection` still reachable it is a warning and the run proceeds, with the gap
+stated in the header.
+
+### 8.5 What the toolset was is printed
+
+```
+HEARTH agent — backend=mlx model=…Qwen2.5-3B-Instruct-4bit tools=list_files, read_file
+rag_search not offered — no --collection named
+finance tools not offered — no ledger at ~/.hearth/finance/ledger.db
+```
+
+`local_toolset()` assembles only the tools whose collaborator is present, so degradation is
+silent unless it is stated — and an operator who does not know `rag_search` was absent will read
+the model's answer as if it had searched. Every absence gets a line and its reason.
+
+---
+
+## 9. Serving it: `POST /v1/hearth/agent` and the chat page's agent mode
+
+`src/hearth/gateway/agent_route.py`, tested in `tests/test_gateway_agent_route.py` (17 tests,
+offline, no model). The gateway route is a second caller of the library, on the same terms as
+the CLI: it assembles a toolset, builds one `Agent`, and streams the `AgentRun`. It adds no
+capability the library does not have — and it removes several the wire might otherwise ask for.
+
+### 9.1 Why the route exists at all
+
+`/v1/chat/completions` has **no tools**. Ask the chat page to read a directory of bank
+statements and a local model will produce a fluent, specific, entirely invented answer — the
+exact failure `hearth.agent` was built to prevent, arriving through the friendliest surface in
+the project. The agent loop can genuinely do it. So the gap was closed, but with the capability
+made explicit rather than ambient: agent mode is a toggle, **off by default**, and plain chat
+stays provably tool-free.
+
+### 9.2 The contract
+
+Request (`AgentRunRequest`, `extra="forbid"`):
+
+```json
+{"task": "which of these covers March, and what did it total?",
+ "model": "auto",
+ "budget": {"max_iterations": 6, "max_seconds": 120, "max_total_tokens": 12000}}
+```
+
+Response: `text/event-stream`, reusing the gateway's existing SSE conventions (`data:` lines, a
+terminal `[DONE]` sentinel, an OpenAI-style `error` envelope for a mid-stream failure).
+
+| Event | When | Carries |
+| --- | --- | --- |
+| `hearth.agent.start` | once, **before the first generation** | the tool names, `vetted_only`, the *applied* budget and which bounds were clamped, how many file roots resolved, and any warnings |
+| `hearth.agent.step` | one per step, as the loop records it | index, kind, thought, tool, validated arguments, the (truncated) observation, error, model/backend, token counts, model and tool timings |
+| `hearth.agent.run` | once, last | `stopped_reason`, `completed`, the answer **only if it answered**, detail, totals, the applied budget |
+| `[DONE]` | last | — |
+
+Streaming is not a nicety: at ~12 tok/s an eight-step run is minutes, and a blocking request
+would be indistinguishable from a hung one.
+
+**How steps are streamed without a second reading of the run.** The loop is synchronous, so the
+run goes on a worker thread and steps arrive over a queue. The route subclasses `Agent` and
+overrides `_resolve`, which is the one point where the loop's own `Step` exists — resolved,
+with the validated arguments and the observation the tool actually returned — before it is
+appended to the transcript. Reconstructing steps instead (parsing the model text a wrapped
+router saw, say) would mean the stream reports the gateway's reading of the run while the
+transcript reports the loop's: two objects, one check, `CLAUDE.md` §3. Any step the loop built
+elsewhere — a provider error, a refused escalation — is flushed from the finished `AgentRun`
+before the terminal event, so the stream is never a transcript with the decisive step missing.
+
+### 9.3 What the wire cannot ask for
+
+| Constraint | How it is enforced | How it is tested |
+| --- | --- | --- |
+| `vetted_only=True`, always | a literal in the `Agent(...)` call; no field, header or query parameter reaches it | the request model's fields are walked recursively and asserted to be exactly `{task, model, budget, max_iterations, max_seconds, max_total_tokens}` — the capability is not *expressible*, not merely unused |
+| an unknown field is refused | `extra="forbid"` on both request models | posting `vetted_only: false` is a 422, at the top level and nested in `budget` |
+| read-only built-ins only | the toolset is `local_toolset(...)`, nothing else | the advertised tool names contain no `write`/`shell`/`exec`/`fetch` |
+| no filesystem privilege of its own | the route passes no path and no root anywhere; `read_file` still goes through `HEARTH_FILE_ROOTS` | a read outside the roots comes back as a refused step naming the variable, and the file's content appears nowhere in the stream |
+| budgets clamped, not honoured | `_clamp()` reduces each value to a module constant ceiling (12 steps / 600 s / 48 000 tokens) | a request for 10 000 iterations yields 12 and `clamped: ["max_iterations", …]` |
+| authenticated like every `/v1` route | `dependencies=[Depends(require_token)]` | 401 without a token, 200 with one |
+
+The ceilings are module constants rather than settings on purpose: a cap that configuration can
+raise is a cap you have to audit the configuration to trust.
+
+**Clamping rather than refusing.** A caller asking for more than the machine will give is making
+an optimistic request, not an invalid one, and the honest answer is the smaller run plus a note
+saying which bound was reduced. That note matters — without it, a `max_iterations` stop on a run
+the client thought had 10 000 steps reads as a server bug.
+
+### 9.4 The stop reason survives serialisation
+
+`AgentRun` makes "ran out of budget" unrepresentable as an answer. `AgentRunEvent` re-asserts
+the same rule on the way out, and the terminal event is serialised with `exclude_none`, so an
+incomplete run has **no `answer` key at all** — not an empty one a client could `or ""` into a
+reply. An invariant dropped at the serialisation boundary is not an invariant, and that boundary
+is exactly where this repository lost `finish_reason` once already (`CLAUDE.md` §3).
+
+Deny-by-default gets the same treatment as in the CLI (§8.4): with no roots resolved, the very
+first event carries the warning naming `HEARTH_FILE_ROOTS`; with no roots *and* no RAG index or
+ledger attached, the run is refused before a single generation, because such an agent could only
+assert. A test drives the route's generator directly and asserts the warning is yielded while
+the agent has not yet been constructed — asserting on the order of a fully-read response body
+would say nothing, since a stream flushed only at the end would satisfy it and the warning would
+arrive after the run it exists to pre-empt.
+
+### 9.5 Agent mode in the chat page
+
+The toggle lives in the header of `GET /chat`, ships unchecked, and persists in `localStorage`
+under `hearth.agentmode`. The stored value must read `"on"` for tools to be live, so a missing,
+corrupt or unreadable `localStorage` lands on the safe side. With it **off**, the page is byte
+for byte the page that shipped before — one endpoint, `/v1/chat/completions`, no tools.
+
+With it **on**, each step renders in the conversation as its own turn: the tool, its arguments,
+and the observation that came back. That is not a debug view to be collapsed later. §2.5: a
+conclusion the operator cannot trace to its steps is a claim, not a result — the steps *are* the
+reason to believe the answer, and the whole point of the toggle is that the operator can see
+exactly which files were opened. A run that stopped at a bound renders as **NOT AN ANSWER**,
+styled as incomplete, with the stop reason and detail — never as a reply.
+
+Tool output is written with `textContent`, never `innerHTML`. Observations are file content,
+which is untrusted by construction; the page's self-containment tests now also assert no
+`.innerHTML =`, no `insertAdjacentHTML`, no `document.write`.
+
+### 9.6 Prompt injection: bounded, not eliminated
+
+Turning the toggle on reveals a note, next to the control, in these words:
+
+> **Agent mode: tools are live.** The model can list and read files under `HEARTH_FILE_ROOTS` —
+> read-only, no shell, no writes, no network — and every step it takes appears below. Once it
+> reads a file, that file's content becomes model input: text inside a document that is shaped
+> like an instruction can steer the run. Read-only, roots-gated, offline tools bound that; they
+> do not eliminate it — so read the steps before acting on the answer.
+
+The reasoning behind that wording. Once the model reads files, file *content* is input, and a
+statement containing instruction-shaped text is a real vector — it does not require an attacker
+to have compromised anything, only to have sent the operator a document. What the vector can
+*reach* is genuinely small: the tools are read-only, so nothing can be written or deleted; they
+are gated by `HEARTH_FILE_ROOTS`, so an injected instruction cannot widen its own reach; there
+is no shell and no network, so exfiltration has no channel even if the model were fully
+persuaded. The realistic damage is a **wrong answer arrived at deliberately** — which is the one
+failure the visible step list is good at exposing.
+
+So the honest framing is "bounded, not eliminated", and it belongs where the operator is
+deciding, not in a document they will not open while deciding. It is deliberately two sentences:
+a longer warning at that moment is a warning that gets scrolled past, and one that listed only
+the mitigations would read as an all-clear.

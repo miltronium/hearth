@@ -32,6 +32,7 @@ settings object, so two agents in one process cannot reach each other's data.
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
 from typing import Any
 
 from ..mcp.files import allowed_roots, read_text_file, resolve_under_roots
@@ -45,6 +46,30 @@ DEFAULT_LIST_LIMIT = 200
 DEFAULT_ROW_LIMIT = 50
 
 
+def _under_roots(path: str, settings: Any | None = None) -> str:
+    """Resolve a possibly-relative ``path`` against the allowed roots.
+
+    A model that has just seen ``BankA/2026/stmt-01.csv`` in a listing will naturally pass
+    exactly that back, and a bare relative path resolves against the process's CWD — which is
+    the repo, not the operator's statements — so the read was refused as "outside every
+    allowed root" and the agent burned its budget arguing with a path it had been given. That
+    is a usability bug pretending to be a security one.
+
+    Relative candidates are tried against each root in order and the first that exists wins;
+    an absolute path is passed through untouched. Nothing here widens the boundary: whatever
+    comes out still goes through :func:`~hearth.mcp.files.resolve_under_roots`, so a
+    ``../`` escape or a symlink leaving the root is refused exactly as before. This only
+    supplies the prefix the model could not have known.
+    """
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return path
+    for root in allowed_roots(settings):
+        if (root / candidate).exists():
+            return str(root / candidate)
+    return path  # unresolvable: let resolve_under_roots produce the real refusal
+
+
 def read_file_tool(*, settings: Any | None = None) -> Tool:
     """A tool that reads one allowlisted local file as text.
 
@@ -56,7 +81,7 @@ def read_file_tool(*, settings: Any | None = None) -> Tool:
     """
 
     def read_file(path: str) -> str:
-        return read_text_file(path, settings=settings)
+        return read_text_file(_under_roots(path, settings), settings=settings)
 
     return Tool(
         name="read_file",
@@ -69,7 +94,10 @@ def read_file_tool(*, settings: Any | None = None) -> Tool:
             ToolParam(
                 name="path",
                 type="string",
-                description="Absolute path to the file, exactly as list_files reported it.",
+                description=(
+                    "Path to the file, exactly as list_files reported it. A path relative "
+                    "to an allowed root works; so does an absolute one."
+                ),
             ),
         ),
         returns="the file's text (CSV and spreadsheets come back as 'a | b | c' rows)",
@@ -90,7 +118,7 @@ def list_files_tool(*, settings: Any | None = None, limit: int = DEFAULT_LIST_LI
 
     def list_files(root: str = "", pattern: str = "*") -> list[str]:
         if root.strip():
-            roots = [resolve_under_roots(root, settings=settings)]
+            roots = [resolve_under_roots(_under_roots(root, settings), settings=settings)]
         else:
             roots = allowed_roots(settings)
         if not roots:

@@ -4,6 +4,7 @@ Phase 0/1 commands:
   * ``hearth doctor``       — environment preflight
   * ``hearth serve``        — start the OpenAI-compatible gateway
   * ``hearth run``          — one-shot local completion (``--file``, ``--intent``)
+  * ``hearth agent``        — bounded, tool-using local agent over your own data (docs/AGENT.md)
   * ``hearth models …``     — registry: ``list`` / ``pull`` / ``rm`` / ``convert`` / export-coreml
   * ``hearth rag …``        — local RAG: ``ingest`` / ``query`` (Phase 3)
   * ``hearth train …``      — LoRA fine-tune → register a candidate adapter (Phase 4)
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -49,6 +51,15 @@ app.add_typer(prereg_app, name="prereg")
 plugins_app = typer.Typer(help="Third-party plugins discovered via entry points (Phase 7).")
 app.add_typer(plugins_app, name="plugins")
 console = Console()
+
+#: Characters of one agent step's observation shown in the terminal transcript. The loop has
+#: already capped what the *model* saw at ``Budget.max_observation_chars`` (4 000); this is the
+#: much tighter cap on what a terminal gets, so a single large read cannot bury the run it is
+#: supposed to make checkable. ``--full`` prints the loop's own transcript, still capped.
+AGENT_OBSERVATION_PREVIEW = 200
+
+#: Characters of a step's rendered arguments shown in that same table.
+AGENT_ARGUMENT_PREVIEW = 60
 
 
 def _adapter_store():
@@ -94,6 +105,74 @@ def _load_golden_set(path: Path, task: str):
     if not examples:
         raise ValueError("golden set is empty")
     return GoldenSet(task=task, examples=examples, version=version)
+
+
+def _agent_payload(run: Any, tools: tuple[str, ...]) -> dict[str, Any]:
+    """Render an :class:`~hearth.agent.AgentRun` as the ``--json`` document.
+
+    ``asdict`` carries the run *whole* — every step with its arguments, observation, error,
+    tokens and timings, plus the budget it actually ran under — because a scripted caller that
+    is handed a summary has to trust it. The derived fields are added here rather than left to
+    be recomputed: ``completed`` is the single field to branch on, and ``answer`` is ``null``
+    for every stop reason but ``answered``, so a run that hit a bound cannot be read as one
+    that finished.
+    """
+    from dataclasses import asdict
+
+    payload = asdict(run)
+    payload["completed"] = run.completed
+    payload["iterations"] = run.iterations
+    payload["total_tokens"] = run.total_tokens
+    payload["tools"] = list(tools)
+    return payload
+
+
+def _agent_steps_table(run: Any) -> Table:
+    """Render the run's steps: what ran, with what, what came back, and what it cost.
+
+    Printed by default. An agent's conclusion the operator cannot trace back to the steps
+    behind it is a claim, not a result — the same reason ``AgentRun.transcript()`` puts the
+    evidence under the headline rather than asserting the headline is supported.
+    """
+    table = Table(title="agent steps", show_header=True, header_style="bold")
+    table.add_column("#", justify="right")
+    table.add_column("step")
+    table.add_column("arguments")
+    table.add_column("observation")
+    table.add_column("tokens", justify="right")
+    table.add_column("model/tool s", justify="right")
+    for step in run.steps:
+        if step.error is not None:
+            observation = f"[red]{_agent_snippet(step.error, AGENT_OBSERVATION_PREVIEW)}[/red]"
+        elif step.kind == "answer":
+            observation = "[dim](the answer, below)[/dim]"
+        else:
+            observation = _agent_snippet(step.observation or "", AGENT_OBSERVATION_PREVIEW)
+        arguments = ", ".join(f"{k}={v!r}" for k, v in (step.arguments or {}).items())
+        table.add_row(
+            str(step.index),
+            step.tool or step.kind,
+            _agent_snippet(arguments, AGENT_ARGUMENT_PREVIEW),
+            observation,
+            f"{step.prompt_tokens}+{step.completion_tokens}",
+            f"{step.model_seconds:.2f}/{step.tool_seconds:.2f}",
+        )
+    return table
+
+
+def _agent_snippet(text: str, limit: int) -> str:
+    """One-line, hard-capped rendering of a step field, with the cut marked rather than silent.
+
+    Escaped for Rich markup: a step's arguments and observations are file paths and model
+    output, and ``[... truncated ...]`` — which the loop itself appends — is close enough to a
+    markup tag that rendering it raw is a crash waiting for the first large file.
+    """
+    from rich.markup import escape
+
+    flat = " ".join(text.split())
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "…"
+    return escape(flat)
 
 
 @app.command()
@@ -189,6 +268,193 @@ def run(
         allow_escalation=False,
     )
     console.print(routed.result.text, markup=False, highlight=False)
+
+
+@app.command()
+def agent(
+    task: str = typer.Argument(None, help="What the agent should do. Omit to read from stdin."),
+    collection: str = typer.Option(
+        None, "--collection", help="Offer rag_search, pinned to this indexed RAG collection."
+    ),
+    finance: bool = typer.Option(
+        True,
+        "--finance/--no-finance",
+        help="Offer the read-only ledger tools when a finance ledger exists.",
+    ),
+    max_iterations: int = typer.Option(
+        8, "--max-iterations", help="Hard cap on model turns; hitting it stops the run."
+    ),
+    max_seconds: float = typer.Option(
+        180.0, "--max-seconds", help="Hard wall-clock cap in seconds; hitting it stops the run."
+    ),
+    max_tokens: int = typer.Option(
+        24_000,
+        "--max-tokens",
+        help="Hard cap on prompt+completion tokens across every step of the run.",
+    ),
+    steps: bool = typer.Option(
+        True, "--steps/--no-steps", help="Print the step-by-step transcript before the answer."
+    ),
+    full: bool = typer.Option(
+        False, "--full", help="Print the loop's own full transcript (raw model output per step)."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the whole run as JSON instead of prose (for scripting)."
+    ),
+) -> None:
+    """Run a bounded, tool-using local agent over your own data (docs/AGENT.md).
+
+    The agent plans, calls **one** tool, observes the result, and repeats until it answers or
+    hits a bound — every generation local, every step in the transcript. Unlike
+    ``hearth run`` (and unlike ``/v1/chat/completions``), it can actually *read* the files it
+    talks about, so "how many CSVs are under statements/" is answered from the filesystem
+    rather than from the model's imagination:
+
+        HEARTH_FILE_ROOTS=~/statements hearth agent "how many CSV files are there?"
+
+    **The exit code is the stop reason.** ``0`` only when the model answered; ``1`` when the
+    run stopped at a bound or a failure (and then there is no answer to print — ``AgentRun``
+    cannot hold one); ``2`` when the agent was never started — an impossible bound, or a
+    toolset that could reach nothing. A run that exhausted its budget must never read like a
+    completed one, in a terminal or in a pipeline.
+
+    Tools are assembled from the collaborators that are actually present — the file tools
+    always, ``rag_search`` with ``--collection``, the ledger tools when a finance ledger
+    exists — and what was assembled is printed. There is deliberately **no flag to disable
+    tool vetting**: an agent here runs only tools whose code lives in ``hearth.agent``, which
+    is the source the no-network AST test covers, and a flag that switched that off from a
+    shell would hand back the one thing a tool cannot lie about. A caller who needs their own
+    tool writes Python against the library (``docs/AGENT.md`` §4, §5.1).
+    """
+    from .agent import Agent, AgentConfigError, Budget, local_toolset
+    from .config import Settings
+    from .mcp.files import allowed_roots
+
+    text = task if task is not None else sys.stdin.read()
+    if not text.strip():
+        console.print("[red]No task provided.[/red]")
+        raise typer.Exit(code=1)
+
+    # A fresh Settings() (not the lru_cached get_settings) so HEARTH_FILE_ROOTS, HEARTH_HOME
+    # and HEARTH_BACKEND are read per invocation — the same reason `hearth eval` does it.
+    settings = Settings()
+    notes: list[str] = []
+
+    rag = None
+    if collection:
+        from .memory import RagIndex, select_embedder, select_vector_store
+
+        rag = RagIndex(
+            embedder=select_embedder(settings), store=select_vector_store(settings)
+        )
+        if rag.store.count(collection) == 0:
+            console.print(
+                f"[red]Nothing indexed in collection[/red] {collection!r}. rag_search would "
+                "return an empty result on every call and the agent would spend its whole "
+                "budget discovering that.\n"
+                f"  Ingest first:  [cyan]hearth rag ingest <path> --collection {collection}"
+                "[/cyan]"
+            )
+            raise typer.Exit(code=2)
+    else:
+        notes.append("rag_search not offered — no --collection named")
+
+    store = None
+    if finance:
+        from .finance.store import FinanceStore
+
+        candidate = FinanceStore(settings=settings)
+        if candidate.path.exists():
+            store = candidate
+        else:
+            notes.append(f"finance tools not offered — no ledger at {candidate.path}")
+    else:
+        notes.append("finance tools not offered — --no-finance")
+
+    # The file tools are deny-by-default, so an agent asked to read a directory with no roots
+    # configured burns its entire budget discovering it may read nothing. Check the *outcome*
+    # — the roots that actually resolved to existing directories — rather than whether the
+    # variable is set, so a typo'd root is caught by the same gate (CLAUDE.md §3).
+    roots = allowed_roots(settings)
+    if not roots:
+        console.print(
+            "[red]No readable file roots.[/red] read_file and list_files are deny-by-default "
+            "and will refuse every path: "
+            + (
+                f"HEARTH_FILE_ROOTS is set to {settings.file_roots!r}, but none of those are "
+                "existing directories."
+                if settings.file_roots.strip()
+                else "HEARTH_FILE_ROOTS is unset, and there is no implicit root — not the "
+                "current directory, not $HOME."
+            )
+            + "\n  Set it for this run:  "
+            "[cyan]HEARTH_FILE_ROOTS=~/statements hearth agent \"…\"[/cyan]"
+        )
+        if rag is None and store is None:
+            console.print(
+                "[red]Refusing to start:[/red] with no file roots, no --collection and no "
+                "ledger, this agent has nothing it can reach — it could only assert."
+            )
+            raise typer.Exit(code=2)
+        notes.append("read_file/list_files will refuse every path — no roots resolved")
+
+    tools = local_toolset(settings=settings, rag=rag, finance=store, collection=collection)
+    provider = select_provider(settings)
+    model_id = get_registry().default_id
+    try:
+        budget = Budget(
+            max_iterations=max_iterations,
+            max_seconds=max_seconds,
+            max_total_tokens=max_tokens,
+        )
+        # `vetted_only` is left at its default of True and is not plumbed to a flag; see the
+        # docstring. The router is entered with allow_escalation=False by the loop itself,
+        # which then verifies the executed route actually reported the local backend.
+        runner = Agent(Router(local_provider=provider), tools, budget=budget, model=model_id)
+    except AgentConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from None
+
+    if not as_json:
+        console.print(
+            f"[bold]HEARTH agent[/bold] — backend=[cyan]{provider.name}[/cyan] "
+            f"model=[cyan]{model_id}[/cyan] tools=[cyan]{', '.join(tools.names)}[/cyan]"
+        )
+        for note in notes:
+            console.print(f"[dim]{note}[/dim]")
+
+    result = runner.run(text)
+
+    if as_json:
+        console.print_json(data=_agent_payload(result, tools.names), default=str, sort_keys=True)
+    else:
+        if full:
+            console.print(result.transcript(), markup=False, highlight=False)
+        elif steps:
+            console.print(_agent_steps_table(result))
+        console.print(
+            f"[dim]{result.iterations} step(s) of at most {budget.max_iterations}, "
+            f"{result.total_tokens} token(s) of at most {budget.max_total_tokens}, "
+            f"{result.elapsed_seconds:.2f}s of at most {budget.max_seconds:g}s[/dim]"
+        )
+        if result.completed:
+            console.print("\n[bold]answer[/bold]")
+            console.print(result.require_answer(), markup=False, highlight=False)
+        else:
+            console.print(
+                f"\n[red]NO ANSWER — the run stopped because "
+                f"{result.stopped_reason!r}.[/red]"
+            )
+            if result.detail:
+                console.print(f"[red]{result.detail}[/red]")
+            console.print(
+                "[yellow]The steps above are a partial trace, not a result.[/yellow]"
+            )
+
+    # One exit point for the verdict, so `--json` and the prose rendering cannot disagree
+    # about whether the run finished.
+    if not result.completed:
+        raise typer.Exit(code=1)
 
 
 @app.command()

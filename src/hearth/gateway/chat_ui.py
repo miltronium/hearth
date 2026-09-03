@@ -42,6 +42,30 @@ if the page blocks until the last token. It surfaces the response's ``hearth`` t
 conversation stayed on-device, and it renders ``finish_reason == "length"`` as a visible
 warning — silent truncation is a bug class this repo has already fixed once in the
 gateway (CLAUDE.md §3) and the UI must not reintroduce it.
+
+**Agent mode is an explicit toggle, off by default.** Plain chat has no tools, so asking
+this page to read a directory of statements produces a confident fabrication. The agent
+loop can genuinely do it, but it is a different thing with a different risk profile, so
+the operator chooses per session rather than the page choosing for them:
+
+* **off** (the default, and what a fresh browser gets) — the page hits only
+  ``/v1/chat/completions``, and "this conversation touched no files" stays provable by
+  reading the network tab;
+* **on** — the message goes to ``POST /v1/hearth/agent`` and **every step renders in the
+  conversation**: the tool, its arguments, and the observation that came back. A
+  conclusion the operator cannot trace to its steps is a claim, not a result, so the steps
+  are not a debug view to be collapsed — they are the reason to believe the answer.
+
+A run that stopped at a bound renders as *NOT AN ANSWER*, never as a reply. That is the
+``finish_reason`` lesson again: ``AgentRun`` refuses to carry an answer it did not earn,
+and the presentation layer must not hand one back.
+
+Agent mode also puts a short prompt-injection note in front of the operator, because once
+the model reads files the *content* of those files is model input and a statement
+containing instruction-shaped text is a real vector. The tools are read-only, roots-gated
+and offline, so it is bounded — not eliminated, and the note says exactly that. Every
+piece of tool output is written with ``textContent``, never ``innerHTML``, so file content
+cannot become markup on the way to the screen.
 """
 
 from __future__ import annotations
@@ -117,6 +141,24 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
   textarea { flex: 1; resize: vertical; min-height: 62px; background: var(--bg); }
   #status { max-width: 52em; margin: 6px auto 0; font-size: 12px; color: var(--muted); }
   #status.bad { color: var(--err); }
+  /* Agent mode. Hidden entirely until the toggle is on, so the default page is the page
+     that shipped before it: same controls, same single endpoint. */
+  .agentbar { display: none; }
+  body.agent .agentbar {
+    display: block; background: var(--panel); border-bottom: 1px solid var(--line);
+    border-left: 3px solid var(--warn); padding: 8px 14px; font-size: 13px;
+    color: var(--warn);
+  }
+  #stepsbox { display: none; }
+  body.agent #stepsbox { display: inline-flex; }
+  .turn.step .role { color: var(--accent); }
+  .turn.step .body { background: var(--panel); }
+  .args, .obs { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px; }
+  .args { color: var(--muted); margin-bottom: 5px; }
+  .obs { white-space: pre-wrap; word-wrap: break-word; }
+  .turn.stepfail .body { border-color: var(--err); }
+  .turn.incomplete .body { border-color: var(--warn); color: var(--warn); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -131,8 +173,21 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
   <label>temp <input id="temp" type="number" min="0" max="2" step="0.1" value="0.7"></label>
   <label>max tokens
     <input id="maxtok" type="number" min="1" max="32768" step="1" value="512"></label>
+  <label title="Off: plain chat, no tools. On: the local agent loop with read-only tools.">
+    <input id="agentmode" type="checkbox"> agent mode</label>
+  <label id="stepsbox">steps
+    <input id="steps" type="number" min="1" max="12" step="1" value="6"></label>
   <button id="clear" type="button">Clear</button>
 </header>
+
+<div class="agentbar" id="agentbar">
+  <strong>Agent mode: tools are live.</strong> The model can list and read files under
+  HEARTH_FILE_ROOTS — read-only, no shell, no writes, no network — and every step it takes
+  appears below.
+  Once it reads a file, that file's content becomes model input: text inside a document that
+  is shaped like an instruction can steer the run. Read-only, roots-gated, offline tools
+  bound that; they do not eliminate it — so read the steps before acting on the answer.
+</div>
 
 <div id="log"></div>
 
@@ -150,6 +205,7 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
 (function () {
   "use strict";
   var TOKEN_KEY = "hearth.token";
+  var AGENT_KEY = "hearth.agentmode";
   var el = function (id) { return document.getElementById(id); };
   var messages = [];
   var busy = false;
@@ -251,6 +307,37 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
     scroll();
   }
 
+  // One SSE reader for both endpoints: chat completions and the agent run use the same
+  // wire conventions (data: lines, a [DONE] sentinel), so they get the same parser rather
+  // than two that can drift apart. `handle` returns false to stop reading.
+  function readSSE(res, handle) {
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = "";
+    var stop = false;
+    function pump() {
+      return reader.read().then(function (chunk) {
+        if (chunk.done || stop) { return; }
+        buf += decoder.decode(chunk.value, { stream: true });
+        var sep = buf.indexOf("\\n\\n");
+        while (sep >= 0) {
+          var block = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          var lines = block.split("\\n");
+          for (var i = 0; i < lines.length; i++) {
+            if (lines[i].indexOf("data: ") === 0) {
+              if (handle(lines[i].slice(6)) === false) { stop = true; }
+            }
+          }
+          if (stop) { return; }
+          sep = buf.indexOf("\\n\\n");
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }
+
   function loadModels() {
     var sel = el("model");
     return fetch("/v1/models", { headers: headers() }).then(function (res) {
@@ -275,10 +362,190 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
     });
   }
 
+  // --- agent mode -----------------------------------------------------------------
+  // Off by default and off for a browser that has never been told otherwise: the stored
+  // value has to say "on" for tools to be live, so a missing, corrupt or unreadable
+  // localStorage lands on the safe side rather than the convenient one.
+  function readAgentPref() {
+    try { return window.localStorage.getItem(AGENT_KEY) === "on"; } catch (e) { return false; }
+  }
+  function writeAgentPref(on) {
+    try { window.localStorage.setItem(AGENT_KEY, on ? "on" : "off"); } catch (e) { /* ok */ }
+  }
+  function agentOn() { return el("agentmode").checked; }
+  function applyAgentMode() {
+    var on = agentOn();
+    document.body.className = on ? "agent" : "";
+    el("input").placeholder = on
+      ? "Task for the agent — it can list and read your allowed files (Enter to run)"
+      : "Message (Enter to send, Shift+Enter for a newline)";
+    el("send").textContent = on ? "Run" : "Send";
+  }
+
+  // Every value below is written with textContent. Observations are file content, which is
+  // untrusted input by definition; innerHTML here would turn a document into markup.
+  function stepTurn(ev) {
+    var wrap = document.createElement("div");
+    wrap.className = "turn step" + (ev.error ? " stepfail" : "");
+    var head = document.createElement("div");
+    head.className = "role";
+    head.textContent = "step " + ev.index + " · " + (ev.tool || ev.kind);
+    var body = document.createElement("div");
+    body.className = "body";
+    if (ev.thought) {
+      var th = document.createElement("div");
+      th.className = "args";
+      th.textContent = "thought: " + ev.thought;
+      body.appendChild(th);
+    }
+    if (ev.tool) {
+      var args = document.createElement("div");
+      args.className = "args";
+      args.textContent = ev.tool + "(" + JSON.stringify(ev.arguments || {}) + ")";
+      body.appendChild(args);
+    }
+    var obs = document.createElement("div");
+    obs.className = "obs";
+    obs.textContent = ev.error
+      ? "did not run: " + ev.error
+      : (ev.observation === undefined || ev.observation === null
+          ? "(no observation)" : ev.observation);
+    body.appendChild(obs);
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    var who = document.createElement("span");
+    who.textContent = (ev.model || "?") + " via " + (ev.backend || "?");
+    meta.appendChild(who);
+    var timing = document.createElement("span");
+    timing.textContent = (ev.model_seconds || 0).toFixed(2) + "s model, "
+      + (ev.tool_seconds || 0).toFixed(2) + "s tool, "
+      + ((ev.prompt_tokens || 0) + (ev.completion_tokens || 0)) + " tok";
+    meta.appendChild(timing);
+    if (ev.observation_truncated) {
+      var cut = document.createElement("span");
+      cut.textContent = "observation truncated for display";
+      meta.appendChild(cut);
+    }
+    wrap.appendChild(meta);
+    el("log").appendChild(wrap);
+    scroll();
+  }
+
+  function notice(wrap, text) {
+    var note = document.createElement("div");
+    note.className = "notice";
+    note.textContent = text;
+    wrap.appendChild(note);
+  }
+
+  function renderStart(ev) {
+    var out = turn("agent", "tools: " + (ev.tools || []).join(", ")
+      + "\\nbudget: " + ev.budget.max_iterations + " steps, "
+      + ev.budget.max_total_tokens + " tokens, " + ev.budget.max_seconds + "s"
+      + ((ev.budget.clamped || []).length
+        ? "  (reduced by the server: " + ev.budget.clamped.join(", ") + ")" : "")
+      + "\\nvetted tools only: " + ev.vetted_only
+      + "\\nreadable roots: " + ev.file_roots, "step");
+    (ev.warnings || []).forEach(function (w) { notice(out.wrap, w); });
+  }
+
+  function runMeta(wrap, ev) {
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    var why = document.createElement("span");
+    why.className = ev.completed ? "local" : "remote";
+    why.textContent = "stopped: " + ev.stopped_reason;
+    meta.appendChild(why);
+    var counts = document.createElement("span");
+    counts.textContent = ev.steps + " step(s), " + (ev.total_tokens || 0) + " tok, "
+      + (ev.elapsed_seconds || 0).toFixed(1) + "s";
+    meta.appendChild(counts);
+    wrap.appendChild(meta);
+    (ev.warnings || []).forEach(function (w) { notice(wrap, w); });
+    scroll();
+  }
+
+  // A run that stopped at a bound is never rendered as a reply. The result type refuses to
+  // carry an answer it did not earn; showing the partial trace as one would put the bug
+  // back at the last layer that could still commit it.
+  function renderRun(ev) {
+    if (ev.completed && ev.answer) {
+      var ok = turn("agent", ev.answer);
+      messages.push({ role: "assistant", content: ev.answer });
+      runMeta(ok.wrap, ev);
+      status("Answered on-device in " + ev.steps + " step(s). Check the steps above.", false);
+      return;
+    }
+    var bad = turn("agent",
+      "NOT AN ANSWER — the run stopped because " + ev.stopped_reason
+      + (ev.detail ? " (" + ev.detail + ")" : "")
+      + ". The steps above are a partial trace, not a result.", "incomplete");
+    runMeta(bad.wrap, ev);
+    status("Incomplete: the agent stopped because " + ev.stopped_reason
+      + ". Nothing above is an answer.", true);
+  }
+
+  function runAgent(task) {
+    var steps = parseInt(el("steps").value, 10) || 6;
+    turn("user", task);
+    messages.push({ role: "user", content: task });
+    el("input").value = "";
+    busy = true;
+    el("send").disabled = true;
+    status("Running locally — each step appears below as it happens.", false);
+    var settled = false;
+
+    fetch("/v1/hearth/agent", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ task: task, budget: { max_iterations: steps } })
+    }).then(function (res) {
+      if (!res.ok || !res.body) {
+        return res.text().then(function (t) { throw new Error(describe(res, t)); });
+      }
+      return readSSE(res, function (payloadText) {
+        if (payloadText === "[DONE]") { return false; }
+        var ev;
+        try { ev = JSON.parse(payloadText); } catch (err) { return true; }
+        if (ev.error) {
+          settled = true;
+          var e = turn("agent", "[" + (ev.error.type || "error") + "] "
+            + (ev.error.message || ""), "error");
+          scroll();
+          status(ev.error.message || "the agent refused to run", true);
+          return true;
+        }
+        if (ev.object === "hearth.agent.start") { renderStart(ev); return true; }
+        if (ev.object === "hearth.agent.step") { stepTurn(ev); return true; }
+        if (ev.object === "hearth.agent.run") { settled = true; renderRun(ev); return true; }
+        return true;
+      });
+    }).then(function () {
+      // No terminal event means the stream died mid-run. That is not an empty answer, and
+      // it must not read as one.
+      if (!settled) {
+        status("The stream ended without a stop reason; the steps above are a partial "
+          + "trace, not a result.", true);
+      }
+    }).catch(function (err) {
+      turn("agent", err.message, "error");
+      status(err.message, true);
+    }).then(function () {
+      busy = false;
+      el("send").disabled = false;
+      el("input").focus();
+    });
+  }
+
   function send() {
     if (busy) { return; }
     var text = el("input").value.trim();
     if (!text) { return; }
+    // The only branch in the page: with the toggle off nothing below runs and the only
+    // endpoint this page touches is /v1/chat/completions.
+    if (agentOn()) { runAgent(text); return; }
     var maxTokens = parseInt(el("maxtok").value, 10) || 512;
     var payload = {
       model: el("model").value,
@@ -307,15 +574,10 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
       if (!res.ok || !res.body) {
         return res.text().then(function (t) { throw new Error(describe(res, t)); });
       }
-      var reader = res.body.getReader();
-      var decoder = new TextDecoder();
-      var buf = "";
-      var stop = false;
-
-      function handle(payloadText) {
-        if (payloadText === "[DONE]") { stop = true; return; }
+      return readSSE(res, function (payloadText) {
+        if (payloadText === "[DONE]") { return false; }
         var ev;
-        try { ev = JSON.parse(payloadText); } catch (err) { return; }
+        try { ev = JSON.parse(payloadText); } catch (err) { return true; }
         if (ev.error) {
           // A mid-stream error event (budget, invalid JSON mode) must be visible, not
           // swallowed into a reply that merely looks short.
@@ -324,38 +586,19 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
           acc += (acc ? "\\n\\n" : "") + "[" + (ev.error.type || "error") + "] "
             + (ev.error.message || "");
           out.body.textContent = acc;
-          return;
+          return true;
         }
         if (ev.hearth) { hearth = ev.hearth; }
         var choice = (ev.choices || [])[0];
-        if (!choice) { return; }
+        if (!choice) { return true; }
         if (choice.finish_reason) { finish = choice.finish_reason; }
         if (choice.delta && choice.delta.content) {
           acc += choice.delta.content;
           out.body.textContent = acc;
           scroll();
         }
-      }
-
-      function pump() {
-        return reader.read().then(function (chunk) {
-          if (chunk.done || stop) { return; }
-          buf += decoder.decode(chunk.value, { stream: true });
-          var sep = buf.indexOf("\\n\\n");
-          while (sep >= 0) {
-            var block = buf.slice(0, sep);
-            buf = buf.slice(sep + 2);
-            var lines = block.split("\\n");
-            for (var i = 0; i < lines.length; i++) {
-              if (lines[i].indexOf("data: ") === 0) { handle(lines[i].slice(6)); }
-            }
-            if (stop) { return; }
-            sep = buf.indexOf("\\n\\n");
-          }
-          return pump();
-        });
-      }
-      return pump();
+        return true;
+      });
     }).then(function () {
       if (acc && !errored) { messages.push({ role: "assistant", content: acc }); }
       renderMeta(out.wrap, hearth, finish, maxTokens);
@@ -381,6 +624,16 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
 
   el("token").value = readStored();
   el("token").addEventListener("change", function () { writeStored(token()); });
+  el("agentmode").checked = readAgentPref();
+  applyAgentMode();
+  el("agentmode").addEventListener("change", function () {
+    writeAgentPref(agentOn());
+    applyAgentMode();
+    status(agentOn()
+      ? "Agent mode on: this message runs through the local agent loop, which can read "
+        + "files under your allowed roots. Every step is shown."
+      : "Agent mode off: messages go to /v1/chat/completions, which has no tools.", false);
+  });
   el("reload").addEventListener("click", function () { writeStored(token()); loadModels(); });
   el("send").addEventListener("click", send);
   el("clear").addEventListener("click", function () {

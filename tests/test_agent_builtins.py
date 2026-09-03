@@ -23,7 +23,7 @@ from hearth.agent import (
     rag_search_tool,
     read_file_tool,
 )
-from hearth.config import Settings
+from hearth.config import Settings, get_settings
 from hearth.mcp.files import FileAccessError
 
 SECRET = "AGENT-CANARY-4b17"
@@ -290,3 +290,43 @@ def test_the_rendered_toolset_tells_the_model_what_each_tool_returns(rooted):
     assert "returns:" in rendered
     assert "never add these figures up yourself" in rendered
     assert str(DEFAULT_LIST_LIMIT) in rendered
+
+
+def test_a_relative_path_resolves_against_the_allowed_roots(tmp_path, monkeypatch):
+    """A model passes back the path a listing gave it; that path is relative.
+
+    Before this, `list_files(root="BankA")` resolved "BankA" against the process CWD — the
+    repo, not the operator's statements — and was refused as "outside every allowed root",
+    so the agent spent its budget arguing with a path it had just been handed. A usability
+    bug wearing a security bug's clothes.
+    """
+    from hearth.agent.builtins import _under_roots
+
+    root = tmp_path / "archive"
+    (root / "BankA" / "2026").mkdir(parents=True)
+    target = root / "BankA" / "2026" / "stmt.csv"
+    target.write_text("Date,Amount\n2026-01-01,1.00\n")
+    monkeypatch.setenv("HEARTH_FILE_ROOTS", str(root))
+    get_settings.cache_clear()
+
+    assert _under_roots("BankA/2026/stmt.csv") == str(target)
+    assert _under_roots(str(target)) == str(target)          # absolute passes through
+
+
+@pytest.mark.parametrize("escape", ["../../etc/passwd", "BankA/../../etc/passwd", "/etc/passwd"])
+def test_the_relative_convenience_does_not_widen_the_boundary(tmp_path, monkeypatch, escape):
+    """The prefix is supplied; the containment check is not skipped.
+
+    Pinned because a convenience added to a security primitive is exactly how one stops
+    being a boundary — the resolved candidate still has to survive resolve_under_roots.
+    """
+    from hearth.agent.builtins import _under_roots
+    from hearth.mcp.files import FileAccessError, resolve_under_roots
+
+    root = tmp_path / "archive"
+    (root / "BankA").mkdir(parents=True)
+    monkeypatch.setenv("HEARTH_FILE_ROOTS", str(root))
+    get_settings.cache_clear()
+
+    with pytest.raises(FileAccessError):
+        resolve_under_roots(_under_roots(escape))
