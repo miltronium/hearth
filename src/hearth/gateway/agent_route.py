@@ -36,8 +36,8 @@ from __future__ import annotations
 import json
 import logging
 import queue
-import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
 
 from fastapi import Depends, FastAPI, Request
@@ -219,6 +219,20 @@ def _is_reachable(tool_names: list[str], roots: list[Any]) -> bool:
     return bool(set(tool_names) - {"read_file", "list_files"})
 
 
+#: Every agent run executes on ONE long-lived worker thread, not a fresh thread per request.
+#:
+#: MLX's GPU stream is thread-local: a model loaded on one thread cannot be generated from
+#: another, and a run on a fresh thread dies with "There is no Stream(gpu, 0) in current
+#: thread". Measured, not theorised — against a live 14B, request 1 answered and requests 2
+#: and 3 both failed with provider_error. A thread per request makes this route work exactly
+#: once per server process, which is the kind of bug that looks like a flaky model.
+#:
+#: Reusing one worker also serialises runs, which is what we want regardless: two concurrent
+#: 14B loops would contend for the same ~9 GB of unified memory and neither would finish
+#: sooner. A queued run waits for the one ahead of it, itself bounded by its own max_seconds.
+_RUNNER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hearth-agent")
+
+
 def _stream_agent(
     *,
     agent_factory: Any,
@@ -268,8 +282,7 @@ def _stream_agent(
         finally:
             events.put(_DONE)
 
-    thread = threading.Thread(target=work, name="hearth-agent-run", daemon=True)
-    thread.start()
+    _RUNNER.submit(work)
 
     streamed: set[int] = set()
     while True:

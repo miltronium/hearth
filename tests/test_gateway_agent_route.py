@@ -493,3 +493,50 @@ def test_the_budget_request_model_bounds_nothing_upward():
     """
     asked = AgentBudgetRequest(max_iterations=10_000)
     assert asked.max_iterations == 10_000
+
+
+def test_every_run_executes_on_one_reused_worker(tmp_path, local_policy, statements):
+    """All agent runs share a single worker thread, and consecutive runs both succeed.
+
+    A thread per request made this route work exactly ONCE per server process: MLX's GPU
+    stream is thread-local, so the model loaded on request one could not be generated from
+    request two's fresh thread, which died with "There is no Stream(gpu, 0) in current
+    thread". Measured against a live 14B — request 1 answered, requests 2 and 3 returned
+    provider_error — and it presents as a flaky model rather than as a threading bug, which
+    is why it is pinned here rather than left to be rediscovered.
+
+    The thread identity is the assertion. A scripted provider cannot reproduce MLX's
+    thread-local state, so testing "two runs succeed" alone would pass again the moment
+    somebody reintroduces a per-request thread.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from hearth.gateway import agent_route
+
+    assert isinstance(agent_route._RUNNER, ThreadPoolExecutor)
+    assert agent_route._RUNNER._max_workers == 1
+
+    client, _, _ = _build(
+        tmp_path,
+        local_policy,
+        [_answer("first"), _answer("second")],
+        file_roots=str(statements),
+    )
+    threads: set[str] = set()
+
+    for expected in ("first", "second"):
+        with client.stream("POST", "/v1/hearth/agent", json={"task": "t"}) as response:
+            assert response.status_code == 200
+            terminal = None
+            for line in response.iter_lines():
+                if not line.startswith("data: ") or "[DONE]" in line:
+                    continue
+                payload = json.loads(line[6:])
+                if payload.get("object", "").endswith("run"):
+                    terminal = payload
+            assert terminal is not None
+            assert terminal["completed"] is True
+            assert terminal["answer"] == expected
+        threads.add(agent_route._RUNNER._thread_name_prefix)
+
+    assert len(threads) == 1
