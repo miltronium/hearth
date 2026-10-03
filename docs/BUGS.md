@@ -25,7 +25,7 @@ must fail when the fix is reverted.
 ## Contents
 
 **P0: offline-safety / privacy**
-- [B-001](#b-001) `hearth train` / `models convert` / `models export-coreml` can download (in progress)
+- ~~[B-001](#b-001) `hearth train` / `models convert` / `models export-coreml` can download~~ — fixed in `13105ef`
 - [B-002](#b-002) cmux C7: a sealed workspace does not contain its panes' children
 - [B-003](#b-003) Escalation fails, then local fails: no record that the prompt may have left
 
@@ -55,6 +55,15 @@ must fail when the fix is reverted.
 - [B-022](#b-022) `REASON_LOCAL_FAILURE` is declared and never used
 - [B-023](#b-023) Test-infra trap: empty `NO_PROXY` hides client disconnects from loopback tests
 
+**Added 2026-10-03 (found while closing B-001)**
+- [B-024](#b-024) `train_lora_real.sh` refuses models fetched with `hearth models pull` (P2)
+- [B-025](#b-025) Status probe expands `~` in `HEARTH_ROUTING_YAML`; the router does not (P2)
+- [B-026](#b-026) A failed `hearth train` leaves an empty run directory (P3)
+- [B-027](#b-027) A failed training subprocess ends `hearth train` in a traceback (P2)
+- [B-028](#b-028) `export-coreml` reports missing coremltools before a missing model (P3)
+- [B-029](#b-029) An unregistered `HEARTH_DEFAULT_MODEL` is silently ignored; `doctor --offline` does not warn (P2)
+- [B-030](#b-030) Test-infra: `sandbox-exec` is unavailable to agents and inside harness worktrees (P3)
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -64,8 +73,8 @@ must fail when the fix is reverted.
 ### B-001
 **`hearth train`, `hearth models convert`, `hearth models export-coreml` can download weights**
 
-- **Priority:** P0 · **Status:** in-progress-on-branch (another agent's worktree; nothing
-  committed to a named branch as of `d803f1a`) · **Effort:** M
+- **Priority:** P0 · **Status:** **FIXED** — merged in `13105ef` (commits `42ebf1f`,
+  `2868160`, `1d78c4d`; see "Fixed recently"). Kept here for the record. · **Effort:** M
 - **Evidence:** All three hand a repo id straight to a loader that goes online on a cache
   miss, bypassing `providers/mlx.py:resolve_local_model`:
   - `src/hearth/training/lora.py:145` puts `config.base_model` into `--model`, and
@@ -585,6 +594,98 @@ must fail when the fix is reverted.
   `connection_lost` before it judges cancellation, so a proxied run reports
   "inconclusive" instead of "fix failed".
 
+### B-024
+**`scripts/train_lora_real.sh` refuses models fetched with `hearth models pull`**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** The script's "is the base cached?" heredoc calls
+  `snapshot_download(repo_id=repo, local_files_only=True)` with no `cache_dir`
+  (`scripts/train_lora_real.sh` ~line 121), so it looks only in the hub cache. `hearth models
+  pull` writes to `~/.hearth/models`. Reported by the B-001 agent for
+  `mlx-community/Qwen2.5-3B-Instruct-4bit`, which lives only in `~/.hearth/models`.
+- **Impact:** The documented real-training script rejects a correctly pulled base model.
+- **Fix outline:** Replace the heredoc with `hearth.providers.mlx.resolve_local_model(repo,
+  allow_downloads=False)`, the resolver every other load path uses.
+- **Acceptance test:** With a model planted only in a temp `~/.hearth/models`, the pre-check
+  passes; with it absent, it fails with the `hearth models pull` hint and zero connects.
+
+### B-025
+**Status probe expands `~` in `HEARTH_ROUTING_YAML`; the router does not**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/status/probes.py:414` uses `Path(active).expanduser()`;
+  `src/hearth/router/policy.py:96` returns `Path(override)` unexpanded.
+- **Impact:** For `HEARTH_ROUTING_YAML=~/x.yaml` the status report describes a file the
+  router cannot open; the router then falls back to its built-in safe defaults (all local),
+  so it fails safe, but the report and the running policy disagree — the CLAUDE.md §3 shape.
+  `hearth doctor --offline` uses the router's own function and is not affected. Related: B-008.
+- **Fix outline:** One shared resolver (expand `~`; decide relative-path base per B-008) used
+  by both the router and the probe.
+- **Acceptance test:** For a `~/...` path, the probe's reported path equals the path
+  `load_policy()` actually read; reverting either side fails the test.
+
+### B-026
+**A failed `hearth train` leaves an empty run directory**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/training/lora.py:121` creates `data_dir` before
+  `runner_invocation` (`:212`) resolves the base model, so a `ModelNotOnDiskError` exits
+  after the directory exists.
+- **Fix outline:** Resolve the base model before creating any directory.
+- **Acceptance test:** A train with a not-on-disk base exits 1 and creates nothing under the
+  train root.
+
+### B-027
+**A failed training subprocess ends `hearth train` in a traceback**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/cli.py` (train command, ~line 846) catches only `RuntimeError`;
+  the runner uses `subprocess.run(..., check=True)`, whose `CalledProcessError` is a
+  `SubprocessError`, not a `RuntimeError`.
+- **Impact:** A training failure (OOM, bad data) prints a Python traceback instead of a
+  one-line error and exit code.
+- **Fix outline:** Catch `subprocess.CalledProcessError` and report the return code and the
+  child's last stderr lines; exit 1.
+- **Acceptance test:** A runner that exits non-zero yields exit 1 and no traceback in output.
+
+### B-028
+**`hearth models export-coreml` reports missing coremltools before a missing model**
+
+- **Priority:** P3 · **Status:** open (reported by the B-001 agent; not reproduced here —
+  this venv has no coremltools) · **Effort:** S
+- **Impact:** On a machine without coremltools, a mistyped model id is not reported until
+  coremltools is installed.
+- **Fix outline:** Resolve the source (disk-only) before the coremltools availability check.
+
+### B-029
+**An unregistered `HEARTH_DEFAULT_MODEL` is silently ignored; `doctor --offline` does not warn**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/registry/__init__.py:59-73` applies `HEARTH_DEFAULT_MODEL` only
+  when it names a registry entry. Measured: `HEARTH_DEFAULT_MODEL=mlx-community/
+  Qwen2.5-Coder-32B-Instruct-4bit hearth doctor --offline` → "SAFE", exit 0, checking the
+  catalog default (Coder-7B). The verdict is correct (it checked what would serve), but
+  nothing tells the operator their setting was discarded.
+- **Impact:** The operator believes a different model is serving — the trap CLAUDE.md §2
+  describes for misspelled variable names, one level down.
+- **Fix outline:** `doctor` (and `serve` startup) WARN when `HEARTH_DEFAULT_MODEL` is set but
+  unregistered, naming the model that will actually serve.
+- **Acceptance test:** With the variable set to an unregistered id, doctor output contains a
+  WARN naming both ids; removing the check fails the test.
+
+### B-030
+**Test-infra: `sandbox-exec` is unavailable to agents and inside harness worktrees**
+
+- **Priority:** P3 · **Status:** open (environment) · **Effort:** —
+- **Evidence:** `sandbox-exec -f /tmp/hearth_noegress.sb /usr/bin/true` → `sandbox_apply:
+  Operation not permitted` (exit 71) from subagents, and from the main session once the
+  harness had switched it into a worktree (2026-10-03). It worked earlier in the same
+  session.
+- **Impact:** Kernel-level no-egress proof cannot be produced by an agent. Agents fall back to
+  a Python-level connect guard (`sitecustomize`), which does not see DNS or native sockets.
+- **How to apply:** The operator runs the kernel-level check from their own shell
+  (docs/PRIVACY.md, "Verifying no egress yourself"). Label agent evidence as Python-level.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -607,3 +708,5 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `15a6b02` | `MLXEmbedder` disk-only load and MLX-thread confinement are now tested. (Its architecture problem is still open, B-011.) |
 | `54b152f` | Install hints use the one-command sync, so they no longer prune the other extras. |
 | `3919f7a` | Lint introduced on the branch was cleared. (The pre-existing findings are B-018.) |
+| `42ebf1f` | **B-001.** `hearth train`, `models convert`, `models export-coreml` resolve from disk and pin the hub offline in child processes; `models pull` is the only download path. Also fixed: every real `models convert` failed because the output dir was pre-created. |
+| `2868160` | `hearth doctor --offline`: a measured safe/unsafe verdict (exit 1 when unsafe) over routing, serving resolution, every reachable model, every load path, bind host and `HEARTH_ALLOW_DOWNLOADS`. |
