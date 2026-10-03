@@ -109,6 +109,13 @@ class MLXEmbedder:
         self.dim = 0
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        from ..providers.mlx import run_on_mlx_thread
+
+        # MLX arrays are bound to the thread that created them; share the chat provider's
+        # one MLX thread rather than running on whichever request thread called in.
+        return run_on_mlx_thread(self._embed_here, texts)
+
+    def _embed_here(self, texts: list[str]) -> list[list[float]]:
         self._ensure_loaded()
         import mlx.core as mx  # deferred heavy import
 
