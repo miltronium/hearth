@@ -216,3 +216,64 @@ def test_stream_whose_local_provider_fails_ends_with_an_error_and_done(tmp_path)
     errors = [e for e in events if isinstance(e, dict) and "error" in e]
     assert len(errors) == 1
     assert "weights missing" in errors[0]["error"]["message"]
+
+
+def test_a_remote_that_dies_mid_stream_is_billed_and_recorded(tmp_path):
+    """It received the prompt and produced tokens: that is spend, and a failed escalation."""
+    client = _client(tmp_path, FlakyRemote)
+    _stream(client)
+    roll = client.app.state.metrics.rollup()
+    assert roll["requests"] == 1
+    assert roll["escalations"] == 1
+    assert roll["escalations_failed"] == 1
+    assert roll["backend_mix"] == {"remote": 1}
+    assert client.app.state.router.budget.spent() > 0
+
+
+class AdapterSensitiveLocal(_Provider):
+    """A local backend whose (promoted) adapter is broken; base weights work."""
+
+    name = "mlx"
+
+    def generate(self, req: GenRequest) -> GenResult:
+        if req.adapter:
+            raise RuntimeError("bad adapter shape")
+        return GenResult(text="base answer", model=req.model, backend=self.name,
+                         prompt_tokens=1, completion_tokens=2)
+
+    def stream(self, req: GenRequest) -> Iterator[str]:
+        if req.adapter:
+            raise RuntimeError("bad adapter shape")
+        yield "base answer"
+
+
+def _adapter_client(tmp_path) -> TestClient:
+    client = _client(tmp_path, DeadRemote, local=AdapterSensitiveLocal())
+    router = client.app.state.router
+    router._resolve_adapter = lambda requested, task_class, model=None: "/adapters/broken"
+    return client
+
+
+def test_a_broken_adapter_falls_back_to_base_weights_when_streaming(tmp_path):
+    client = _adapter_client(tmp_path)
+    r = client.post(
+        "/v1/chat/completions",
+        json={"stream": True, "messages": [{"role": "user", "content": "summarize this"}]},
+    )
+    events = _events(r.text)
+    assert events[-1] == "[DONE]"
+    assert not any(isinstance(e, dict) and "error" in e for e in events)
+    text = "".join(
+        e["choices"][0]["delta"].get("content") or ""
+        for e in events
+        if isinstance(e, dict) and e.get("choices")
+    )
+    assert text == "base answer"
+
+
+def test_streaming_and_non_streaming_agree_on_a_broken_adapter(tmp_path):
+    client = _adapter_client(tmp_path)
+    body = {"messages": [{"role": "user", "content": "summarize this"}]}
+    plain = client.post("/v1/chat/completions", json=body)
+    assert plain.status_code == 200
+    assert plain.json()["choices"][0]["message"]["content"] == "base answer"

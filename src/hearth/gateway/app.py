@@ -495,36 +495,68 @@ def _stream_sse(
                 )
             )
 
-    try:
-        yield from relay(provider, stream_req, decision.model)
-    except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
-        if not decision.would_escalate or parts:
-            # Local failed, or a remote failed mid-answer: nothing honest to splice in.
-            yield from _stream_failure(provider, exc)
-            return
-        # The remote failed before saying anything: serve the whole answer locally, as
-        # Router.route does. The final hearth chunk reports local as what served.
-        escalation_failed = f"provider {provider.name!r} failed: {exc}"
-        decision = router.degrade_to_local(gen_req, decision, exc)
-        provider = router.local
-        stream_req = GenRequest(
-            messages=gen_req.messages,
-            model=decision.model,
-            max_tokens=gen_req.max_tokens,
-            temperature=gen_req.temperature,
-            adapter=router._resolve_adapter(adapter, decision.task_class, decision.model),
-        )
+    def relay_local(stream_req: GenRequest):
+        # Mirrors Router._generate: an adapter that fails before any text is retried once on
+        # base weights, so a broken promoted adapter cannot fail /chat while the
+        # non-streaming path quietly succeeds.
         try:
-            yield from relay(provider, stream_req, decision.model)
-        except Exception as local_exc:  # noqa: BLE001
-            yield from _stream_failure(provider, local_exc)
-            return
+            yield from relay(router.local, stream_req, stream_req.model)
+        except Exception as exc:  # noqa: BLE001
+            if stream_req.adapter is None or parts:
+                raise
+            logger.warning("stream failed with adapter; retrying on base weights: %s", exc)
+            yield from relay(
+                router.local,
+                GenRequest(
+                    messages=stream_req.messages,
+                    model=stream_req.model,
+                    max_tokens=stream_req.max_tokens,
+                    temperature=stream_req.temperature,
+                    adapter=None,
+                ),
+                stream_req.model,
+            )
+
+    try:
+        if not decision.would_escalate:
+            yield from relay_local(stream_req)
+        else:
+            try:
+                yield from relay(provider, stream_req, decision.model)
+            except Exception as exc:  # noqa: BLE001
+                if parts:
+                    # The remote received the prompt and produced tokens before dying: that
+                    # is spend and an escalation that failed, so it is billed and recorded —
+                    # not left to a log line — and nothing local is spliced onto its answer.
+                    _record_failed_remote_stream(
+                        router, gen_req, decision, provider, "".join(parts), adapter,
+                        f"provider {provider.name!r} failed mid-stream: {exc}",
+                        (time.perf_counter() - started) * 1000.0,
+                    )
+                    yield from _stream_failure(provider, exc)
+                    return
+                # The remote failed before saying anything: serve the whole answer locally,
+                # as Router.route does. The final hearth chunk reports local as what served.
+                escalation_failed = f"provider {provider.name!r} failed: {exc}"
+                decision = router.degrade_to_local(gen_req, decision, exc)
+                provider = router.local
+                stream_req = GenRequest(
+                    messages=gen_req.messages,
+                    model=decision.model,
+                    max_tokens=gen_req.max_tokens,
+                    temperature=gen_req.temperature,
+                    adapter=router._resolve_adapter(
+                        adapter, decision.task_class, decision.model
+                    ),
+                )
+                yield from relay_local(stream_req)
+    except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
+        yield from _stream_failure(provider, exc)
+        return
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
 
-    # Estimate tokens from streamed text (~4 chars/token) without a second tokenizer pass.
-    completion_tokens = max(1, len(text) // 4)
-    prompt_tokens = max(1, sum(len(m.content) for m in gen_req.messages) // 4)
+    prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
     if served_by == "remote":
         router.budget.spend(prompt_tokens + completion_tokens)
@@ -582,6 +614,43 @@ def _stream_sse(
                 }
             )
     yield _sse("[DONE]")
+
+
+def _estimate_stream_tokens(gen_req: GenRequest, text: str) -> tuple[int, int]:
+    """(prompt, completion) tokens estimated at ~4 chars/token, without a tokenizer pass."""
+    prompt_tokens = max(1, sum(len(m.content) for m in gen_req.messages) // 4)
+    return prompt_tokens, max(1, len(text) // 4)
+
+
+def _record_failed_remote_stream(
+    router: Router,
+    gen_req: GenRequest,
+    decision,
+    provider: ModelProvider,
+    partial_text: str,
+    adapter: str | None,
+    error: str,
+    latency_ms: float,
+) -> None:
+    """Bill and record a remote stream that died after emitting text."""
+    prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, partial_text)
+    router.budget.spend(prompt_tokens + completion_tokens)
+    router.metrics.record(
+        RequestRecord(
+            task_class=decision.task_class,
+            backend=provider.name,
+            model=decision.model,
+            served_by="remote",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=latency_ms,
+            escalated=True,
+            escalation_reason=decision.reason,
+            escalation_failed=error,
+            adapter=adapter,
+            estimated_frontier_tokens_saved=0,
+        )
+    )
 
 
 def _stream_failure(provider: ModelProvider, exc: Exception):
