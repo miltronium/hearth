@@ -167,7 +167,9 @@ def test_the_connect_counter_catches_a_resolver_that_goes_online(isolated, monke
         return real(*args, **kwargs)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", online)
-    with pytest.raises(Exception):
+    # It still ENDS in ModelNotOnDiskError: huggingface_hub turns the refused connection into
+    # the same "not cached" error a cache miss raises. Only the connect count differs.
+    with pytest.raises(ModelNotOnDiskError):
         resolve_local_model(REPO)
     assert connects, "the instrument failed to see a lookup that went online"
     connects.clear()  # the attempt was the point of this test, not a failure of it

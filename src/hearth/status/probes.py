@@ -520,10 +520,11 @@ def _serving_load_fact(env: dict[str, str]) -> Fact:
     """Whether a SERVING model load could download — measured on the real resolver.
 
     Asks the real resolver to resolve an id that cannot be on disk, with every socket
-    connect refused AND counted (``providers/mlx.py:audit_resolution``). ``disk-only`` requires both outcomes: the
-    resolver raised :class:`ModelNotOnDiskError`, and it attempted no connection. Either
-    alone is not enough — a resolver that went online for a nonexistent id could also end
-    in ModelNotOnDiskError if it swallowed the failure, which is the case this guards.
+    connect refused AND counted (``providers/mlx.py:audit_resolution``). ``disk-only``
+    requires both outcomes: the resolver raised :class:`ModelNotOnDiskError`, and it
+    attempted no connection. Either alone is not enough — a lookup that went online also
+    ends in ModelNotOnDiskError, because huggingface_hub reports a refused connection as
+    the same "not cached" error a cache miss raises.
     Read-only: lookups are ``local_files_only`` and nothing is loaded.
     """
     try:

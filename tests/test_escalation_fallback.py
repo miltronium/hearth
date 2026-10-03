@@ -157,7 +157,8 @@ def test_a_local_failure_is_not_retried_anywhere_else():
 
 def test_chat_completions_answers_locally_when_the_remote_is_down(tmp_path):
     client = _client(tmp_path, DeadRemote)
-    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": PROMPT}]})
+    body = {"messages": [{"role": "user", "content": PROMPT}]}
+    r = client.post("/v1/chat/completions", json=body)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["hearth"]["served_by"] == "local"

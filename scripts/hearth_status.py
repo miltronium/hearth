@@ -15,7 +15,7 @@ Usage:
     uv run --no-sync python scripts/hearth_status.py                # human-readable
     uv run --no-sync python scripts/hearth_status.py --json         # machine-readable
     uv run --no-sync python scripts/hearth_status.py --section learning egress
-    uv run --no-sync python scripts/hearth_status.py --strict       # exit 1 if anything is warn/fail
+    uv run --no-sync python scripts/hearth_status.py --strict     # exit 1 on any warn/fail
 
 Exit codes: 0 always, unless ``--strict`` is given and a ``warn``/``fail`` fact was measured
 (``unverified`` never fails the command — an unmeasured thing is not a broken thing).
