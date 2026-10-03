@@ -3,7 +3,7 @@
 Loads each model via the MLX backend, times a few representative coder prompts, and
 reports load time, tokens/sec, and peak memory. Requires the mlx extra:
 
-    uv run --extra mlx python scripts/bench.py
+    uv run --no-sync python scripts/bench.py
 
 Results inform the default_model choice in ROADMAP Phase 0.
 """

@@ -861,7 +861,7 @@ def probe_tests(*, root: Path) -> Section:
             "unmeasured",
             LEVEL_UNVERIFIED,
             "this command never runs the suite (it would mutate caches and race concurrent "
-            "edits); run `uv run pytest -q` for the only answer that counts",
+            "edits); run `uv run --no-sync pytest -q` for the only answer that counts",
         )
     )
     return Section(

@@ -55,7 +55,9 @@ case "$HEARTH_HOST" in
 esac
 
 # 2) the routing policy actually parses to a no-egress config (no remotes, all local/never).
-uv run python - "$HEARTH_ROUTING_YAML" <<'PY'
+# --no-sync, always: a bare `uv run` syncs to the DEFAULT dependency set and uninstalls
+# mlx/mlx-lm (CLAUDE.md §1) — which would break the very local backend this script forces.
+uv run --no-sync python - "$HEARTH_ROUTING_YAML" <<'PY'
 import sys
 from pathlib import Path
 from hearth.router.policy import load_policy
@@ -83,4 +85,4 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 fi
 
 echo "==> Starting sealed HEARTH daemon (loopback, offline, no remotes)…"
-exec uv run hearth serve
+exec uv run --no-sync hearth serve

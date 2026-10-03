@@ -98,7 +98,7 @@ command -v uv >/dev/null 2>&1 || die "uv not found on PATH. Install uv, then: uv
 # --- prereq: mlx extra installed (the real training backend) -------------------------
 # hearth.training.lora._mlx_lm_runner requires mlx_lm; check it is importable up front so
 # we fail with the fix hint before spending GPU time laying out the run dir.
-if ! uv run python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('mlx_lm') else 1)"; then
+if ! uv run --no-sync python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('mlx_lm') else 1)"; then
   die "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx"
 fi
 
@@ -112,7 +112,7 @@ fi
 # is not cached, huggingface_hub raises under HF_HUB_OFFLINE=1 and we abort with guidance
 # instead of hanging or (worse) downloading.
 echo "==> Verifying base model is cached (offline)…"
-if ! uv run python - "$BASE_MODEL" <<'PY'
+if ! uv run --no-sync python - "$BASE_MODEL" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
 repo = sys.argv[1]
@@ -127,34 +127,34 @@ PY
 then
   die "base model '${BASE_MODEL}' is not in the local HF cache.
       Pre-warm it ONCE from an unrestricted network, e.g.:
-          HF_HUB_OFFLINE=0 uv run huggingface-cli download ${BASE_MODEL}
+          HF_HUB_OFFLINE=0 uv run --no-sync huggingface-cli download ${BASE_MODEL}
       or: hearth models pull ${BASE_MODEL}
       then re-run this script (it stays offline)."
 fi
 
 # --- train (REAL) --------------------------------------------------------------------
 echo "==> Training (this uses the GPU and can take a while)…"
-TRAIN_CMD=(uv run hearth train --task "${TASK}" --base "${BASE_MODEL}" --data "${DATA}" --iters "${ITERS}")
+TRAIN_CMD=(uv run --no-sync hearth train --task "${TASK}" --base "${BASE_MODEL}" --data "${DATA}" --iters "${ITERS}")
 [ -n "${OUT}" ] && TRAIN_CMD+=(--out "${OUT}")
 echo "    ${TRAIN_CMD[*]}"
 "${TRAIN_CMD[@]}"
 
 echo "==> Registered candidate adapter(s):"
-uv run hearth adapters list --task "${TASK}"
+uv run --no-sync hearth adapters list --task "${TASK}"
 
 # --- promote (optional, eval-gated) --------------------------------------------------
 if [ "${DO_PROMOTE}" -eq 1 ]; then
   [ -n "${CANDIDATE_SCORE}" ] || die "--promote requires --candidate-score (prove the eval gate passed)"
   # hearth train names the candidate <task>-<run-id>; the newest one is what we just made.
-  ADAPTER_ID="$(uv run hearth adapters list --task "${TASK}" --status candidate \
+  ADAPTER_ID="$(uv run --no-sync hearth adapters list --task "${TASK}" --status candidate \
     | awk 'NR>3 {print $1}' | grep -v '^$' | tail -1 || true)"
   [ -n "${ADAPTER_ID}" ] || die "could not find a candidate adapter to promote for task '${TASK}'"
   echo "==> Promoting ${ADAPTER_ID} (candidate=${CANDIDATE_SCORE} incumbent=${INCUMBENT_SCORE:-none})…"
-  PROMOTE_CMD=(uv run hearth adapters promote "${ADAPTER_ID}" --candidate-score "${CANDIDATE_SCORE}")
+  PROMOTE_CMD=(uv run --no-sync hearth adapters promote "${ADAPTER_ID}" --candidate-score "${CANDIDATE_SCORE}")
   [ -n "${INCUMBENT_SCORE}" ] && PROMOTE_CMD+=(--incumbent-score "${INCUMBENT_SCORE}")
   "${PROMOTE_CMD[@]}"
   echo "==> Final adapter state:"
-  uv run hearth adapters list --task "${TASK}"
+  uv run --no-sync hearth adapters list --task "${TASK}"
 fi
 
 echo "==> Done. See docs/RUNBOOK_training.md for how to serve the promoted adapter."
