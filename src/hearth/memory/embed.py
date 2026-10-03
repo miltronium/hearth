@@ -135,14 +135,16 @@ class MLXEmbedder:
         if not mlx_embeddings_available():
             raise EmbeddingUnavailableError(
                 "the MLX embeddings backend is not installed. "
-                "Install it with: uv sync --extra embeddings"
+                "Install it with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra embeddings"
             )
         try:
             from mlx_lm import load  # deferred; part of the mlx-lm package
         except ImportError as exc:  # pragma: no cover - guarded by availability check
             raise EmbeddingUnavailableError(
                 "mlx-lm is not importable for the embeddings backend "
-                "(install: uv sync --extra embeddings)"
+                "(install: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra embeddings)"
             ) from exc
         try:
             from ..providers.mlx import resolve_local_model

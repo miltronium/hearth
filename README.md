@@ -67,24 +67,31 @@ phase-by-phase result log.
 ## Run it now
 
 ```bash
-uv sync --extra dev            # install (core + test deps; no MLX needed)
-uv run pytest -q               # 211 passing (1 skip: sqlite-vec extension absent)
-uv run hearth doctor           # environment preflight
-uv run hearth run "hello"      # one-shot (echo backend until MLX is installed)
-uv run hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080
-uv run hearth stats            # token-savings + escalation rollups
-uv run hearth mcp              # MCP server (stdio) so Claude Code can offload subtasks
+# install: every extra in ONE command (see the note below)
+uv sync --extra mlx --extra mcp --extra dev --extra files
+uv run --no-sync python -c "import mlx_lm, mcp, openpyxl, pypdf; print('ok')"   # verify
+
+uv run --no-sync pytest -q               # test suite
+uv run --no-sync hearth doctor           # environment preflight
+uv run --no-sync hearth run "hello"      # one-shot
+uv run --no-sync hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080
+uv run --no-sync hearth stats            # token-savings + escalation rollups
+uv run --no-sync hearth mcp              # MCP server (stdio) so Claude Code can offload subtasks
 
 # real Apple Silicon inference:
-uv sync --extra mlx            # pulls mlx + mlx-lm
-uv run hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-HEARTH_BACKEND=mlx uv run hearth serve
+uv run --no-sync hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+HEARTH_BACKEND=mlx uv run --no-sync hearth serve
 ```
+
+**Extras must be synced together, in one command:** `uv sync --extra X` syncs to exactly
+that set and *uninstalls* every extra not named. Use `uv run --no-sync` so `uv run` never
+re-syncs the environment. To add an optional extra, append it to the full command
+(e.g. `... --extra files --extra remote`).
 
 **Optional extras:** `mlx` (real inference), `remote` (Anthropic escalation),
 `embeddings` (MLX RAG embeddings), `mcp` (MCP server), `vec` (sqlite-vec vector store),
-`coreml` (Core ML export), `dev` (tests). Everything installs and runs without them —
-the core install uses the offline `echo` backend and a dependency-free vector store.
+`coreml` (Core ML export), `files` (PDF/XLSX parsers), `dev` (tests). The core runs without
+them, using the offline `echo` backend and a dependency-free vector store.
 
 ## CLI surface
 
@@ -118,15 +125,15 @@ the core install uses the offline `echo` backend and a dependency-free vector st
 ## Quickstart
 
 ```bash
-# install (editable, from the repo)
-uv sync --extra mlx            # core + real Apple Silicon inference
+# install (editable, from the repo) — all extras in one command; syncing one prunes the others
+uv sync --extra mlx --extra mcp --extra dev --extra files
 
 # pull a local coder model and start the daemon
-uv run hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-HEARTH_BACKEND=mlx uv run hearth serve   # OpenAI-compatible server on http://127.0.0.1:8080
+uv run --no-sync hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+HEARTH_BACKEND=mlx uv run --no-sync hearth serve   # OpenAI-compatible server on http://127.0.0.1:8080
 
 # one-shot from the CLI
-uv run hearth run "summarize this file" --file src/foo.swift
+uv run --no-sync hearth run "summarize this file" --file src/foo.swift
 
 # any OpenAI client just points at it
 export OPENAI_BASE_URL=http://127.0.0.1:8080/v1

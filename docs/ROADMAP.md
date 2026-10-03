@@ -142,7 +142,7 @@ wiring `mlx_lm.lora` behind `[mlx]` with an injectable runner, eval harness (exa
 (`candidate→promoted→retired`, gate-enforced promote, A/B flag), and per-request adapter
 hot-swap in `MLXProvider` (`GenRequest.adapter`, cached loads; router resolves id→path, degrades
 to base on failure). CLI: `hearth train`, `hearth adapters list|promote|retire`. Offline-safe
-(fakes; no real training run in tests). Real training needs `uv sync --extra mlx` + a cached
+(fakes; no real training run in tests). Real training needs `uv sync --extra mlx --extra mcp --extra dev --extra files` + a cached
 base model + `HF_HUB_OFFLINE=1` (still required here: `hearth train` passes `--base` straight
 to `mlx_lm.lora`, which does not go through `resolve_local_model`).
 
@@ -247,7 +247,7 @@ full evidence in [RESULTS.md](RESULTS.md).
 - **`sqlite-vec` VectorStore backend (done).** `SqliteVecVectorStore` (`memory/store.py`) drops in
   behind the `VectorStore` protocol via `HEARTH_VECTOR_STORE=sqlite-vec` (KNN over a `vec0` virtual
   table; L2-distance→cosine score conversion documented). Default stays the dependency-free
-  brute-force `SQLiteVectorStore`; `sqlite-vec` is lazy-imported behind `uv sync --extra vec`.
+  brute-force `SQLiteVectorStore`; `sqlite-vec` is lazy-imported behind `uv sync --extra mlx --extra mcp --extra dev --extra files --extra vec`.
   Extension-gated tests skip cleanly when the native lib is absent.
 - **Core ML / ANE path — generation loop done, validated end-to-end (ADR-011).** The offline
   Swift generation loop is wired and **validated on real weights** (Task C): `hearth models

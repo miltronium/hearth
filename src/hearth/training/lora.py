@@ -8,7 +8,7 @@ invocation — then delegates the actual (slow, heavy) training to an injectable
 
 Real path (needs the ``[mlx]`` extra, a cached base model, and offline HF):
 
-    uv sync --extra mlx
+    uv sync --extra mlx --extra mcp --extra dev --extra files
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1   # load base weights from cache
     hearth train --task extract --base <model-id> --data dataset.jsonl
 
@@ -193,7 +193,8 @@ def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
 
     if importlib.util.find_spec("mlx_lm") is None:
         raise RuntimeError(
-            "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx"
+            "mlx-lm is not installed. Install the training backend with: "
+            "uv sync --extra mlx --extra mcp --extra dev --extra files"
         )
     _preflight_batch_size(args, run_dir)
     subprocess.run([sys.executable, "-m", "mlx_lm.lora", *args], check=True)

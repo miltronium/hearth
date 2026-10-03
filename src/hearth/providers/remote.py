@@ -85,7 +85,8 @@ class RemoteProvider:
             import anthropic  # deferred; only needed on the anthropic escalation path
         except ImportError as exc:  # pragma: no cover - exercised via monkeypatch in tests
             raise RemoteUnavailableError(
-                "the anthropic SDK is not installed. Install it with: uv sync --extra remote"
+                "the anthropic SDK is not installed. Install it with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra remote"
             ) from exc
         # When no explicit key is configured the SDK auto-resolves ANTHROPIC_API_KEY / the
         # `ant auth login` profile. Only pass api_key when the config names an env var.

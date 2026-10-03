@@ -30,7 +30,7 @@ usage() {
 Usage: scripts/train_lora_real.sh --data <dataset.jsonl> [options]
 
 Runs a REAL LoRA fine-tune on Apple Silicon and (optionally) promotes the resulting
-adapter through HEARTH's eval gate. Requires: `uv sync --extra mlx`, an Apple-Silicon GPU,
+adapter through HEARTH's eval gate. Requires: `uv sync --extra mlx --extra mcp --extra dev --extra files`, an Apple-Silicon GPU,
 and the base model already cached under ~/.cache/huggingface (this script runs OFFLINE and
 will not download anything).
 
@@ -93,13 +93,13 @@ echo "    HF_HUB_OFFLINE=${HF_HUB_OFFLINE} TRANSFORMERS_OFFLINE=${TRANSFORMERS_O
 [ -f "${DATA}" ] || die "dataset not found: ${DATA}"
 
 # --- prereq: uv + hearth CLI ---------------------------------------------------------
-command -v uv >/dev/null 2>&1 || die "uv not found on PATH. Install uv, then: uv sync --extra mlx"
+command -v uv >/dev/null 2>&1 || die "uv not found on PATH. Install uv, then: uv sync --extra mlx --extra mcp --extra dev --extra files"
 
 # --- prereq: mlx extra installed (the real training backend) -------------------------
 # hearth.training.lora._mlx_lm_runner requires mlx_lm; check it is importable up front so
 # we fail with the fix hint before spending GPU time laying out the run dir.
 if ! uv run --no-sync python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('mlx_lm') else 1)"; then
-  die "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx"
+  die "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx --extra mcp --extra dev --extra files"
 fi
 
 # --- prereq: Apple Silicon -----------------------------------------------------------

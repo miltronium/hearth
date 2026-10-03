@@ -44,4 +44,4 @@ def test_mcp_without_extra_prints_hint_and_exits_nonzero(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     result = runner.invoke(app, ["mcp"], env={"COLUMNS": "200"})
     assert result.exit_code == 1
-    assert "uv sync --extra mcp" in result.stdout
+    assert "uv sync --extra mlx --extra mcp --extra dev --extra files" in result.stdout

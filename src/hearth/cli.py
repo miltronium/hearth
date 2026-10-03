@@ -478,7 +478,8 @@ def mcp() -> None:
             raise
         console.print(
             "[red]The MCP server requires the 'mcp' extra.[/red]\n"
-            "Install it with:  [cyan]uv sync --extra mcp[/cyan]"
+            "Install it with:  "
+            "[cyan]uv sync --extra mlx --extra mcp --extra dev --extra files[/cyan]"
         )
         raise typer.Exit(code=1) from None
 
@@ -605,7 +606,7 @@ def models_convert(
     Real conversion needs the ``[mlx]`` extra, source weights, and (for cached inputs)
     offline HF:
 
-        uv sync --extra mlx
+        uv sync --extra mlx --extra mcp --extra dev --extra files
         HF_HUB_OFFLINE=1 hearth models convert --source <id> --out ~/.hearth/models/<id> -q 4
 
     Add the produced model to ``config/models.yaml`` to serve it (registry is data, §5).
@@ -662,7 +663,7 @@ def models_export_coreml(
     for fully-offline, ANE-accelerated inference. Real export needs the ``[coreml]`` extra,
     source weights, and (for cached inputs) offline HF:
 
-        uv sync --extra coreml
+        uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml
         HF_HUB_OFFLINE=1 hearth models export-coreml --source <id> --out ~/.hearth/coreml/<id>
     """
     from .coreml import CoreMLExportConfig, CoreMLExportUnavailableError
@@ -773,7 +774,7 @@ def train(
 
     Real training needs the ``[mlx]`` extra, a cached base model, and offline HF:
 
-        uv sync --extra mlx
+        uv sync --extra mlx --extra mcp --extra dev --extra files
         HF_HUB_OFFLINE=1 hearth train --task extract --base <id> --data data.jsonl
 
     Training is eval-gated: a candidate must beat the incumbent on a golden set before it

@@ -2,7 +2,7 @@
 
 Wraps ``mlx-lm``. Import of the heavy dependency is deferred to load time so that the
 package (and the echo-backed skeleton) works without the ``mlx`` extra installed.
-Install it with: ``uv sync --extra mlx``.
+Install it with: ``uv sync --extra mlx --extra mcp --extra dev --extra files``.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from .base import (
     StreamDelta,
     normalize_finish_reason,
 )
-
 
 T = TypeVar("T")
 
@@ -244,7 +243,8 @@ class MLXProvider:
             return cached
         if not mlx_available():
             raise MLXUnavailableError(
-                "mlx-lm is not installed. Install the backend with: uv sync --extra mlx"
+                "mlx-lm is not installed. Install the backend with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files"
             )
         from mlx_lm import load  # deferred heavy import
 

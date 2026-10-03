@@ -23,7 +23,7 @@ the hardware-validated piece (``docs/HANDOFF.md`` → Task C).
 
 Real path (needs the ``[coreml]`` extra, source weights, and offline HF for cached inputs):
 
-    uv sync --extra coreml
+    uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
     hearth models export-coreml --source <hf-repo-or-path> --out ~/.hearth/coreml/<id>.mlpackage
 
@@ -380,7 +380,7 @@ def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     if importlib.util.find_spec("coremltools") is None:
         raise CoreMLExportUnavailableError(
             "coremltools is not installed. Install the Core ML export backend with: "
-            "uv sync --extra coreml"
+            "uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml"
         )
     if config.stateful:
         return _stateful_export_runner(config)
