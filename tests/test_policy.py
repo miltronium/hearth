@@ -19,9 +19,29 @@ def _write(tmp_path, text: str):
     return p
 
 
-def test_loads_bundled_default():
-    # The shipped config/routing.yaml parses and seeds the ARCHITECTURE §3 table.
+def test_bundled_default_is_no_egress(monkeypatch):
+    """The profile HEARTH uses when nothing is selected cannot send a task anywhere.
+
+    Asserted on the OUTCOME — no remote exists, and no task class can reach the remote
+    backend — not on the file's name or a comment that says "no-egress".
+    """
+    from hearth.router.classify import TASK_CLASSES
+    from hearth.router.policy import default_policy_path
+
+    monkeypatch.delenv("HEARTH_ROUTING_YAML", raising=False)
+    assert default_policy_path() == _CONFIG / "routing.yaml"
     policy = load_policy()
+    assert policy.remotes == {}
+    assert policy.remote_for() is None
+    assert policy.defaults.remote_budget_tokens_per_day == 0
+    for task_class in TASK_CLASSES:
+        rule = policy.rule_for(task_class)
+        assert (rule.backend, rule.escalate) == ("local", "never"), task_class
+
+
+def test_bundled_remote_profile_is_the_opt_in_escalation_table():
+    # config/routing.remote.yaml carries the ARCHITECTURE §3 escalation table, opt-in only.
+    policy = load_policy(_CONFIG / "routing.remote.yaml")
     assert policy.rule_for("reason").backend == "remote"
     assert policy.rule_for("reason").escalate == "always"
     assert policy.rule_for("summarize").escalate == "never"
@@ -154,7 +174,7 @@ def test_local_model_unchecked_when_registry_unavailable(tmp_path):
 
 def test_bundled_profiles_are_unpinned():
     """The shipped default/private profiles predate the field and must stay unpinned."""
-    for name in ("routing.yaml", "routing.private.yaml"):
+    for name in ("routing.yaml", "routing.remote.yaml", "routing.private.yaml"):
         policy = load_policy(_CONFIG / name)
         assert all(r.local_model is None for r in policy.classes.values()), name
 
