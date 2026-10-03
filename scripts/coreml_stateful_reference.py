@@ -42,6 +42,10 @@ from __future__ import annotations
 import os
 import sys
 
+# Disk-only twice over: the hub's offline switches (set before transformers is imported, so
+# they take) AND local_files_only on every from_pretrained, which holds even if this script
+# is ever imported after transformers. Pre-cache the model with `hearth models pull` or
+# `huggingface-cli download` first.
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
@@ -55,15 +59,17 @@ STATE_LEN = 256  # fixed KV-cache window (max context)
 NEG = -1e4  # fp16-safe mask fill (float32.min overflows fp16 to -inf)
 DO_PREDICT = "--no-predict" not in sys.argv  # CoreML predict + greedy parity (validated path)
 
-cfg = AutoConfig.from_pretrained(MODEL)
+cfg = AutoConfig.from_pretrained(MODEL, local_files_only=True)
 N_LAYERS = cfg.num_hidden_layers
 N_KV = cfg.num_key_value_heads
 HEAD_DIM = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
 print(f"layers={N_LAYERS} kv_heads={N_KV} head_dim={HEAD_DIM} vocab={cfg.vocab_size}")
 
-model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=torch.float32, attn_implementation="eager")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL, torch_dtype=torch.float32, attn_implementation="eager", local_files_only=True
+)
 model.eval()
-tok = AutoTokenizer.from_pretrained(MODEL)
+tok = AutoTokenizer.from_pretrained(MODEL, local_files_only=True)
 
 
 class StatefulQwen(torch.nn.Module):

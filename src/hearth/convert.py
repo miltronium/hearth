@@ -6,18 +6,24 @@ new base model can be brought into the registry. Like the LoRA orchestrator
 tests pass a fake and never launch a real conversion (model download is proxy-blocked and
 slow). The default runner calls ``mlx_lm.convert`` behind the ``[mlx]`` extra.
 
-Real path (needs the ``[mlx]`` extra, source weights, and offline HF for cached inputs):
+Real path (needs the ``[mlx]`` extra and source weights on disk):
 
     uv sync --extra mlx --extra mcp --extra dev --extra files
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
     hearth models convert --source <hf-repo-or-path> --out ~/.hearth/models/<id> -q 4
 
-``mlx_lm.convert`` is imported only inside the default runner, so importing this module
-(and the whole test suite) needs no extras.
+Disk-only with no ``HF_HUB_OFFLINE`` export (:func:`convert_invocation`): ``--source`` is
+resolved to a local path first, and ``mlx_lm convert`` runs in a child process with the hub
+pinned offline unless ``HEARTH_ALLOW_DOWNLOADS=1``. The path matters beyond the weights:
+handed a repo id, ``mlx_lm``'s ``save()`` also fetches that repo's model card from the hub.
+
+``mlx_lm`` runs only in that child, so importing this module (and the whole test suite)
+needs no extras.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,11 +95,37 @@ def convert(config: ConvertConfig, *, runner: Runner | None = None) -> ConvertOu
     )
 
 
-def _mlx_convert_runner(config: ConvertConfig) -> Path:
-    """Default runner: call ``mlx_lm.convert`` (needs the ``[mlx]`` extra).
+def convert_invocation(
+    config: ConvertConfig, *, allow_downloads: bool | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """The exact ``(command, child_env)`` the real runner launches — resolution included.
 
-    Kept out of the tested path — tests always inject a fake runner. Raising with the fix
-    hint mirrors :class:`hearth.providers.mlx.MLXUnavailableError`.
+    ``--source`` becomes the local path :func:`resolve_local_model` finds (raising
+    :class:`~hearth.providers.mlx.ModelNotOnDiskError` when it is not on disk and downloads
+    are off), and the child env pins the hub offline. Separate from the runner so
+    ``hearth doctor --offline`` can measure this path without converting anything.
+    """
+    from .providers.mlx import downloads_allowed, model_load_env, resolve_local_model
+
+    allow_downloads = downloads_allowed(allow_downloads)
+    source = resolve_local_model(config.source, allow_downloads=allow_downloads)
+    command = [
+        sys.executable, "-m", "mlx_lm", "convert",
+        "--hf-path", source,
+        "--mlx-path", str(config.output_dir),
+    ]
+    if config.quantize:
+        command += ["-q", "--q-bits", str(config.q_bits),
+                    "--q-group-size", str(config.q_group_size)]
+    return command, model_load_env(allow_downloads)
+
+
+def _mlx_convert_runner(config: ConvertConfig) -> Path:
+    """Default runner: ``python -m mlx_lm convert`` in a child (needs the ``[mlx]`` extra).
+
+    A child process rather than an in-process call so the hub's offline switches can be set
+    for it without touching this process's environment. Raising with the fix hint mirrors
+    :class:`hearth.providers.mlx.MLXUnavailableError`.
     """
     import importlib.util
 
@@ -102,16 +134,17 @@ def _mlx_convert_runner(config: ConvertConfig) -> Path:
             "mlx-lm is not installed. Install the conversion backend with: "
             "uv sync --extra mlx --extra mcp --extra dev --extra files"
         )
-    from mlx_lm import convert as mlx_convert  # deferred heavy import
-
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    mlx_convert(
-        config.source,
-        mlx_path=str(config.output_dir),
-        quantize=config.quantize,
-        q_bits=config.q_bits,
-        q_group_size=config.q_group_size,
-    )
+    command, env = convert_invocation(config)
+    # mlx_lm.convert refuses an existing --mlx-path ("Cannot save to the path … as it
+    # already exists"), so create only the parent. This runner used to mkdir the output dir
+    # itself, which made every real conversion fail at that check.
+    if config.output_dir.exists():
+        raise FileExistsError(
+            f"output dir {config.output_dir} already exists; mlx_lm convert writes a fresh "
+            "directory — remove it or choose another --out"
+        )
+    config.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(command, check=True, env=env)
     return config.output_dir
 
 
@@ -121,4 +154,5 @@ __all__ = [
     "ConvertUnavailableError",
     "Runner",
     "convert",
+    "convert_invocation",
 ]
