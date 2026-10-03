@@ -36,11 +36,11 @@ The harness that automates steps 3 + 6 is `scripts/train_lora_real.sh`
   # or: huggingface-cli download mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
   ```
 
-- Offline mode for all subsequent steps (load weights from cache, never download):
-
-  ```sh
-  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-  ```
+- Offline is the default: `hearth train` resolves `--base` from `~/.hearth/models` or the hub
+  cache and runs `mlx_lm.lora` with `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1` set for the
+  child, failing with `ModelNotOnDiskError` if the base is not on disk (unless
+  `HEARTH_ALLOW_DOWNLOADS=1`). Exporting the vars yourself is harmless but no longer needed.
+  `uv run --no-sync hearth doctor --offline` confirms it before you spend GPU time.
 
   `scripts/train_lora_real.sh` sets these itself and refuses to run if the base model is
   not already cached, so it can never silently download.

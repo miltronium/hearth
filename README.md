@@ -73,6 +73,7 @@ uv run --no-sync python -c "import mlx_lm, mcp, openpyxl, pypdf; print('ok')"   
 
 uv run --no-sync pytest -q               # test suite
 uv run --no-sync hearth doctor           # environment preflight
+uv run --no-sync hearth doctor --offline # is it safe to use HEARTH offline right now? (exit 1 if not)
 uv run --no-sync hearth run "hello"      # one-shot
 uv run --no-sync hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080
 uv run --no-sync hearth stats            # token-savings + escalation rollups
