@@ -248,7 +248,9 @@ Minor, but it should be marked in the record, not silently blended.
 return min(1.0, 0.4 + length / 300.0)
 ```
 
-Solving against the configured thresholds in `config/routing.yaml:31-36`: `draft` (0.6) escalates
+Solving against the configured thresholds in `config/routing.remote.yaml:47-50` (the opt-in
+escalating profile; the default `config/routing.yaml` is no-egress since 2026-10, so this
+applies only when that profile is selected): `draft` (0.6) escalates
 only when the last user message is **shorter than 60 characters**; `chat` (0.65) below 75; `code`
 (0.7) below 90. The entire confidence-based escalation policy reduces to *"is the prompt short?"*
 And the sign is backwards for the use case: a long, hard, ambiguous reasoning prompt reads as
@@ -953,7 +955,9 @@ model here"*, and a linear model is the right size of tiny.
 
 ### 6.3 Is it worth it? Mostly no — and the honest answer points somewhere better
 
-Count where the task class actually changes behaviour, per `config/routing.yaml:31-38`:
+Count where the task class actually changes behaviour, per `config/routing.remote.yaml:42-50`
+(the opt-in escalating profile; under the default no-egress `config/routing.yaml` every class is
+`local / never` and none of this costs money):
 
 - `summarize`, `extract`, `classify`, `rank` → `local / never`. **Six of nine classes are pinned
   local.** Misclassifying among them changes *nothing* except which adapter loads

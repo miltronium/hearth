@@ -39,6 +39,13 @@ against the real 7B weights.
 > `HF_HUB_OFFLINE=1` (and `TRANSFORMERS_OFFLINE=1`) to load from cache with no network.
 > Pre-warm the cache once from an unrestricted terminal, then run offline. An internal
 > `HF_ENDPOINT` mirror also works with no code change. (Phase 1 registry formalizes this.)
+>
+> *Update (2026-10):* serving no longer needs `HF_HUB_OFFLINE` to stay off the network.
+> `providers/mlx.py:resolve_local_model` resolves the MLX chat and embedding models from disk
+> only (`~/.hearth/models`, then the hub cache, `local_files_only`) and raises
+> `ModelNotOnDiskError` rather than downloading unless `HEARTH_ALLOW_DOWNLOADS=1`. The env vars
+> are still needed for `hearth train` and `hearth models convert` / `export-coreml`, which hand
+> a repo id straight to `mlx_lm` / `transformers`.
 
 ---
 
@@ -85,7 +92,9 @@ gating for escalation-eligible classes. Token-budget accountant (`observability/
 per-day remote budget; prefers local when scarce). Observability: per-request records +
 `observability/metrics.py`, `hearth stats` rollups, and `/v1/hearth/admin/metrics` reporting
 estimated frontier-tokens-saved. Router wired end-to-end through the gateway
-(`test_router_gateway.py`).
+(`test_router_gateway.py`). *(2026-10: the shipped `config/routing.yaml` is now no-egress; the
+escalating policy is the opt-in `config/routing.remote.yaml`, and a failed remote call degrades
+to local — see PRIVACY.md.)*
 
 ---
 
@@ -108,7 +117,8 @@ extra (`HEARTH_EMBEDDER=hash|mlx`). `VectorStore` protocol + embedded `SQLiteVec
 speedup). RAG layer: line-aware chunker, `ingest` (walks text files, skips binaries/vendor
 dirs), `query` with optional local-only `answer`. `/v1/embeddings` is now real
 (OpenAI-compatible); `/v1/hearth/rag/{ingest,query}` and `hearth rag {ingest,query}` shipped.
-Default path needs no extras and no network. Follow-up: a `sqlite-vec`/LanceDB backend can
+Default path needs no extras and no network (and since 2026-10 the `MLXEmbedder` loads from disk
+only, via `resolve_local_model`). Follow-up: a `sqlite-vec`/LanceDB backend can
 drop in behind `VectorStore`.
 
 ---
@@ -133,7 +143,8 @@ wiring `mlx_lm.lora` behind `[mlx]` with an injectable runner, eval harness (exa
 hot-swap in `MLXProvider` (`GenRequest.adapter`, cached loads; router resolves id→path, degrades
 to base on failure). CLI: `hearth train`, `hearth adapters list|promote|retire`. Offline-safe
 (fakes; no real training run in tests). Real training needs `uv sync --extra mlx` + a cached
-base model + `HF_HUB_OFFLINE=1`.
+base model + `HF_HUB_OFFLINE=1` (still required here: `hearth train` passes `--base` straight
+to `mlx_lm.lora`, which does not go through `resolve_local_model`).
 
 ---
 

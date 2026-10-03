@@ -30,7 +30,7 @@ and improvable.
 ## What it does
 
 - **Offload** — cheap tasks run locally (MLX on Apple Silicon), never touching your frontier budget.
-- **Escalate** — a policy layer decides when a task is too hard and hands off to a frontier/remote model.
+- **Escalate** — a policy layer decides when a task is too hard and hands off to a frontier/remote model. Opt-in: the shipped `config/routing.yaml` is no-egress; select `HEARTH_ROUTING_YAML=config/routing.remote.yaml` to enable escalation (see [docs/PRIVACY.md](docs/PRIVACY.md)).
 - **Embed** — local embeddings + a small vector store give agents cheap, grounded context (RAG).
 - **Train** — LoRA/QLoRA fine-tuning on your own code and docs, on-device, with an eval gate before anything ships.
 - **Serve any client** — OpenAI-compatible HTTP, a `hearth` CLI, a Swift SDK, and an MCP server (so Claude Code itself can delegate subtasks locally).
