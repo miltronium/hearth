@@ -109,6 +109,13 @@ class MLXEmbedder:
         self.dim = 0
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        from ..providers.mlx import run_on_mlx_thread
+
+        # MLX arrays are bound to the thread that created them; share the chat provider's
+        # one MLX thread rather than running on whichever request thread called in.
+        return run_on_mlx_thread(self._embed_here, texts)
+
+    def _embed_here(self, texts: list[str]) -> list[list[float]]:
         self._ensure_loaded()
         import mlx.core as mx  # deferred heavy import
 
@@ -128,17 +135,23 @@ class MLXEmbedder:
         if not mlx_embeddings_available():
             raise EmbeddingUnavailableError(
                 "the MLX embeddings backend is not installed. "
-                "Install it with: uv sync --extra embeddings"
+                "Install it with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra embeddings"
             )
         try:
             from mlx_lm import load  # deferred; part of the mlx-lm package
         except ImportError as exc:  # pragma: no cover - guarded by availability check
             raise EmbeddingUnavailableError(
                 "mlx-lm is not importable for the embeddings backend "
-                "(install: uv sync --extra embeddings)"
+                "(install: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra embeddings)"
             ) from exc
         try:
-            self._model, self._tokenizer = load(self.model_id)
+            from ..providers.mlx import resolve_local_model
+
+            # Disk-only resolution, like the chat provider: a bare repo id handed to
+            # mlx_lm.load is a network download, and an embed call must never be one.
+            self._model, self._tokenizer = load(resolve_local_model(self.model_id))
         except Exception as exc:  # pragma: no cover - needs a pre-pulled model
             raise EmbeddingUnavailableError(
                 f"could not load embedding model {self.model_id!r}: {exc}. "

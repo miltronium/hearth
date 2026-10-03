@@ -25,6 +25,9 @@ from hearth.coreml import (
     write_sidecar,
 )
 
+# The full install hint: every extra in one sync, so following it cannot prune the others.
+_COREML_EXTRA = "uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml"
+
 
 def _manifest(source: str = "org/model", **over) -> CoreMLManifest:
     base = dict(source=source, max_seq_len=512, vocab_size=100, eos_token_ids=[2, 7])
@@ -328,7 +331,7 @@ def test_default_runner_raises_when_coremltools_missing(tmp_path, monkeypatch):
     config = CoreMLExportConfig(source="org/model", output_dir=tmp_path / "m.mlpackage")
     with pytest.raises(CoreMLExportUnavailableError) as excinfo:
         coreml._coreml_export_runner(config)
-    assert "uv sync --extra coreml" in str(excinfo.value)
+    assert _COREML_EXTRA in str(excinfo.value)
 
 
 # --- CLI: `hearth models export-coreml` (mirrors tests/test_cli_phase7.py style) ---
@@ -380,7 +383,7 @@ def test_cli_export_coreml_unavailable_extra(tmp_path, monkeypatch):
         env={"COLUMNS": "200"},
     )
     assert result.exit_code == 1
-    assert "uv sync --extra coreml" in result.stdout
+    assert _COREML_EXTRA in result.stdout
 
 
 def test_cli_export_coreml_accepts_stateful_flag(tmp_path, monkeypatch):
@@ -416,4 +419,4 @@ def test_cli_export_coreml_accepts_stateful_flag(tmp_path, monkeypatch):
     )
     assert result.exit_code == 1
     assert "Approach B" in result.stdout  # the echo reflects the stateful path
-    assert "uv sync --extra coreml" in result.stdout
+    assert _COREML_EXTRA in result.stdout

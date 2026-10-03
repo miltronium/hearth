@@ -3,7 +3,7 @@
 Loads each model via the MLX backend, times a few representative coder prompts, and
 reports load time, tokens/sec, and peak memory. Requires the mlx extra:
 
-    uv run --extra mlx python scripts/bench.py
+    uv run --no-sync python scripts/bench.py
 
 Results inform the default_model choice in ROADMAP Phase 0.
 """
@@ -28,8 +28,11 @@ PROMPTS = [
 def bench_one(model_id: str, max_tokens: int = 128) -> dict:
     from mlx_lm import generate, load
 
+    from hearth.providers.mlx import resolve_local_model
+
     t0 = time.perf_counter()
-    model, tokenizer = load(model_id)
+    # Disk-only, like the provider: a bare repo id handed to load() is a download.
+    model, tokenizer = load(resolve_local_model(model_id))
     load_s = time.perf_counter() - t0
 
     total_tokens = 0

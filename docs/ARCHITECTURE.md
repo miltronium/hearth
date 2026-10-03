@@ -81,6 +81,10 @@ classes:
   chat:      { backend: local,  escalate: on_low_confidence, threshold: 0.65 }
 ```
 
+The shipped default `config/routing.yaml` is **no-egress** (zero remotes, every class
+`local`/`never`); the escalation table illustrated above is the opt-in
+`config/routing.remote.yaml`, selected with `HEARTH_ROUTING_YAML` (see `docs/PRIVACY.md`).
+
 **Escalation is a first-class, auditable event**, not a silent fallback. Every escalation
 records *why* (low confidence / class policy / explicit client request) so the policy can
 be tuned against real data.

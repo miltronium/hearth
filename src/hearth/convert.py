@@ -8,7 +8,7 @@ slow). The default runner calls ``mlx_lm.convert`` behind the ``[mlx]`` extra.
 
 Real path (needs the ``[mlx]`` extra, source weights, and offline HF for cached inputs):
 
-    uv sync --extra mlx
+    uv sync --extra mlx --extra mcp --extra dev --extra files
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
     hearth models convert --source <hf-repo-or-path> --out ~/.hearth/models/<id> -q 4
 
@@ -99,7 +99,8 @@ def _mlx_convert_runner(config: ConvertConfig) -> Path:
 
     if importlib.util.find_spec("mlx_lm") is None:
         raise ConvertUnavailableError(
-            "mlx-lm is not installed. Install the conversion backend with: uv sync --extra mlx"
+            "mlx-lm is not installed. Install the conversion backend with: "
+            "uv sync --extra mlx --extra mcp --extra dev --extra files"
         )
     from mlx_lm import convert as mlx_convert  # deferred heavy import
 

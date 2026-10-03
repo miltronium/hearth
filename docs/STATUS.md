@@ -7,10 +7,10 @@
 > into this file, that is the failure this whole document is about — put it in a probe.
 
 ```
-uv run python scripts/hearth_status.py            # human-readable
-uv run python scripts/hearth_status.py --json     # machine-readable
-uv run python scripts/hearth_status.py --section learning egress
-uv run python scripts/hearth_status.py --strict   # exit 1 on any warn/fail (CI)
+uv run --no-sync python scripts/hearth_status.py            # human-readable
+uv run --no-sync python scripts/hearth_status.py --json     # machine-readable
+uv run --no-sync python scripts/hearth_status.py --section learning egress
+uv run --no-sync python scripts/hearth_status.py --strict   # exit 1 on any warn/fail (CI)
 ```
 
 ---
@@ -96,9 +96,13 @@ never honoured cannot read as a green line. (That is bug #1 in miniature, and it
 regression-tested.)
 
 `no_egress_profile_available` fails when *no* profile in `config/` resolves to a zero-remote
-policy — sealed mode would have nothing to select. `download_egress` reports
-`HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE`, because the router is not the only thing on this
-machine that can reach the network.
+policy — sealed mode would have nothing to select. `serving_load_egress` is measured on the
+real resolver: it asks `providers/mlx.py:resolve_local_model` for a model that cannot be on
+disk and reports `disk-only` only if that raises `ModelNotOnDiskError` — so a resolver that
+regressed to handing `mlx_lm` a bare repo id reports as a warning even with
+`HEARTH_ALLOW_DOWNLOADS` unset. `download_egress` reports `HF_HUB_OFFLINE` /
+`TRANSFORMERS_OFFLINE`, which now govern only the load paths that bypass the resolver:
+`hearth train` and `hearth models convert` / `export-coreml`.
 
 ### Learning state — and the minimum detectable effect
 
@@ -182,7 +186,7 @@ the ones that matter most, and they are what a human still has to check.
 * **That a model loads.** Presence is a `stat()` of a resolvable weight file. Complete,
   uncorrupted, and compatible with the installed mlx-lm are all unverified — only a real
   load proves those.
-* **That the tests pass.** Never run by default. `uv run pytest -q` is the only answer.
+* **That the tests pass.** Never run by default. `uv run --no-sync pytest -q` is the only answer.
 * **Golden-set quality.** Row counts do not measure label correctness, duplication, leakage
   between corpus and golden set, or whether the golden set still matches the task being
   trained. The minimum detectable effect is an *upper bound* on what the test could show at

@@ -75,7 +75,7 @@ there.
 | **cmux update check / telemetry** | disabled (from C0 findings) | may run |
 | **cmux browser outbound** | local pages only; DOM piped to local HEARTH | may fetch remote |
 | **cmux AI / Founders cloud** | disabled | may be enabled |
-| **HEARTH escalation** | `routing.private.yaml` — 0 remotes, all `local`/`never` | `routing.yaml` — escalation allowed |
+| **HEARTH escalation** | `routing.private.yaml` — 0 remotes, all `local`/`never` | `routing.remote.yaml` — escalation allowed |
 
 The C0 audit (see ROADMAP) **enumerates cmux's actual outbound paths** so this table is grounded
 in what the binary does, not what the README says.

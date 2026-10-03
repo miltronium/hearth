@@ -23,7 +23,7 @@ The harness that automates steps 3 + 6 is `scripts/train_lora_real.sh`
 - The training backend installed:
 
   ```sh
-  uv sync --extra mlx
+  uv sync --extra mlx --extra mcp --extra dev --extra files
   ```
 
 - A base model cached locally. HEARTH's default is
@@ -81,7 +81,7 @@ write_dataset(ds, Path("data/extract.jsonl"))
 You can validate a hand-written file without a GPU:
 
 ```sh
-uv run python -c "from hearth.training.dataset import load_dataset; print(len(load_dataset('data/extract.jsonl')))"
+uv run --no-sync python -c "from hearth.training.dataset import load_dataset; print(len(load_dataset('data/extract.jsonl')))"
 ```
 
 ---
@@ -113,7 +113,7 @@ scripts/train_lora_real.sh --data data/extract.jsonl --task extract --iters 200
 Or drive the CLI directly (equivalent):
 
 ```sh
-HF_HUB_OFFLINE=1 uv run hearth train --task extract \
+HF_HUB_OFFLINE=1 uv run --no-sync hearth train --task extract \
     --base mlx-community/Qwen2.5-Coder-7B-Instruct-4bit \
     --data data/extract.jsonl --iters 200
 ```
@@ -131,7 +131,7 @@ named `<task>-<run-id>` (`hearth.cli:train`).
 - A candidate row in the adapter registry (`~/.hearth/adapters.json`). Confirm:
 
   ```sh
-  uv run hearth adapters list --task extract
+  uv run --no-sync hearth adapters list --task extract
   ```
 
   The new adapter shows `status = candidate` and an empty `eval` column.
@@ -147,7 +147,7 @@ with the objective metric, compares against the currently-promoted adapter for t
 incumbent), and prints the gate result:
 
 ```sh
-HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run hearth eval extract-<run-id> \
+HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
     --golden data/extract_golden.jsonl --metric exact \
     --system "Reply with only the answer, nothing else."
 # add --promote to promote in one step when the gate passes (same gate as `adapters promote`).
@@ -179,7 +179,7 @@ promoted. You can prove this with the CLI and no GPU by supplying scores directl
 
 ```sh
 # A weaker candidate is refused (gate not passed):
-uv run hearth adapters promote extract-badrun --candidate-score 0.40 --incumbent-score 0.71
+uv run --no-sync hearth adapters promote extract-badrun --candidate-score 0.40 --incumbent-score 0.71
 # -> "Promotion refused: ... candidate did not beat the incumbent"  (exit 1)
 ```
 
@@ -201,14 +201,14 @@ scripts/train_lora_real.sh --data data/extract.jsonl --task extract \
 or directly:
 
 ```sh
-uv run hearth adapters promote extract-<run-id> --candidate-score 0.82 --incumbent-score 0.71
+uv run --no-sync hearth adapters promote extract-<run-id> --candidate-score 0.82 --incumbent-score 0.71
 ```
 
 Confirm the lifecycle transitioned and any prior promoted adapter for the task was retired
 (the store keeps exactly one promoted adapter per task):
 
 ```sh
-uv run hearth adapters list --task extract
+uv run --no-sync hearth adapters list --task extract
 # candidate -> promoted; a previously-promoted adapter for `extract` shows `retired`.
 ```
 
@@ -224,7 +224,7 @@ hot-swaps it per request (Phase 4). Start the gateway with the MLX backend and r
 `extract` task; it degrades to base weights if the adapter fails to load.
 
 ```sh
-HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run hearth serve
+HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run --no-sync hearth serve
 ```
 
 ---

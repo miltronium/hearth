@@ -2,12 +2,17 @@
 
 Wraps ``mlx-lm``. Import of the heavy dependency is deferred to load time so that the
 package (and the echo-backed skeleton) works without the ``mlx`` extra installed.
-Install it with: ``uv sync --extra mlx``.
+Install it with: ``uv sync --extra mlx --extra mcp --extra dev --extra files``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+import queue
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import TypeVar
 
 from ..config import get_settings
 from .base import (
@@ -21,6 +26,82 @@ from .base import (
     normalize_finish_reason,
 )
 
+T = TypeVar("T")
+
+# MLX's GPU stream is thread-local: weights loaded on one thread cannot be run from another
+# ("There is no Stream(gpu, 0) in current thread"). FastAPI runs sync handlers on a pool of
+# threads, so before this every MLX call ran on whichever pool thread took the request —
+# measured against a live 14B, three concurrent /v1/chat/completions gave two 503s and one
+# answer. All MLX work in the process therefore runs on this ONE thread, whoever calls it
+# (gateway, agent, MCP, RAG). It also serializes the GPU, which is the honest model of one
+# GPU, and stops two requests racing on the provider's active-adapter state.
+_MLX_THREAD = threading.local()
+
+
+def _mark_mlx_thread() -> None:
+    _MLX_THREAD.active = True
+
+
+_MLX_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="hearth-mlx", initializer=_mark_mlx_thread
+)
+_END = object()
+
+
+def on_mlx_thread() -> bool:
+    """True when the caller is already the process's MLX thread."""
+    return getattr(_MLX_THREAD, "active", False)
+
+
+def run_on_mlx_thread(fn: Callable[..., T], *args, **kwargs) -> T:
+    """Run ``fn`` on the MLX thread and return its result (re-raising its exception)."""
+    if on_mlx_thread():  # re-entrant: submitting to our own single worker would deadlock
+        return fn(*args, **kwargs)
+    return _MLX_EXECUTOR.submit(fn, *args, **kwargs).result()
+
+
+def iterate_on_mlx_thread(make: Callable[[], Iterator[T]]) -> Iterator[T]:
+    """Drive the iterator ``make()`` returns on the MLX thread, yielding on the caller's.
+
+    Items cross over a queue, so a streaming response still streams. If the consumer stops
+    early (a client disconnects mid-answer) the worker sees the cancellation at the next
+    item and closes the generator, rather than generating to ``max_tokens`` while every
+    other request waits behind it.
+    """
+    if on_mlx_thread():
+        yield from make()
+        return
+    out: queue.Queue = queue.Queue()
+    cancelled = threading.Event()
+
+    def pump() -> None:
+        try:
+            iterator = make()
+            try:
+                for item in iterator:
+                    if cancelled.is_set():
+                        return
+                    out.put((True, item))
+            finally:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+            out.put((True, _END))
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the consumer's thread
+            out.put((False, exc))
+
+    _MLX_EXECUTOR.submit(pump)
+    try:
+        while True:
+            ok, item = out.get()
+            if not ok:
+                raise item
+            if item is _END:
+                return
+            yield item
+    finally:
+        cancelled.set()
+
 
 class MLXUnavailableError(RuntimeError):
     """Raised when the MLX backend is requested but ``mlx-lm`` isn't importable."""
@@ -33,8 +114,12 @@ def mlx_available() -> bool:
     return importlib.util.find_spec("mlx_lm") is not None
 
 
-def resolve_local_model(model_id: str) -> str:
-    """Return a local snapshot path for ``model_id`` if HEARTH has one, else ``model_id``.
+class ModelNotOnDiskError(RuntimeError):
+    """Raised when a model would have to be downloaded to load, and downloads are off."""
+
+
+def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> str:
+    """Return a local path for ``model_id``, never touching the network unless allowed.
 
     ``hearth models pull`` downloads into ``settings.models_dir`` (``~/.hearth/models``),
     but ``mlx_lm.load`` asks huggingface_hub, which resolves ``HF_HUB_CACHE`` ->
@@ -44,27 +129,83 @@ def resolve_local_model(model_id: str) -> str:
     followed by a run would report X missing — or quietly serve a *different* model that
     happened to sit in the default cache.
 
-    Resolution is explicit rather than by mutating ``os.environ``: a hidden global would
-    make this module disagree with anything that inspects the environment (such as
-    ``scripts/hearth_status.py``), which is the class of bug this is fixing. HEARTH's own
-    directory is checked first; anything else falls through to huggingface_hub's normal
-    resolution, so a model in the default cache still loads and an operator who set
-    ``HF_HUB_CACHE`` deliberately is unaffected.
+    Resolution order: an existing filesystem path, as-is; HEARTH's own directory; then the
+    huggingface_hub cache (its normal ``HF_HUB_CACHE`` -> ``HF_HOME/hub`` -> default order).
+    Both cache lookups are ``local_files_only``. Handing ``mlx_lm.load`` a bare repo id is
+    what used to reach huggingface.co — it calls ``snapshot_download`` with the network on,
+    on every load — so a model in neither place raises :class:`ModelNotOnDiskError` unless
+    ``allow_downloads`` (default ``settings.allow_downloads``, ``HEARTH_ALLOW_DOWNLOADS``)
+    is set. A load is never a download by accident.
+
+    Resolution is explicit rather than by mutating ``os.environ`` (e.g. ``HF_HUB_OFFLINE``):
+    a hidden global would make this module disagree with anything that inspects the
+    environment (such as ``scripts/hearth_status.py``), which is the class of bug this is
+    fixing.
     """
+    settings = get_settings()
+    if allow_downloads is None:
+        allow_downloads = settings.allow_downloads
+    candidate = Path(model_id).expanduser()
+    if candidate.exists():
+        return str(candidate)
     try:  # deferred: huggingface_hub is only present with the mlx/embeddings extras
         from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
     except ImportError:
+        # No hub client means mlx_lm cannot download either; let its own error speak.
         return model_id
-    models_dir = get_settings().models_dir
-    if not models_dir.is_dir():
+    models_dir = settings.models_dir
+    cache_dirs = ([str(models_dir)] if models_dir.is_dir() else []) + [None]
+    for cache_dir in cache_dirs:  # None = huggingface_hub's own cache resolution
+        try:
+            return snapshot_download(
+                repo_id=model_id, cache_dir=cache_dir, local_files_only=True
+            )
+        # Exactly the two "not here" outcomes of a local-only lookup: not cached, or not a
+        # repo id at all. Anything else — a network error, a blocked socket — is NOT a cache
+        # miss and must surface: swallowing it would let a resolver that reached for the
+        # network still end in ModelNotOnDiskError and read as disk-only.
+        except (LocalEntryNotFoundError, HFValidationError):
+            continue
+    if allow_downloads:
         return model_id
+    raise ModelNotOnDiskError(
+        f"model {model_id!r} is not on disk (looked in {models_dir} and the huggingface "
+        f"hub cache) and HEARTH does not download on load. Fetch it deliberately with "
+        f"`hearth models pull {model_id}`, or set HEARTH_ALLOW_DOWNLOADS=1."
+    )
+
+
+def audit_resolution(model_id: str, allow_downloads: bool) -> tuple[object, list[object]]:
+    """Resolve ``model_id`` with every socket connect refused AND recorded.
+
+    Returns ``(outcome, connect_attempts)`` where ``outcome`` is the resolved path or the
+    exception raised. The connect list is the evidence the status probe needs: the exception
+    type cannot tell disk-only resolution from a lookup that tried the network, because
+    huggingface_hub converts a refused connection into ``LocalEntryNotFoundError`` — the
+    same error a plain cache miss raises — so both end in :class:`ModelNotOnDiskError`
+    (measured: 8 connects, then ModelNotOnDiskError). Lives here, not in ``hearth.status``,
+    which may not import a networking module at all (tests/test_status_readonly.py).
+    Single-threaded use only: it swaps ``socket.socket.connect`` for the duration.
+    """
+    import socket
+
+    attempts: list[object] = []
+
+    def refuse(self, address, *args, **kwargs):
+        attempts.append(address)
+        raise OSError(f"resolution audit refused a network connect to {address!r}")
+
+    real = (socket.socket.connect, socket.socket.connect_ex)
+    socket.socket.connect = refuse
+    socket.socket.connect_ex = refuse
     try:
-        return snapshot_download(
-            repo_id=model_id, cache_dir=str(models_dir), local_files_only=True
-        )
-    except Exception:
-        # Not in HEARTH's directory (or not a repo id at all — it may already be a path).
-        return model_id
+        outcome: object = resolve_local_model(model_id, allow_downloads=allow_downloads)
+    except Exception as exc:  # noqa: BLE001 — the outcome IS the exception; caller judges
+        outcome = exc
+    finally:
+        socket.socket.connect, socket.socket.connect_ex = real
+    return outcome, attempts
 
 
 class MLXProvider:
@@ -102,7 +243,8 @@ class MLXProvider:
             return cached
         if not mlx_available():
             raise MLXUnavailableError(
-                "mlx-lm is not installed. Install the backend with: uv sync --extra mlx"
+                "mlx-lm is not installed. Install the backend with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files"
             )
         from mlx_lm import load  # deferred heavy import
 
@@ -146,8 +288,12 @@ class MLXProvider:
 
         Built on :meth:`stream_deltas` rather than ``mlx_lm.generate``: the latter returns
         only the decoded string, which is exactly the information loss that let a truncated
-        answer be reported as a clean stop.
+        answer be reported as a clean stop. Runs whole on the MLX thread: it reads the
+        active tokenizer after streaming, which another request could otherwise swap.
         """
+        return run_on_mlx_thread(self._generate_here, req)
+
+    def _generate_here(self, req: GenRequest) -> GenResult:
         deltas = list(self.stream_deltas(req))
         text = "".join(d.text for d in deltas).strip()
         finish_reason = next(
@@ -182,7 +328,11 @@ class MLXProvider:
         ``max_tokens`` cap); we pass that through so the gateway never has to guess. When
         :meth:`_clean_stream` cuts early at a literal terminator marker the loop ends before
         mlx-lm reports anything — that *is* an end-of-turn, so it normalizes to ``"stop"``.
+        Generation runs on the process's MLX thread (:func:`iterate_on_mlx_thread`).
         """
+        return iterate_on_mlx_thread(lambda: self._stream_deltas_here(req))
+
+    def _stream_deltas_here(self, req: GenRequest) -> Iterator[StreamDelta]:
         self._ensure_loaded(req.adapter)
         from mlx_lm import stream_generate
 

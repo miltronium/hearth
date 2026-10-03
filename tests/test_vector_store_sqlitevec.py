@@ -73,7 +73,8 @@ def test_add_without_extension_raises_fix_hint(tmp_path):
     store = SqliteVecVectorStore(root=tmp_path / "rag")
     with pytest.raises(SqliteVecUnavailableError) as excinfo:
         store.add("col", [_chunk("c0", "hello")], [[1.0, 0.0]])
-    assert "uv sync --extra vec" in str(excinfo.value)
+    canonical = "uv sync --extra mlx --extra mcp --extra dev --extra files"
+    assert f"{canonical} --extra vec" in str(excinfo.value)
 
 
 # -- real backend (skipped cleanly when the extra is absent) ---------------------------

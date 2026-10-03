@@ -58,13 +58,13 @@ the tier model (below) decides which are reachable in a given workspace.
 
 ## 3. The two-tier gated model
 
-This mirrors HEARTH's existing `routing.yaml` (open) vs `routing.private.yaml` (sealed) split and
+This mirrors HEARTH's existing `routing.remote.yaml` (open) vs `routing.private.yaml` (sealed) split and
 extends it to the whole cockpit.
 
 | | **Tier 0 — sealed** (confidential) | **Tier 1 — open** (non-confidential) |
 | --- | --- | --- |
 | Panes | native local, or Docker `--network none` | cloud VMs, networked Docker, SSH panes |
-| Model backend | HEARTH sealed (`routing.private.yaml`), escalation **off** | frontier escalation allowed (`routing.yaml`) |
+| Model backend | HEARTH sealed (`routing.private.yaml`), escalation **off** | frontier escalation allowed (`routing.remote.yaml`) |
 | cmux cloud features | disabled | enabled |
 | Browser | local only | may route through remote |
 | Guarantee | **structural** — no network path exists | **policy-fenced** — remotes exist, gated |
@@ -118,7 +118,7 @@ gate enforces the local-agent choice rather than trusting the user to make it ea
 ```
 OSS / non-confidential repo ──▶ cmux pane runs any agent (frontier allowed)
                                    ├─ cloud VM / networked Docker workspace
-                                   ├─ escalation to frontier model per routing.yaml
+                                   ├─ escalation to frontier model per routing.remote.yaml
                                    └─ HEARTH still available for cheap offload (cost, not privacy)
 ```
 

@@ -41,8 +41,8 @@ scripts/cmux/cmux-open ~/oss/my-repo            # verify + log the grant + launc
 scripts/cmux/cmux-open --cost                   # HEARTH escalation/cost rollup for open-tier frontier use
 ```
 
-In the open tier the launcher sets `HEARTH_ROUTING_YAML=config/routing.yaml` (frontier **escalation
-permitted**), installs **no** pf egress seal, and permits cloud/networked-Docker panes.
+In the open tier the launcher sets `HEARTH_ROUTING_YAML=config/routing.remote.yaml` (frontier
+**escalation permitted**; `config/routing.yaml` itself is no-egress since 2026-10), installs **no** pf egress seal, and permits cloud/networked-Docker panes.
 
 ## The gate (fail-closed to sealed) — demonstrated
 
@@ -71,7 +71,7 @@ The `--assert-open` exit-code contract the guard depends on is unit-tested
 | On wrong classification | n/a (sealed is default) | **fails closed to sealed** |
 | Egress | pf loopback-only seal (mandatory) | none (cloud/Docker allowed) |
 | Docker | `--network none` | networked OK |
-| HEARTH | `routing.private.yaml` (no remotes) | `routing.yaml` (escalation allowed) |
+| HEARTH | `routing.private.yaml` (no remotes) | `routing.remote.yaml` (escalation allowed) |
 | Logged | — | every grant + refusal |
 
 ## Status & next

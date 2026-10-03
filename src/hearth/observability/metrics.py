@@ -59,6 +59,10 @@ class RequestRecord:
     latency_ms: float
     escalated: bool = False
     escalation_reason: str | None = None
+    # Set when the request TRIED to escalate and the remote failed, so it was served local
+    # (router/route.py:degrade_to_local). Holds the remote's error. Without it a frontier
+    # outage would read in the metrics as a policy that simply never escalated.
+    escalation_failed: str | None = None
     adapter: str | None = None
     estimated_frontier_tokens_saved: int = 0
     ts: float = field(default_factory=time.time)
@@ -90,6 +94,7 @@ class MetricsStore:
                 "estimated_frontier_tokens_saved": 0,
                 "escalations": 0,
                 "escalation_rate": 0.0,
+                "escalations_failed": 0,
                 "backend_mix": {},
                 "class_mix": {},
                 "latency_ms": {"p50": 0.0, "p95": 0.0},
@@ -97,6 +102,7 @@ class MetricsStore:
 
         saved = sum(r.estimated_frontier_tokens_saved for r in records)
         escalations = sum(1 for r in records if r.escalated)
+        escalations_failed = sum(1 for r in records if r.escalation_failed)
         backend_mix: dict[str, int] = {}
         class_mix: dict[str, int] = {}
         for r in records:
@@ -108,6 +114,7 @@ class MetricsStore:
             "estimated_frontier_tokens_saved": saved,
             "escalations": escalations,
             "escalation_rate": round(escalations / total, 4),
+            "escalations_failed": escalations_failed,
             "backend_mix": backend_mix,
             "class_mix": class_mix,
             "latency_ms": {

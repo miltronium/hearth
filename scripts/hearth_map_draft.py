@@ -643,7 +643,10 @@ class LocalModel:
         except ImportError as exc:  # pragma: no cover - import guard
             raise ModelUnavailable(str(exc)) from None
         if not mlx_available():
-            raise ModelUnavailable("mlx-lm is not installed (uv sync --extra mlx)")
+            raise ModelUnavailable(
+                "mlx-lm is not installed "
+                "(uv sync --extra mlx --extra mcp --extra dev --extra files)"
+            )
         self._provider = MLXProvider(self.model_id)
         return self._provider
 

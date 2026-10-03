@@ -151,9 +151,13 @@ def test_unresolvable_adapter_degrades_to_base(tmp_path):
     assert provider.seen_adapters == [None]
 
 
-def test_mlx_provider_caches_per_adapter_loads():
+def test_mlx_provider_caches_per_adapter_loads(monkeypatch):
     """MLXProvider loads each distinct adapter path once and caches it (fake mlx_lm.load)."""
     from hearth.providers import mlx as mlx_mod
+
+    # Caching is under test, not resolution: "org/model" is on no disk, and resolution
+    # (tests/test_offline_model_resolution.py) would rightly refuse to download it.
+    monkeypatch.setattr(mlx_mod, "resolve_local_model", lambda model_id: model_id)
 
     calls: list[str | None] = []
 

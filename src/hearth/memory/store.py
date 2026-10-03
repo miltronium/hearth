@@ -190,7 +190,8 @@ class SqliteVecVectorStore:
 
     The ``sqlite_vec`` import is deferred to :meth:`_connect` (not module import), so importing
     this module needs no extra; requesting the backend without it raises
-    :class:`SqliteVecUnavailableError` with the fix hint ``uv sync --extra vec``. Construction
+    :class:`SqliteVecUnavailableError` with the fix hint
+    ``uv sync --extra mlx --extra mcp --extra dev --extra files --extra vec``. Construction
     itself is cheap and never loads the extension, so dispatch/protocol conformance are testable
     without the native library.
 
@@ -288,7 +289,8 @@ class SqliteVecVectorStore:
             import sqlite_vec
         except ImportError as exc:
             raise SqliteVecUnavailableError(
-                "sqlite-vec is not installed. Install the backend with: uv sync --extra vec"
+                "sqlite-vec is not installed. Install the backend with: "
+                "uv sync --extra mlx --extra mcp --extra dev --extra files --extra vec"
             ) from exc
 
         self.root.mkdir(parents=True, exist_ok=True)
@@ -326,10 +328,11 @@ def select_vector_store(settings: Settings | None = None) -> VectorStore:
 
     ``sqlite`` (default) is the embedded, file-based store (ADR-008). ``sqlite-vec`` (aliased
     ``sqlitevec``) opts into the indexed :class:`SqliteVecVectorStore` KNN backend, which needs
-    the ``[vec]`` extra (``uv sync --extra vec``). Any other value resolves against the
-    ``hearth.vector_stores`` plugin entry-point group, so a third-party store (e.g. LanceDB)
-    serves via ``HEARTH_VECTOR_STORE=<name>`` with zero core edits. Mirrors
-    :func:`~hearth.providers.select_provider`.
+    the ``[vec]`` extra
+    (``uv sync --extra mlx --extra mcp --extra dev --extra files --extra vec``).
+    Any other value resolves against the ``hearth.vector_stores`` plugin entry-point group,
+    so a third-party store (e.g. LanceDB) serves via ``HEARTH_VECTOR_STORE=<name>`` with zero
+    core edits. Mirrors :func:`~hearth.providers.select_provider`.
     """
     settings = settings or get_settings()
     choice = settings.vector_store.lower()

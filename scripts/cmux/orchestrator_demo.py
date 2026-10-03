@@ -5,7 +5,7 @@ Seeds a FakeCmuxClient with four panes in different states, runs the SAME triage
 live orchestrator uses, but against on-device HEARTH (MLX). Shows which panes the local model flags
 for attention and the notifications it would fire — no cmux GUI and no frontier tokens required.
 
-    HEARTH_BACKEND=mlx uv run python scripts/cmux/orchestrator_demo.py
+    HEARTH_BACKEND=mlx uv run --no-sync python scripts/cmux/orchestrator_demo.py
 """
 
 from __future__ import annotations

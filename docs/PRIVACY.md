@@ -8,6 +8,11 @@ the code, not aspiration.
 > **One-line summary.** In private mode HEARTH is a sealed local box: inference, embeddings,
 > RAG, and metrics all stay on-device, and the router has **no** path to send a task off the
 > machine. The remaining responsibility is the *calling agent* — see § "The caller caveat".
+>
+> **The default is no-egress too.** The shipped `config/routing.yaml` (used whenever
+> `HEARTH_ROUTING_YAML` is unset) has zero remotes, every class `local`/`never`, and a zero
+> remote budget. Escalation to a frontier model is opt-in — see § "Opting in to remote
+> escalation". Private mode adds the loopback/backend pins and the fail-closed check on top.
 
 ---
 
@@ -27,15 +32,64 @@ There are exactly **two** egress vectors in the entire codebase:
 
 1. **Escalation to a configured remote** (`providers/remote.py`) — if routing sends a class to a
    remote (Anthropic or an OpenAI-compatible endpoint), that task's content is sent there.
-   → **Private mode removes every remote and makes every class `local`/`never`** so the router
-   has nowhere to send a task (`config/routing.private.yaml`). The MCP tools already run with
-   `allow_escalation=False` regardless (`mcp/tools.py`), so agent offload is local even without
-   this profile — the profile also seals the HTTP/CAMBOT path.
-2. **Model-weight download** from HuggingFace — weights, *not your data*. → Private mode sets
-   `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` so it loads only cached weights and never hits
-   the network. Pre-cache once (`hearth models pull …`) from an unrestricted terminal.
+   → **The default profile (`config/routing.yaml`) and private mode
+   (`config/routing.private.yaml`) both define zero remotes and make every class
+   `local`/`never`**, so the router has nowhere to send a task. Only a profile you select
+   deliberately — `config/routing.remote.yaml` — permits this vector. The MCP tools run with
+   `allow_escalation=False` regardless (`mcp/tools.py`), so agent offload is local under any
+   profile; the profile is what governs the HTTP/CAMBOT/`/chat` path.
+2. **Model-weight download** from HuggingFace — weights, *not your data*. → The serving load
+   path no longer downloads by default: `providers/mlx.py:resolve_local_model` resolves a model
+   only from disk (see § "Model loading: what is disk-only and what is not"). Private mode also
+   sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, which still matters for the paths the
+   resolver does not cover. Pre-cache once (`hearth models pull …`) from an unrestricted terminal.
 
 No analytics, telemetry, or phone-home exists anywhere else.
+
+### Opting in to remote escalation
+
+The escalating profile — `reason` → remote `always`; `draft`/`code`/`chat` escalate
+`on_low_confidence` (a prompt-*length* stub today, so short messages escalate); remote = Claude
+`claude-opus-4-8` via the `anthropic` SDK; 200k tokens/day — lives in
+`config/routing.remote.yaml`. Until 2026-10 it was the default; it is now selected explicitly:
+
+```sh
+HEARTH_ROUTING_YAML=config/routing.remote.yaml hearth serve   # relative paths resolve from CWD
+```
+
+Only use it for work that may leave the machine. If an escalation's remote call fails
+(unreachable, SDK missing, rejected), `Router.route` degrades to the local provider
+(`Router.degrade_to_local`) and records `served_by=local`, `escalated=false`; the streaming
+path does the same if the remote fails before any text. The failure is recorded, not just
+logged: the request's `RequestRecord.escalation_failed` holds the remote's error, and the
+rollup (`/v1/hearth/admin/metrics`, `hearth stats`) counts `escalations_failed`, so a remote
+outage is visible rather than reading as a policy that never escalated. A stream that fails mid-answer, or a local provider that fails, ends with
+an error event (`hearth.provider.unavailable`) and then `[DONE]`. Note what the degrade does
+**not** mean: a remote call that failed may still have transmitted the prompt before failing.
+"Served local" describes the answer, not the egress.
+
+### Model loading: what is disk-only and what is not
+
+`providers/mlx.py:resolve_local_model` resolves a model id from disk only: an existing path
+as-is, then `~/.hearth/models`, then the huggingface hub cache (`HF_HUB_CACHE` → `HF_HOME/hub`
+→ `~/.cache/huggingface/hub`), both cache lookups `local_files_only`. A model in neither place
+raises `ModelNotOnDiskError` instead of downloading, unless `HEARTH_ALLOW_DOWNLOADS=1`
+(`settings.allow_downloads`, default off). Fetching is the explicit act `hearth models pull`.
+
+| Path | Disk-only without `HF_HUB_OFFLINE`? |
+| --- | --- |
+| `MLXProvider` — `hearth serve`, `/v1/chat/completions`, `/chat`, `hearth run`, `hearth agent`, `hearth eval`, MCP tools | **Yes** (resolver) |
+| `MLXEmbedder` (`HEARTH_EMBEDDER=mlx`) | **Yes** (same resolver) |
+| `hearth train` — passes `--base` straight to `mlx_lm.lora --model` | **No** — set `HF_HUB_OFFLINE=1` |
+| `hearth models convert` — passes `--source` to `mlx_lm.convert` | **No** — set `HF_HUB_OFFLINE=1` |
+| `hearth models export-coreml` — `transformers` `from_pretrained(source)` | **No** — set `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` |
+| `scripts/bench.py` | **Yes** (same resolver) |
+| `hearth models pull` | Downloads by design |
+
+This is a guarantee about HEARTH's **loader and router**, not machine-level containment.
+Nothing here inspects a firewall or a socket, and it says nothing about other processes,
+other libraries, or code that calls `huggingface_hub` / `providers/remote.py` directly. For
+that, measure (§ "Verifying no egress yourself", step 3).
 
 ## The caller caveat (read this)
 
@@ -93,9 +147,12 @@ scripts/hearth_private.sh --check     # verify the no-egress posture only (exit 
 scripts/hearth_private.sh             # verify, then serve on 127.0.0.1:8080
 ```
 
-The script forces `HEARTH_ROUTING_YAML=config/routing.private.yaml`, `HEARTH_HOST=127.0.0.1`,
+The script defaults `HEARTH_ROUTING_YAML=config/routing.private.yaml`, forces `HEARTH_HOST=127.0.0.1`,
 `HEARTH_BACKEND=mlx`, and offline HF, and **fails closed** (won't start) if the routing policy
-resolves any remote or any escapable class.
+resolves any remote or any escapable class. It honours an inherited `HEARTH_ROUTING_YAML` or
+`--profile PATH` and re-runs the same assertions against that profile — so pointing it at
+`config/routing.remote.yaml` refuses to start. The default profile is no-egress already; what
+the script adds is that the posture is *verified* before serving rather than assumed.
 
 ## Verifying no egress yourself
 
@@ -104,7 +161,7 @@ resolves any remote or any escapable class.
 scripts/hearth_private.sh --check
 
 # 2. Confirm a would-escalate class stays local under this profile:
-HEARTH_ROUTING_YAML=config/routing.private.yaml uv run python -c "
+HEARTH_ROUTING_YAML=config/routing.private.yaml uv run --no-sync python -c "
 from hearth.router.policy import load_policy; p=load_policy()
 print('remotes:', p.remotes, '| reason ->', p.classes['reason'])"
 #   -> remotes: {} | reason -> ClassRule(backend='local', escalate='never')

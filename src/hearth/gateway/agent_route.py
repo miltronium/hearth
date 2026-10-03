@@ -226,6 +226,9 @@ def _is_reachable(tool_names: list[str], roots: list[Any]) -> bool:
 #: thread". Measured, not theorised — against a live 14B, request 1 answered and requests 2
 #: and 3 both failed with provider_error. A thread per request makes this route work exactly
 #: once per server process, which is the kind of bug that looks like a flaky model.
+#: (That thread-locality is now handled at the source — ``providers/mlx.py`` runs all MLX
+#: work on one process-wide thread, which also covers plain chat, which this runner never
+#: did. This runner stays because it still serialises whole agent runs, below.)
 #:
 #: Reusing one worker also serialises runs, which is what we want regardless: two concurrent
 #: 14B loops would contend for the same ~9 GB of unified memory and neither would finish

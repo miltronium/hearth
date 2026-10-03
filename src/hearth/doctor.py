@@ -72,7 +72,8 @@ def run_checks(settings: Settings | None = None) -> list[Check]:
             has_mlx,
             "mlx-lm importable"
             if has_mlx
-            else "mlx-lm not installed (echo fallback active; `uv sync --extra mlx`)",
+            else "mlx-lm not installed (echo fallback active; "
+            "`uv sync --extra mlx --extra mcp --extra dev --extra files`)",
             fatal=False,
         )
     )

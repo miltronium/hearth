@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # blow up memory or the local model's context. Files above it are refused, not truncated.
     file_max_bytes: int = 2_000_000
 
+    # Whether loading a model may download it. Off: a model that is on neither
+    # ``models_dir`` nor the huggingface hub cache fails to load with a clear error instead
+    # of silently reaching huggingface.co (providers/mlx.py:resolve_local_model). Fetching
+    # is an explicit act — `hearth models pull` — not a side effect of serving a request.
+    allow_downloads: bool = False
+
     # Root for runtime state (token, model cache, logs).
     home: Path = Path.home() / ".hearth"
 

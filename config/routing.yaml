@@ -1,5 +1,15 @@
 # HEARTH routing policy — declarative, tuned without redeploy (ADR-005, ARCHITECTURE §3).
 #
+# THIS DEFAULT PROFILE IS NO-EGRESS. Every class runs `local`, escalates `never`, and there
+# are ZERO remotes — so `hearth serve`, /v1/chat/completions and the /chat page cannot send a
+# task off this machine unless the operator deliberately selects another profile. Escalation
+# to a frontier model is opt-in:
+#
+#     HEARTH_ROUTING_YAML=config/routing.remote.yaml hearth serve
+#
+# (Until 2026-10 this file escalated `reason` to Claude by default and let short chat
+# messages escalate on a length-based confidence stub. That profile is routing.remote.yaml.)
+#
 # Routing is *data, not code*. The engine (src/hearth/router/) executes this policy.
 # A bad or missing file never crashes the server: HEARTH logs a warning and falls back
 # to safe built-in defaults (every class local, never escalate).
@@ -20,7 +30,7 @@
 #                Resolution order: request model -> class local_model -> defaults
 #                .local_model -> registry default. See config/routing.finance.yaml.
 #
-# remotes.<name>:
+# remotes.<name>:   (see config/routing.remote.yaml for a worked example)
 #   protocol   anthropic | openai    anthropic uses the official SDK; openai is generic
 #   model      model id to request
 #   base_url   (openai only) OpenAI-compatible endpoint, e.g. a LAN server
@@ -29,31 +39,17 @@
 
 defaults:
   local_model: auto
-  remote: default
-  remote_budget_tokens_per_day: 200000
+  remote: none                     # names a remote that does not exist -> remote_for() == None
+  remote_budget_tokens_per_day: 0  # no remote budget at all
 
 classes:
-  summarize: { backend: local,  escalate: never }
-  extract:   { backend: local,  escalate: never }
-  classify:  { backend: local,  escalate: never }
-  rank:      { backend: local,  escalate: never }
-  draft:     { backend: local,  escalate: on_low_confidence, threshold: 0.6 }
-  code:      { backend: local,  escalate: on_low_confidence, threshold: 0.7 }
-  reason:    { backend: remote, escalate: always }
-  chat:      { backend: local,  escalate: on_low_confidence, threshold: 0.65 }
+  summarize: { backend: local, escalate: never }
+  extract:   { backend: local, escalate: never }
+  classify:  { backend: local, escalate: never }
+  rank:      { backend: local, escalate: never }
+  draft:     { backend: local, escalate: never }
+  code:      { backend: local, escalate: never }
+  reason:    { backend: local, escalate: never }
+  chat:      { backend: local, escalate: never }
 
-remotes:
-  # Default escalation target: Claude via the official `anthropic` SDK. No key lives here —
-  # the SDK auto-resolves ANTHROPIC_API_KEY / the `ant auth login` profile. Set `api_key_env`
-  # to name a specific env var instead. Thinking is OFF (it 400s on Opus 4.8).
-  default:
-    protocol: anthropic
-    model: claude-opus-4-8
-
-  # Example: a generic OpenAI-compatible endpoint (LAN server, gateway, non-Claude model).
-  # Uncomment and point `defaults.remote` at it to use.
-  # lan:
-  #   protocol: openai
-  #   model: local-llama-70b
-  #   base_url: http://10.0.0.5:8000/v1
-  #   api_key_env: LAN_LLM_API_KEY
+remotes: {}   # no escalation targets exist — the router cannot egress a task

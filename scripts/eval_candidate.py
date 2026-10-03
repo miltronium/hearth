@@ -7,7 +7,7 @@ candidate with the objective exact-match metric. Prints both scores and whether 
 candidate beats the base (treated as the incumbent floor for the promote gate).
 
 Usage:
-    HF_HUB_OFFLINE=1 uv run python scripts/eval_candidate.py <adapter-id> \
+    HF_HUB_OFFLINE=1 uv run --no-sync python scripts/eval_candidate.py <adapter-id> \
         --golden data/route_golden.jsonl \
         --system "You are a ticket router. Reply with ONLY the queue code."
 """
@@ -80,7 +80,7 @@ def main() -> None:
     print(f"candidate {m} score: {cand_report.score:.4f}  per-example={cand_report.per_example}")
     print(f"beats_incumbent(candidate, base) = {passed}")
     print(
-        f"\nPromote with:\n  uv run hearth adapters promote {args.adapter_id} "
+        f"\nPromote with:\n  uv run --no-sync hearth adapters promote {args.adapter_id} "
         f"--candidate-score {cand_report.score:g} --incumbent-score {base_report.score:g}"
     )
 

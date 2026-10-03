@@ -41,7 +41,7 @@ def _needs(module: str):
     """Skip a test when an optional ``[files]`` parser isn't installed."""
     return pytest.mark.skipif(
         importlib.util.find_spec(module) is None,
-        reason=f"{module} is not installed (uv sync --extra files)",
+        reason=f"{module} is not installed ({files_module._FILES_EXTRA})",
     )
 
 
@@ -551,7 +551,7 @@ def test_xlsx_without_the_extra_names_the_format_and_the_extra(tmp_path, root, m
         read_text_file(root / "book.xlsx", settings=settings)
     message = str(excinfo.value)
     assert "XLSX" in message and "openpyxl" in message
-    assert "uv sync --extra files" in message
+    assert "uv sync --extra mlx --extra mcp --extra dev --extra files" in message
 
 
 def test_xlsx_table_without_the_extra_also_refuses_cleanly(tmp_path, root, monkeypatch):
@@ -560,7 +560,7 @@ def test_xlsx_table_without_the_extra_also_refuses_cleanly(tmp_path, root, monke
     _hide_module(monkeypatch, "openpyxl")
     with pytest.raises(FileAccessError) as excinfo:
         read_table(root / "book.xlsx", settings=settings)
-    assert "uv sync --extra files" in str(excinfo.value)
+    assert "uv sync --extra mlx --extra mcp --extra dev --extra files" in str(excinfo.value)
 
 
 # -- PDF ---------------------------------------------------------------------------------
@@ -631,7 +631,7 @@ def test_pdf_without_the_extra_names_the_format_and_the_extra(tmp_path, root, mo
         read_text_file(root / "aug.pdf", settings=settings)
     message = str(excinfo.value)
     assert "PDF" in message and "pypdf" in message
-    assert "uv sync --extra files" in message
+    assert "uv sync --extra mlx --extra mcp --extra dev --extra files" in message
 
 
 def test_pdf_is_not_readable_as_a_table(tmp_path, root):

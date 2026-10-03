@@ -69,7 +69,7 @@ _PDF_MIN_CHARS_PER_PAGE = 32
 
 # The pip extra that carries the optional parsers, quoted in every missing-dependency error
 # so the operator is told the fix rather than left with a traceback.
-_FILES_EXTRA = "uv sync --extra files"
+_FILES_EXTRA = "uv sync --extra mlx --extra mcp --extra dev --extra files"
 
 #: A handler that renders a file's bytes as text for a prompt.
 TextReader = Callable[[bytes, str], str]

@@ -466,6 +466,8 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
         )
     )
 
+    facts.append(_serving_load_fact(env))
+
     offline = {k: env.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_ENDPOINT")}
     facts.append(
         Fact(
@@ -474,8 +476,9 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             LEVEL_OK,
             "HF_HUB_OFFLINE="
             f"{offline['HF_HUB_OFFLINE'] or 'unset'}, "
-            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — the router "
-            "is not the only thing that can reach the network; a model load can too",
+            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — governs the "
+            "load paths that bypass the resolver: `hearth train`, `hearth models convert` / "
+            "`export-coreml`. Serving is covered by serving_load_egress above",
             {k: v for k, v in offline.items() if v is not None},
         )
     )
@@ -493,6 +496,94 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             "Whether the SERVER was started with the profile reported as active is "
             "unverified — this reads the environment of the status command, not of the daemon.",
         ),
+    )
+
+
+_PROBE_MODEL_ID = "hearth-status/no-such-model"
+
+
+def _parse_allow_downloads(raw: str | None) -> bool:
+    """Parse ``HEARTH_ALLOW_DOWNLOADS`` with pydantic's own bool rules — Settings' parser.
+
+    A hand-rolled ``in {"1", "true", ...}`` disagreed with Settings on ``y``/``t``/``on``-style
+    values, so the probe said disk-only while serving would download. Raises on a value
+    Settings itself would reject.
+    """
+    if raw is None or raw.strip() == "":
+        return False
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(bool).validate_python(raw.strip())
+
+
+def _serving_load_fact(env: dict[str, str]) -> Fact:
+    """Whether a SERVING model load could download — measured on the real resolver.
+
+    Asks the real resolver to resolve an id that cannot be on disk, with every socket
+    connect refused AND counted (``providers/mlx.py:audit_resolution``). ``disk-only``
+    requires both outcomes: the resolver raised :class:`ModelNotOnDiskError`, and it
+    attempted no connection. Either alone is not enough — a lookup that went online also
+    ends in ModelNotOnDiskError, because huggingface_hub reports a refused connection as
+    the same "not cached" error a cache miss raises.
+    Read-only: lookups are ``local_files_only`` and nothing is loaded.
+    """
+    try:
+        allow = _parse_allow_downloads(env.get("HEARTH_ALLOW_DOWNLOADS"))
+    except Exception as exc:  # noqa: BLE001 — Settings would refuse this value at startup
+        return Fact(
+            "serving_load_egress",
+            "HEARTH_ALLOW_DOWNLOADS unparseable",
+            LEVEL_FAIL,
+            f"{env.get('HEARTH_ALLOW_DOWNLOADS')!r} is not a boolean Settings accepts: {exc}",
+            {},
+        )
+    try:
+        from ..providers.mlx import ModelNotOnDiskError, audit_resolution
+    except Exception as exc:  # noqa: BLE001 — a probe reports, it does not crash
+        return Fact("serving_load_egress", "unmeasured", LEVEL_UNVERIFIED, str(exc), {})
+
+    outcome, attempts = audit_resolution(_PROBE_MODEL_ID, allow_downloads=allow)
+
+    data = {
+        "allow_downloads": allow,
+        "resolver_raised": isinstance(outcome, ModelNotOnDiskError),
+        "connect_attempts": len(attempts),
+    }
+    if attempts:
+        return Fact(
+            "serving_load_egress",
+            "resolver attempted the network",
+            LEVEL_FAIL,
+            f"resolving a model that is not on disk tried {len(attempts)} connect(s) "
+            f"({attempts[0]!r}…) — a serving load is NOT disk-only",
+            data,
+        )
+    if isinstance(outcome, ModelNotOnDiskError):
+        return Fact(
+            "serving_load_egress",
+            "disk-only",
+            LEVEL_OK,
+            "a model on neither ~/.hearth/models nor the hub cache fails to load instead of "
+            "downloading, with no connect attempted — serve, chat, agent, MCP, RAG. Measured "
+            "with THIS command's environment, not the running daemon's",
+            data,
+        )
+    if isinstance(outcome, Exception):
+        return Fact(
+            "serving_load_egress",
+            "unmeasured",
+            LEVEL_UNVERIFIED,
+            f"the resolver raised {type(outcome).__name__}: {outcome}",
+            data,
+        )
+    return Fact(
+        "serving_load_egress",
+        "a load can download",
+        LEVEL_WARN,
+        f"resolve_local_model handed back {outcome!r} for a model that is not on disk, so "
+        "mlx_lm.load would fetch it from huggingface.co"
+        + (" — HEARTH_ALLOW_DOWNLOADS is set" if allow else " — and downloads are NOT opted in"),
+        data,
     )
 
 
@@ -818,7 +909,7 @@ def probe_tests(*, root: Path) -> Section:
             "unmeasured",
             LEVEL_UNVERIFIED,
             "this command never runs the suite (it would mutate caches and race concurrent "
-            "edits); run `uv run pytest -q` for the only answer that counts",
+            "edits); run `uv run --no-sync pytest -q` for the only answer that counts",
         )
     )
     return Section(

@@ -15,7 +15,7 @@ token-savings numbers HEARTH records. Every command/endpoint below exists in the
 ## 1. Start the HEARTH daemon
 
 ```sh
-uv run hearth serve                    # binds 127.0.0.1:8080 (loopback) by default
+uv run --no-sync hearth serve                    # binds 127.0.0.1:8080 (loopback) by default
 ```
 
 - Backend: defaults to `auto` (MLX when importable, else `echo`). Force it with
@@ -49,10 +49,10 @@ Runnable example: `examples/cambot_offload.py`.
 
 ```sh
 # dry run (offline, safe): prints what it would send
-uv run python examples/cambot_offload.py
+uv run --no-sync python examples/cambot_offload.py
 
 # against the live daemon:
-uv run python examples/cambot_offload.py --live
+uv run --no-sync python examples/cambot_offload.py --live
 ```
 
 The example offloads a `summarize` and a `classify` subtask, both with
@@ -77,8 +77,8 @@ Register HEARTH's stdio MCP server so Claude Code can delegate subtasks to the l
 Full instructions + a config JSON block: **`examples/claude_code_mcp.md`**. In short:
 
 ```sh
-uv sync --extra mcp
-claude mcp add hearth -- uv run hearth mcp     # run from the HEARTH repo root
+uv sync --extra mlx --extra mcp --extra dev --extra files
+claude mcp add hearth -- uv run --no-sync hearth mcp     # run from the HEARTH repo root
 ```
 
 The MCP tools (`hearth_summarize`, `hearth_classify`, `hearth_extract`, `hearth_draft`,
@@ -123,7 +123,7 @@ all-time.
 ### B. `hearth stats` CLI
 
 ```sh
-uv run hearth stats --since 24h
+uv run --no-sync hearth stats --since 24h
 ```
 
 > **Important caveat (Phase 2).** Metrics are held **in-memory per process**. A fresh

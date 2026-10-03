@@ -11,11 +11,14 @@ liveness probe ``/v1/hearth/admin/health``.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterator
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 
 from .. import __version__
 from ..config import Settings, get_settings
@@ -199,8 +202,10 @@ def create_app(
         )
         if req.stream:
             return StreamingResponse(
-                _stream_sse(
-                    router, gen_req, intent, allow_escalation, adapter, response_format
+                _close_on_disconnect(
+                    _stream_sse(
+                        router, gen_req, intent, allow_escalation, adapter, response_format
+                    )
                 ),
                 media_type="text/event-stream",
             )
@@ -404,6 +409,40 @@ def _sse(payload: object) -> str:
     return f"data: {payload.model_dump_json(exclude_none=True)}\n\n"
 
 
+async def _close_on_disconnect(stream: Iterator[str]) -> AsyncIterator[str]:
+    """Relay a sync SSE generator, and CLOSE it however the response ends.
+
+    Starlette drives a sync body from a threadpool and, when the client disconnects, simply
+    stops pulling — it never calls ``close()``. The generator then sits suspended, so the
+    provider's cancellation (``providers/mlx.py:iterate_on_mlx_thread``, which fires on
+    close) never runs and the MLX thread keeps generating to ``max_tokens`` while every
+    other request queues behind it. Measured against Coder-14B: a stream abandoned 1.6 s in
+    made the next 0.5 s request take 69.8 s — the full generation.
+    """
+    try:
+        async for chunk in iterate_in_threadpool(stream):
+            yield chunk
+    finally:
+        # Not awaited: this runs inside a cancelled task. A helper thread closes the
+        # generator as soon as any in-flight next() on a pool thread has returned.
+        threading.Thread(
+            target=_close_when_idle, args=(stream,), name="hearth-stream-close", daemon=True
+        ).start()
+
+
+def _close_when_idle(stream: Iterator[str]) -> None:
+    """``close()`` a generator, retrying while a pool thread is still inside ``next()``."""
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    while True:
+        try:
+            close()
+            return
+        except ValueError:  # "generator already executing" — the in-flight next() ends soon
+            time.sleep(0.02)
+
+
 def _stream_sse(
     router: Router,
     gen_req: GenRequest,
@@ -476,26 +515,87 @@ def _stream_sse(
     started = time.perf_counter()
     parts: list[str] = []
     finish_reason = "stop"
-    for event in iter_stream(provider, stream_req):
-        if event.finish_reason:
-            finish_reason = event.finish_reason
-        if not event.text:
-            continue
-        parts.append(event.text)
-        yield _sse(
-            ChatCompletionChunk(
-                id=chunk_id,
-                created=created,
-                model=decision.model,
-                choices=[base_choice(ChatChunkDelta(content=event.text))],
+    escalation_failed: str | None = None
+
+    def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
+        nonlocal finish_reason
+        for event in iter_stream(provider, stream_req):
+            if event.finish_reason:
+                finish_reason = event.finish_reason
+            if not event.text:
+                continue
+            parts.append(event.text)
+            yield _sse(
+                ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=model,
+                    choices=[base_choice(ChatChunkDelta(content=event.text))],
+                )
             )
-        )
+
+    def relay_local(stream_req: GenRequest):
+        # Mirrors Router._generate: an adapter that fails before any text is retried once on
+        # base weights, so a broken promoted adapter cannot fail /chat while the
+        # non-streaming path quietly succeeds.
+        try:
+            yield from relay(router.local, stream_req, stream_req.model)
+        except Exception as exc:  # noqa: BLE001
+            if stream_req.adapter is None or parts:
+                raise
+            logger.warning("stream failed with adapter; retrying on base weights: %s", exc)
+            yield from relay(
+                router.local,
+                GenRequest(
+                    messages=stream_req.messages,
+                    model=stream_req.model,
+                    max_tokens=stream_req.max_tokens,
+                    temperature=stream_req.temperature,
+                    adapter=None,
+                ),
+                stream_req.model,
+            )
+
+    try:
+        if not decision.would_escalate:
+            yield from relay_local(stream_req)
+        else:
+            try:
+                yield from relay(provider, stream_req, decision.model)
+            except Exception as exc:  # noqa: BLE001
+                if parts:
+                    # The remote received the prompt and produced tokens before dying: that
+                    # is spend and an escalation that failed, so it is billed and recorded —
+                    # not left to a log line — and nothing local is spliced onto its answer.
+                    _record_failed_remote_stream(
+                        router, gen_req, decision, provider, "".join(parts), adapter,
+                        f"provider {provider.name!r} failed mid-stream: {exc}",
+                        (time.perf_counter() - started) * 1000.0,
+                    )
+                    yield from _stream_failure(provider, exc)
+                    return
+                # The remote failed before saying anything: serve the whole answer locally,
+                # as Router.route does. The final hearth chunk reports local as what served.
+                escalation_failed = f"provider {provider.name!r} failed: {exc}"
+                decision = router.degrade_to_local(gen_req, decision, exc)
+                provider = router.local
+                stream_req = GenRequest(
+                    messages=gen_req.messages,
+                    model=decision.model,
+                    max_tokens=gen_req.max_tokens,
+                    temperature=gen_req.temperature,
+                    adapter=router._resolve_adapter(
+                        adapter, decision.task_class, decision.model
+                    ),
+                )
+                yield from relay_local(stream_req)
+    except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
+        yield from _stream_failure(provider, exc)
+        return
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
 
-    # Estimate tokens from streamed text (~4 chars/token) without a second tokenizer pass.
-    completion_tokens = max(1, len(text) // 4)
-    prompt_tokens = max(1, sum(len(m.content) for m in gen_req.messages) // 4)
+    prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
     if served_by == "remote":
         router.budget.spend(prompt_tokens + completion_tokens)
@@ -514,6 +614,7 @@ def _stream_sse(
             latency_ms=latency_ms,
             escalated=decision.would_escalate,
             escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
             adapter=adapter,
             estimated_frontier_tokens_saved=saved,
         )
@@ -551,6 +652,63 @@ def _stream_sse(
                     "hearth": {"finish_reason": finish_reason},
                 }
             )
+    yield _sse("[DONE]")
+
+
+def _estimate_stream_tokens(gen_req: GenRequest, text: str) -> tuple[int, int]:
+    """(prompt, completion) tokens estimated at ~4 chars/token, without a tokenizer pass."""
+    prompt_tokens = max(1, sum(len(m.content) for m in gen_req.messages) // 4)
+    return prompt_tokens, max(1, len(text) // 4)
+
+
+def _record_failed_remote_stream(
+    router: Router,
+    gen_req: GenRequest,
+    decision,
+    provider: ModelProvider,
+    partial_text: str,
+    adapter: str | None,
+    error: str,
+    latency_ms: float,
+) -> None:
+    """Bill and record a remote stream that died after emitting text."""
+    prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, partial_text)
+    router.budget.spend(prompt_tokens + completion_tokens)
+    router.metrics.record(
+        RequestRecord(
+            task_class=decision.task_class,
+            backend=provider.name,
+            model=decision.model,
+            served_by="remote",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=latency_ms,
+            escalated=True,
+            escalation_reason=decision.reason,
+            escalation_failed=error,
+            adapter=adapter,
+            estimated_frontier_tokens_saved=0,
+        )
+    )
+
+
+def _stream_failure(provider: ModelProvider, exc: Exception):
+    """Terminate a stream whose provider raised: an error event, then ``[DONE]``.
+
+    Without this the generator died mid-response with no ``[DONE]``, which a client sees as
+    a dropped connection, not as a failure it can name — the /chat page showed only
+    "[stream failed]". Mirrors the non-streaming path's ``hearth.provider.unavailable``.
+    """
+    logger.error("provider %s failed mid-stream: %s", provider.name, exc)
+    yield _sse(
+        {
+            "error": {
+                "message": f"provider {provider.name!r} failed: {exc}",
+                "type": "provider_unavailable",
+                "code": "hearth.provider.unavailable",
+            }
+        }
+    )
     yield _sse("[DONE]")
 
 

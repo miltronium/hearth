@@ -517,3 +517,84 @@ def test_staleness_measures_real_history_for_a_committed_doc():
 def test_key_docs_are_the_memory_docs_this_package_replaces():
     assert "docs/RESULTS.md" in KEY_DOCS
     assert "docs/cmux/HANDOFF.md" in KEY_DOCS
+
+
+# -- serving_load_egress: measured on the real resolver, not read off a setting ----------
+
+
+def _serving_fact(tmp_path: Path, monkeypatch, environ: dict[str, str]):
+    pytest.importorskip("huggingface_hub")
+    import huggingface_hub.constants
+
+    from hearth.config import Settings
+    from hearth.providers import mlx as mlx_mod
+
+    (tmp_path / "hub").mkdir()
+    monkeypatch.setattr(mlx_mod, "get_settings", lambda: Settings(home=tmp_path / "home"))
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    section = _egress_section(tmp_path, {"routing.yaml": _NO_EGRESS}, environ=environ)
+    return next(f for f in section.facts if f.name == "serving_load_egress")
+
+
+def test_serving_loads_are_reported_disk_only_by_default(tmp_path: Path, monkeypatch):
+    fact = _serving_fact(tmp_path, monkeypatch, environ={})
+    assert (fact.value, fact.level) == ("disk-only", LEVEL_OK)
+    assert fact.data["resolver_raised"] is True
+
+
+def test_opting_in_to_downloads_is_reported(tmp_path: Path, monkeypatch):
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": "1"})
+    assert fact.level == LEVEL_WARN
+    assert fact.data == {"allow_downloads": True, "resolver_raised": False, "connect_attempts": 0}
+
+
+@pytest.mark.parametrize("value", ["y", "t", "on", "YES"])
+def test_the_probe_parses_the_flag_exactly_as_settings_does(tmp_path, monkeypatch, value):
+    """A value Settings reads as True must not be reported disk-only (review finding F2)."""
+    from hearth.config import Settings
+
+    monkeypatch.setenv("HEARTH_ALLOW_DOWNLOADS", value)
+    assert Settings().allow_downloads is True
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": value})
+    assert fact.level == LEVEL_WARN
+    assert fact.data["allow_downloads"] is True
+
+
+def test_an_unparseable_flag_is_a_failure_not_a_default(tmp_path, monkeypatch):
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": "maybe"})
+    assert fact.level == LEVEL_FAIL
+
+
+def test_a_resolver_that_goes_online_is_a_failure_even_if_it_ends_in_not_on_disk(
+    tmp_path, monkeypatch
+):
+    """The adversarial review's case: lookups with the network ON, every connect failing.
+
+    huggingface_hub converts the refused connection into the same "not cached" error a
+    cache miss raises, so the resolver still ends in ModelNotOnDiskError. Only the counted
+    connect attempts tell the two apart — and they must turn the fact red.
+    """
+    import huggingface_hub
+
+    real = huggingface_hub.snapshot_download
+
+    def online(*args, **kwargs):
+        kwargs["local_files_only"] = False
+        return real(*args, **kwargs)
+
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", online)
+    fact = _serving_fact(tmp_path, monkeypatch, environ={})
+    assert fact.level == LEVEL_FAIL
+    assert fact.data["connect_attempts"] > 0
+
+
+def test_a_resolver_that_regressed_to_fall_through_is_caught(tmp_path: Path, monkeypatch):
+    """The probe must not report disk-only off the SETTING when the resolver ignores it."""
+    from hearth.providers import mlx as mlx_mod
+
+    monkeypatch.setattr(mlx_mod, "resolve_local_model", lambda model_id, **_: model_id)
+    fact = _serving_fact(tmp_path, monkeypatch, environ={})
+    assert fact.level == LEVEL_WARN
+    assert "NOT opted in" in fact.detail

@@ -137,9 +137,12 @@ scripts/hearth_private.sh --profile config/routing.finance.yaml --check
 asserts, against **the profile you actually named** (not a hardcoded one):
 
 1. the bind address is loopback,
-2. the routing policy parses to zero remotes, with every class `backend: local, escalate: never`,
-3. `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` are set, so weights load from disk and are never
-   fetched.
+2. the routing policy parses to zero remotes, with every class `backend: local, escalate: never`.
+
+It also exports `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` (it sets them; it does not assert
+them). The serving load path would not fetch weights without them anyway — it resolves models
+from disk only and refuses to download unless `HEARTH_ALLOW_DOWNLOADS=1` — but they keep any
+other huggingface call in the process offline too.
 
 `config/routing.finance.yaml` satisfies (2) structurally — `remotes: {}`, a `defaults.remote`
 naming an entry that does not exist, and a zero remote token budget. There is nowhere for a
