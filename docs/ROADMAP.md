@@ -43,9 +43,11 @@ against the real 7B weights.
 > *Update (2026-10):* serving no longer needs `HF_HUB_OFFLINE` to stay off the network.
 > `providers/mlx.py:resolve_local_model` resolves the MLX chat and embedding models from disk
 > only (`~/.hearth/models`, then the hub cache, `local_files_only`) and raises
-> `ModelNotOnDiskError` rather than downloading unless `HEARTH_ALLOW_DOWNLOADS=1`. The env vars
-> are still needed for `hearth train` and `hearth models convert` / `export-coreml`, which hand
-> a repo id straight to `mlx_lm` / `transformers`.
+> `ModelNotOnDiskError` rather than downloading unless `HEARTH_ALLOW_DOWNLOADS=1`. Since then
+> `hearth train` and `hearth models convert` / `export-coreml` do the same (resolved path, and
+> an offline child env / `local_files_only`), so the env vars are no longer needed by any HEARTH
+> load path; `hearth models pull` is the one deliberate download. `hearth doctor --offline`
+> verifies it.
 
 ---
 
@@ -143,8 +145,8 @@ wiring `mlx_lm.lora` behind `[mlx]` with an injectable runner, eval harness (exa
 hot-swap in `MLXProvider` (`GenRequest.adapter`, cached loads; router resolves id→path, degrades
 to base on failure). CLI: `hearth train`, `hearth adapters list|promote|retire`. Offline-safe
 (fakes; no real training run in tests). Real training needs `uv sync --extra mlx --extra mcp --extra dev --extra files` + a cached
-base model + `HF_HUB_OFFLINE=1` (still required here: `hearth train` passes `--base` straight
-to `mlx_lm.lora`, which does not go through `resolve_local_model`).
+base model on disk (`hearth train` resolves `--base` through `resolve_local_model` and runs
+`mlx_lm.lora` with the hub pinned offline; `HF_HUB_OFFLINE=1` is no longer required).
 
 ---
 

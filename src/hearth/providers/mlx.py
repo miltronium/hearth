@@ -7,9 +7,10 @@ Install it with: ``uv sync --extra mlx --extra mcp --extra dev --extra files``.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TypeVar
@@ -143,8 +144,7 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
     fixing.
     """
     settings = get_settings()
-    if allow_downloads is None:
-        allow_downloads = settings.allow_downloads
+    allow_downloads = downloads_allowed(allow_downloads)
     candidate = Path(model_id).expanduser()
     if candidate.exists():
         return str(candidate)
@@ -176,36 +176,74 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
     )
 
 
-def audit_resolution(model_id: str, allow_downloads: bool) -> tuple[object, list[object]]:
-    """Resolve ``model_id`` with every socket connect refused AND recorded.
+def downloads_allowed(override: bool | None = None) -> bool:
+    """Whether a model load may download: ``override`` if given, else
+    ``settings.allow_downloads`` (``HEARTH_ALLOW_DOWNLOADS``). The one place every load
+    path (serving, train, convert, export-coreml) reads the opt-in, so they cannot disagree.
+    """
+    return get_settings().allow_downloads if override is None else override
 
-    Returns ``(outcome, connect_attempts)`` where ``outcome`` is the resolved path or the
-    exception raised. The connect list is the evidence the status probe needs: the exception
-    type cannot tell disk-only resolution from a lookup that tried the network, because
-    huggingface_hub converts a refused connection into ``LocalEntryNotFoundError`` — the
-    same error a plain cache miss raises — so both end in :class:`ModelNotOnDiskError`
-    (measured: 8 connects, then ModelNotOnDiskError). Lives here, not in ``hearth.status``,
-    which may not import a networking module at all (tests/test_status_readonly.py).
-    Single-threaded use only: it swaps ``socket.socket.connect`` for the duration.
+
+#: What a child process that loads weights gets when downloads are off. Both are needed:
+#: huggingface_hub reads ``HF_HUB_OFFLINE``; transformers reads ``TRANSFORMERS_OFFLINE``.
+OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+
+
+def model_load_env(
+    allow_downloads: bool | None = None, base: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The environment for a CHILD process that loads model weights (``mlx_lm.lora``…).
+
+    Resolving the model id to a path (:func:`resolve_local_model`) keeps the *weights* load
+    off the network, but a child library may still reach the hub for something else — a
+    tokenizer file, a model card (``mlx_lm.convert`` fetches the source repo's README when
+    given a repo id), a dataset. So unless downloads are opted in, the child also runs with
+    the hub's own offline switches set. The parent's ``os.environ`` is copied, never
+    mutated: a hidden global would make this process disagree with anything that inspects
+    its environment (the bug class in CLAUDE.md §3).
+    """
+    allow_downloads = downloads_allowed(allow_downloads)
+    env = dict(os.environ if base is None else base)
+    if not allow_downloads:
+        env.update(OFFLINE_ENV)
+    return env
+
+
+def audit_connects(fn: Callable[..., T], *args, **kwargs) -> tuple[object, list[object]]:
+    """Call ``fn`` with every socket connect refused AND recorded.
+
+    Returns ``(outcome, connect_attempts)`` where ``outcome`` is ``fn``'s return value or
+    the exception it raised. The connect list is the evidence: an exception type cannot
+    tell a disk-only lookup from one that tried the network, because huggingface_hub turns
+    a refused connection into ``LocalEntryNotFoundError`` — the same error a plain cache
+    miss raises (measured: 8 connects, then ModelNotOnDiskError). Lives here, not in
+    ``hearth.status``, which may not import a networking module at all
+    (tests/test_status_readonly.py). Single-threaded use only: it swaps
+    ``socket.socket.connect`` for the duration.
     """
     import socket
 
     attempts: list[object] = []
 
-    def refuse(self, address, *args, **kwargs):
+    def refuse(self, address, *a, **kw):
         attempts.append(address)
-        raise OSError(f"resolution audit refused a network connect to {address!r}")
+        raise OSError(f"connect audit refused a network connect to {address!r}")
 
     real = (socket.socket.connect, socket.socket.connect_ex)
     socket.socket.connect = refuse
     socket.socket.connect_ex = refuse
     try:
-        outcome: object = resolve_local_model(model_id, allow_downloads=allow_downloads)
+        outcome: object = fn(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001 — the outcome IS the exception; caller judges
         outcome = exc
     finally:
         socket.socket.connect, socket.socket.connect_ex = real
     return outcome, attempts
+
+
+def audit_resolution(model_id: str, allow_downloads: bool) -> tuple[object, list[object]]:
+    """Resolve ``model_id`` under :func:`audit_connects` — the status probe's instrument."""
+    return audit_connects(resolve_local_model, model_id, allow_downloads=allow_downloads)
 
 
 class MLXProvider:

@@ -21,11 +21,15 @@ tokenize, frame the chat, and stop. So every export also writes a *sidecar* next
 The manifest + sidecar wiring is pure and fully offline-tested; the real stateful conversion is
 the hardware-validated piece (``docs/HANDOFF.md`` → Task C).
 
-Real path (needs the ``[coreml]`` extra, source weights, and offline HF for cached inputs):
+Real path (needs the ``[coreml]`` extra and source weights on disk):
 
     uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
     hearth models export-coreml --source <hf-repo-or-path> --out ~/.hearth/coreml/<id>.mlpackage
+
+Disk-only with no ``HF_HUB_OFFLINE`` export (:func:`load_hf_source`): ``--source`` is resolved
+to a local path first and every ``from_pretrained`` runs ``local_files_only`` unless
+``HEARTH_ALLOW_DOWNLOADS=1``. This runs in-process, so per-call ``local_files_only`` stands in
+for ``TRANSFORMERS_OFFLINE`` rather than mutating this process's environment.
 
 ``coremltools`` / ``torch`` / ``transformers`` are imported only inside the default runner, so
 importing this module (and the whole test suite) needs no extras.
@@ -366,6 +370,37 @@ def _terminator_ids(tokenizer, model_config) -> list[int]:
     return [i for i in ids if not (i in seen or seen.add(i))]
 
 
+def hf_load_plan(source: str, *, allow_downloads: bool | None = None) -> tuple[str, dict]:
+    """``(path, from_pretrained kwargs)`` for loading ``source`` with transformers.
+
+    ``from_pretrained(<repo-id>)`` resolves through the hub with the network on. The path
+    comes from :func:`~hearth.providers.mlx.resolve_local_model` (raising
+    :class:`~hearth.providers.mlx.ModelNotOnDiskError` when ``source`` is not on disk and
+    downloads are off), and ``local_files_only=True`` stops transformers reaching the hub
+    for anything else it might look up beside the weights. Separate from the loader so
+    ``hearth doctor --offline`` can measure this path without importing transformers.
+    """
+    from .providers.mlx import downloads_allowed, resolve_local_model
+
+    allow_downloads = downloads_allowed(allow_downloads)
+    path = resolve_local_model(source, allow_downloads=allow_downloads)
+    return path, ({} if allow_downloads else {"local_files_only": True})
+
+
+def load_hf_source(source: str, **model_kwargs):
+    """Load ``(hf_config, tokenizer, model)`` for ``source`` from disk (:func:`hf_load_plan`).
+
+    The one place the export runners touch ``transformers.from_pretrained``.
+    """
+    path, hub = hf_load_plan(source)  # resolve first: a missing model never imports torch
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    hf_config = AutoConfig.from_pretrained(path, **hub)
+    tokenizer = AutoTokenizer.from_pretrained(path, **hub)
+    model = AutoModelForCausalLM.from_pretrained(path, **hub, **model_kwargs)
+    return hf_config, tokenizer, model
+
+
 def _coreml_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:
     """Default runner: convert an HF model to a ``.mlpackage`` (needs ``[coreml]``).
 
@@ -400,7 +435,6 @@ def _plain_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:  # prag
     import coremltools as ct
     import numpy as np
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     precision = {
         "float16": ct.precision.FLOAT16,
@@ -414,10 +448,8 @@ def _plain_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:  # prag
         "cpuOnly": ct.ComputeUnit.CPU_ONLY,
     }[config.compute_units]
 
-    hf_config = AutoConfig.from_pretrained(config.source)
-    tokenizer = AutoTokenizer.from_pretrained(config.source)
     # Eager attention traces cleanly under `torch.jit.trace` (SDPA's fused kernel does not).
-    model = AutoModelForCausalLM.from_pretrained(
+    hf_config, tokenizer, model = load_hf_source(
         config.source, torchscript=True, attn_implementation="eager"
     )
     model.eval()
@@ -526,22 +558,19 @@ def _stateful_export_runner(config: CoreMLExportConfig) -> CoreMLRunResult:  # p
     import coremltools as ct
     import numpy as np
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
     from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, repeat_kv
 
     state_len = config.max_seq_len
 
-    hf_config = AutoConfig.from_pretrained(config.source)
+    hf_config, tokenizer, model = load_hf_source(
+        config.source, torch_dtype=torch.float32, attn_implementation="eager"
+    )
     n_layers = hf_config.num_hidden_layers
     n_kv = hf_config.num_key_value_heads
     head_dim = getattr(hf_config, "head_dim", None) or (
         hf_config.hidden_size // hf_config.num_attention_heads
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(config.source)
-    model = AutoModelForCausalLM.from_pretrained(
-        config.source, torch_dtype=torch.float32, attn_implementation="eager"
-    )
     model.eval()
 
     class _StatefulQwen(torch.nn.Module):

@@ -40,9 +40,12 @@ There are exactly **two** egress vectors in the entire codebase:
    profile; the profile is what governs the HTTP/CAMBOT/`/chat` path.
 2. **Model-weight download** from HuggingFace — weights, *not your data*. → The serving load
    path no longer downloads by default: `providers/mlx.py:resolve_local_model` resolves a model
-   only from disk (see § "Model loading: what is disk-only and what is not"). Private mode also
-   sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, which still matters for the paths the
-   resolver does not cover. Pre-cache once (`hearth models pull …`) from an unrestricted terminal.
+   only from disk, and so do `hearth train`, `hearth models convert` and `export-coreml` (see
+   § "Model loading: what is disk-only and what is not"). Private mode also sets
+   `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`; no HEARTH load path depends on them any more,
+   but they still cover code that calls `huggingface_hub` directly. Pre-cache once
+   (`hearth models pull …`) from an unrestricted terminal. `hearth doctor --offline` measures
+   all of this in one command.
 
 No analytics, telemetry, or phone-home exists anywhere else.
 
@@ -80,11 +83,27 @@ raises `ModelNotOnDiskError` instead of downloading, unless `HEARTH_ALLOW_DOWNLO
 | --- | --- |
 | `MLXProvider` — `hearth serve`, `/v1/chat/completions`, `/chat`, `hearth run`, `hearth agent`, `hearth eval`, MCP tools | **Yes** (resolver) |
 | `MLXEmbedder` (`HEARTH_EMBEDDER=mlx`) | **Yes** (same resolver) |
-| `hearth train` — passes `--base` straight to `mlx_lm.lora --model` | **No** — set `HF_HUB_OFFLINE=1` |
-| `hearth models convert` — passes `--source` to `mlx_lm.convert` | **No** — set `HF_HUB_OFFLINE=1` |
-| `hearth models export-coreml` — `transformers` `from_pretrained(source)` | **No** — set `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` |
-| `scripts/bench.py` | **Yes** (same resolver) |
-| `hearth models pull` | Downloads by design |
+| `hearth train` — `mlx_lm.lora` in a child process | **Yes** — `--model` is the resolved path; the child runs with `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1` (`training/lora.py:runner_invocation`) |
+| `hearth models convert` — `mlx_lm convert` in a child process | **Yes** — `--hf-path` is the resolved path; same offline child env (`convert.py:convert_invocation`) |
+| `hearth models export-coreml` — `transformers` in-process | **Yes** — resolved path + `local_files_only=True` on every `from_pretrained` (`coreml.py:load_hf_source`) |
+| `scripts/bench.py`, `scripts/eval_candidate.py`, `scripts/hearth_map_draft.py` | **Yes** (same resolver, via `mlx_lm.load` / `MLXProvider`) |
+| `scripts/coreml_stateful_reference.py` | **Yes** — sets the offline vars for itself and passes `local_files_only=True`; reads the hub cache only, not `~/.hearth/models` |
+| `hearth models pull` | Downloads by design — the only path that does |
+
+Every path except `pull` honours the same opt-in, `HEARTH_ALLOW_DOWNLOADS=1`: with it set, a
+model that is not on disk is handed on by id and the child is not pinned offline. The path
+matters beyond the weights: handed a repo id, `mlx_lm`'s `save()` also fetches the source's
+model card from the hub, so the old `convert` reached huggingface.co even with the weights
+cached (measured: 28 connects vs 0). `tests/test_offline_load_paths.py` asserts each path's
+outcome with every connect refused and counted, plus a census that `models pull` is the only
+non-`local_files_only` hub fetch in `src/` and `scripts/`.
+
+`hearth doctor --offline` measures all of it and exits non-zero when anything is unsafe: the
+routing profile the router would load now (and which classes can escape it), serving
+resolution under a connect-counting audit, every reachable model (default, each class's
+`local_model`, the MLX embedder) resolving to weights on disk, each load path above handing
+its tool a local path with the hub pinned offline, a loopback bind host, and
+`HEARTH_ALLOW_DOWNLOADS` off. It measures this command's environment, not a running daemon's.
 
 This is a guarantee about HEARTH's **loader and router**, not machine-level containment.
 Nothing here inspects a firewall or a socket, and it says nothing about other processes,
@@ -157,6 +176,9 @@ the script adds is that the posture is *verified* before serving rather than ass
 ## Verifying no egress yourself
 
 ```sh
+# 0. One command, every HEARTH-side path measured (exit 1 when unsafe):
+uv run --no-sync hearth doctor --offline
+
 # 1. Posture check (no remotes, all classes local/never):
 scripts/hearth_private.sh --check
 

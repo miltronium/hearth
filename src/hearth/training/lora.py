@@ -6,21 +6,25 @@ dataset into the ``train.jsonl`` / ``valid.jsonl`` files mlx-lm expects, and ass
 invocation — then delegates the actual (slow, heavy) training to an injectable
 ``runner``. Tests pass a FAKE runner and never launch a real run.
 
-Real path (needs the ``[mlx]`` extra, a cached base model, and offline HF):
+Real path (needs the ``[mlx]`` extra and a base model already on disk):
 
     uv sync --extra mlx --extra mcp --extra dev --extra files
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1   # load base weights from cache
     hearth train --task extract --base <model-id> --data dataset.jsonl
 
 The default runner shells out to ``python -m mlx_lm.lora --train`` with the assembled
-args. mlx-lm is imported/invoked only inside that default runner, so importing this
-module (and the whole test suite) needs no extras.
+args. It is disk-only without any ``HF_HUB_OFFLINE`` export (:func:`runner_invocation`):
+``--model`` is resolved to a local path first (``~/.hearth/models``, then the hub cache;
+:class:`~hearth.providers.mlx.ModelNotOnDiskError` if in neither), and the child runs with
+``HF_HUB_OFFLINE=1``/``TRANSFORMERS_OFFLINE=1`` unless ``HEARTH_ALLOW_DOWNLOADS=1``.
+mlx-lm is imported/invoked only inside that default runner, so importing this module
+(and the whole test suite) needs no extras.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,23 +186,53 @@ def _preflight_batch_size(args: list[str], run_dir: Path) -> None:
         )
 
 
+def runner_invocation(
+    args: list[str], *, allow_downloads: bool | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """The exact ``(command, child_env)`` the real runner launches — resolution included.
+
+    ``mlx_lm.lora --model <repo-id>`` calls ``snapshot_download`` with the network on, so
+    ``--model`` is swapped for the local path :func:`resolve_local_model` finds (raising
+    :class:`~hearth.providers.mlx.ModelNotOnDiskError` when the base is not on disk and
+    downloads are off), and the child env pins the hub offline. The ``args`` HEARTH records
+    keep the model *id*, which is what the adapter registry must store: the router matches
+    a promoted adapter's ``base_model`` against the served model id, not a cache path.
+    Separate from the runner so ``hearth doctor --offline`` can measure this path without
+    training anything.
+    """
+    from ..providers.mlx import downloads_allowed, model_load_env, resolve_local_model
+
+    allow_downloads = downloads_allowed(allow_downloads)
+    resolved = list(args)
+    try:
+        at = resolved.index("--model") + 1
+        model_id = resolved[at]
+    except (ValueError, IndexError):
+        raise ValueError("mlx_lm.lora args carry no --model value") from None
+    resolved[at] = resolve_local_model(model_id, allow_downloads=allow_downloads)
+    command = [sys.executable, "-m", "mlx_lm.lora", *resolved]
+    return command, model_load_env(allow_downloads)
+
+
 def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
     """Default runner: shell out to ``python -m mlx_lm.lora`` (needs the ``[mlx]`` extra).
 
-    Kept out of the tested path — tests always inject a fake runner. Raising with the fix
-    hint mirrors :class:`hearth.providers.mlx.MLXUnavailableError`.
+    Tests inject a fake runner for training; the launch itself is covered by faking
+    ``subprocess.run`` (tests/test_offline_load_paths.py). Raising with the fix hint mirrors
+    :class:`hearth.providers.mlx.MLXUnavailableError`.
     """
     import importlib.util
-    import sys
 
     if importlib.util.find_spec("mlx_lm") is None:
         raise RuntimeError(
             "mlx-lm is not installed. Install the training backend with: "
             "uv sync --extra mlx --extra mcp --extra dev --extra files"
         )
+    # Resolve before the preflight: a base that is not on disk fails here, in a second.
+    command, env = runner_invocation(args)
     _preflight_batch_size(args, run_dir)
-    subprocess.run([sys.executable, "-m", "mlx_lm.lora", *args], check=True)
+    subprocess.run(command, check=True, env=env)
     return run_dir / "adapters"
 
 
-__all__ = ["LoRAConfig", "TrainOutcome", "Runner", "train"]
+__all__ = ["LoRAConfig", "TrainOutcome", "Runner", "runner_invocation", "train"]

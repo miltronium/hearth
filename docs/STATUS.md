@@ -101,8 +101,10 @@ real resolver: it asks `providers/mlx.py:resolve_local_model` for a model that c
 disk and reports `disk-only` only if that raises `ModelNotOnDiskError` — so a resolver that
 regressed to handing `mlx_lm` a bare repo id reports as a warning even with
 `HEARTH_ALLOW_DOWNLOADS` unset. `download_egress` reports `HF_HUB_OFFLINE` /
-`TRANSFORMERS_OFFLINE`, which now govern only the load paths that bypass the resolver:
-`hearth train` and `hearth models convert` / `export-coreml`.
+`TRANSFORMERS_OFFLINE`, which no HEARTH load path depends on any more: `hearth train` and
+`hearth models convert` / `export-coreml` resolve from disk too, and their children get the
+offline vars set for them. For a single safe/unsafe verdict over all of it, run
+`hearth doctor --offline` (docs/PRIVACY.md).
 
 ### Learning state — and the minimum detectable effect
 

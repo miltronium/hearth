@@ -182,8 +182,18 @@ def version() -> None:
 
 
 @app.command()
-def doctor() -> None:
-    """Run environment preflight checks."""
+def doctor(
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Answer 'is it safe to use HEARTH offline right now?' — measures the routing "
+        "profile, model resolution and every load path; exits 1 when unsafe.",
+    ),
+) -> None:
+    """Run environment preflight checks (or, with --offline, the offline-safety checks)."""
+    if offline:
+        _doctor_offline()
+        return
     checks = run_checks()
     table = Table(title="hearth doctor", show_header=True, header_style="bold")
     table.add_column("check")
@@ -200,6 +210,28 @@ def doctor() -> None:
         console.print("[red]Fatal checks failed.[/red]")
         raise typer.Exit(code=1)
     console.print("[green]Ready.[/green] (warnings are non-fatal)")
+
+
+def _doctor_offline() -> None:
+    """Render ``run_offline_checks`` and exit 1 when any safety check fails."""
+    from .doctor import OFFLINE_LIMITS, run_offline_checks
+
+    checks = run_offline_checks()
+    table = Table(title="hearth doctor --offline", show_header=True, header_style="bold")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+    for c in checks:
+        mark = "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]"
+        table.add_row(c.name, mark, c.detail)
+    console.print(table)
+    for limit in OFFLINE_LIMITS:
+        console.print(f"[dim]not measured: {limit}[/dim]")
+    failed = [c.name for c in checks if c.fatal and not c.ok]
+    if failed:
+        console.print(f"[red]UNSAFE offline:[/red] {', '.join(failed)}")
+        raise typer.Exit(code=1)
+    console.print("[green]SAFE offline[/green] — no check found a path off this machine.")
 
 
 @app.command()
@@ -546,8 +578,11 @@ def models_list() -> None:
 def models_pull(model_id: str = typer.Argument(..., help="Registry model id to download.")) -> None:
     """Download a model's weights from its registry `source` repo.
 
-    Respects the ``HF_ENDPOINT`` mirror and ``HF_HUB_OFFLINE`` env vars — hosts are never
-    hardcoded, so a locked-down mirror works with no code change.
+    The ONE deliberate download path in HEARTH: every load path (serve, train, convert,
+    export-coreml) resolves from disk only and fails rather than fetch
+    (``tests/test_offline_load_paths.py`` holds that line). Respects the ``HF_ENDPOINT``
+    mirror and ``HF_HUB_OFFLINE`` env vars — hosts are never hardcoded, so a locked-down
+    mirror works with no code change.
     """
     registry = get_registry()
     entry = registry.get(model_id)
@@ -603,16 +638,17 @@ def models_convert(
 ) -> None:
     """Quantize/convert a checkpoint into an MLX-servable model (ARCHITECTURE §5, Phase 7).
 
-    Real conversion needs the ``[mlx]`` extra, source weights, and (for cached inputs)
-    offline HF:
+    Real conversion needs the ``[mlx]`` extra and the source on disk (``hearth models pull``
+    or a local path). It never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
 
         uv sync --extra mlx --extra mcp --extra dev --extra files
-        HF_HUB_OFFLINE=1 hearth models convert --source <id> --out ~/.hearth/models/<id> -q 4
+        hearth models convert --source <id> --out ~/.hearth/models/<id>-q4 --q-bits 4
 
     Add the produced model to ``config/models.yaml`` to serve it (registry is data, §5).
     """
     from .convert import ConvertConfig, ConvertUnavailableError
     from .convert import convert as run_convert
+    from .providers.mlx import ModelNotOnDiskError
 
     config = ConvertConfig(
         source=source, output_dir=out, quantize=quantize, q_bits=q_bits, q_group_size=q_group_size
@@ -627,7 +663,7 @@ def models_convert(
     console.print(f"Converting [cyan]{source}[/cyan] ({label}) -> {out} …")
     try:
         outcome = run_convert(config)
-    except ConvertUnavailableError as exc:
+    except (ConvertUnavailableError, ModelNotOnDiskError, FileExistsError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]Converted.[/green] model -> {outcome.output_dir}")
@@ -660,14 +696,15 @@ def models_export_coreml(
     """Export a checkpoint to a Core ML ``.mlpackage`` for the on-device Swift path (Phase 6).
 
     The produced ``.mlpackage`` is loaded by the Swift ``CoreMLProvider`` (see swift/OFFLINE.md)
-    for fully-offline, ANE-accelerated inference. Real export needs the ``[coreml]`` extra,
-    source weights, and (for cached inputs) offline HF:
+    for fully-offline, ANE-accelerated inference. Real export needs the ``[coreml]`` extra and
+    the source on disk; it never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
 
         uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml
-        HF_HUB_OFFLINE=1 hearth models export-coreml --source <id> --out ~/.hearth/coreml/<id>
+        hearth models export-coreml --source <id> --out ~/.hearth/coreml/<id>
     """
     from .coreml import CoreMLExportConfig, CoreMLExportUnavailableError
     from .coreml import export as run_export
+    from .providers.mlx import ModelNotOnDiskError
 
     config = CoreMLExportConfig(
         source=source,
@@ -690,7 +727,7 @@ def models_export_coreml(
     )
     try:
         outcome = run_export(config)
-    except CoreMLExportUnavailableError as exc:
+    except (CoreMLExportUnavailableError, ModelNotOnDiskError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     console.print(f"[green]Exported.[/green] model -> {outcome.output_dir}")
@@ -772,10 +809,11 @@ def train(
 ) -> None:
     """Train a LoRA adapter and register it as a *candidate* (ARCHITECTURE §7, ADR-006).
 
-    Real training needs the ``[mlx]`` extra, a cached base model, and offline HF:
+    Real training needs the ``[mlx]`` extra and the base model on disk (``hearth models
+    pull``). It never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
 
         uv sync --extra mlx --extra mcp --extra dev --extra files
-        HF_HUB_OFFLINE=1 hearth train --task extract --base <id> --data data.jsonl
+        hearth train --task extract --base <id> --data data.jsonl
 
     Training is eval-gated: a candidate must beat the incumbent on a golden set before it
     can be promoted (``hearth adapters promote``). This command only *produces a
@@ -806,7 +844,8 @@ def train(
     try:
         outcome = run_train(config, train_run_id=run_id)
     except RuntimeError as exc:
-        # The real runner raises with the fix hint when the [mlx] extra is missing.
+        # The real runner raises with the fix hint when the [mlx] extra is missing, and
+        # ModelNotOnDiskError (a RuntimeError) when the base model is not on disk.
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
