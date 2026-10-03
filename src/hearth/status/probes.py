@@ -365,6 +365,36 @@ def _policy_outcome(path: Path) -> tuple[object | None, dict]:
     return policy, {"drift": drift}
 
 
+def policy_posture(policy) -> dict:
+    """What a resolved :class:`~hearth.router.policy.RoutingPolicy` structurally permits.
+
+    No-egress requires zero remotes, no resolvable default remote, and every class
+    ``backend: local`` with ``escalate: never``. Shared by :func:`probe_egress` and
+    ``hearth doctor --offline`` so the two can never judge a profile differently.
+    """
+    remote_classes = sorted(n for n, r in policy.classes.items() if r.backend == "remote")
+    escalating = sorted(n for n, r in policy.classes.items() if r.escalate != "never")
+    default_remote = policy.remote_for()
+    no_egress = (
+        not policy.remotes and not remote_classes and not escalating and default_remote is None
+    )
+    reasons = []
+    if policy.remotes:
+        reasons.append(f"{len(policy.remotes)} remote(s): {sorted(policy.remotes)}")
+    if remote_classes:
+        reasons.append(f"backend=remote for {remote_classes}")
+    if escalating:
+        reasons.append(f"escalates for {escalating}")
+    return {
+        "no_egress": no_egress,
+        "remotes": sorted(policy.remotes),
+        "remote_classes": remote_classes,
+        "escalating_classes": escalating,
+        "default_remote_resolves": default_remote is not None,
+        "reasons": reasons,
+    }
+
+
 def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Section:
     """What each routing profile *structurally permits*, measured on the resolved policy.
 
@@ -406,27 +436,13 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
         if policy is None:
             facts.append(Fact(rel, "unmeasured", LEVEL_UNVERIFIED, str(meta.get("error", ""))))
             continue
-        remote_classes = sorted(n for n, r in policy.classes.items() if r.backend == "remote")
-        escalating = sorted(n for n, r in policy.classes.items() if r.escalate != "never")
-        default_remote = policy.remote_for()
-        no_egress = (
-            not policy.remotes
-            and not remote_classes
-            and not escalating
-            and default_remote is None
-        )
+        posture = policy_posture(policy)
+        no_egress = posture["no_egress"]
         if no_egress:
             value = "NO EGRESS: 0 remotes, every class local/never"
             no_egress_profiles.append(rel)
         else:
-            reasons = []
-            if policy.remotes:
-                reasons.append(f"{len(policy.remotes)} remote(s): {sorted(policy.remotes)}")
-            if remote_classes:
-                reasons.append(f"backend=remote for {remote_classes}")
-            if escalating:
-                reasons.append(f"escalates for {escalating}")
-            value = "egress permitted — " + "; ".join(reasons)
+            value = "egress permitted — " + "; ".join(posture["reasons"])
         drift = meta.get("drift") or []
         error = meta.get("error")
         level = LEVEL_OK
@@ -443,11 +459,7 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
                 level,
                 detail,
                 {
-                    "no_egress": no_egress,
-                    "remotes": sorted(policy.remotes),
-                    "remote_classes": remote_classes,
-                    "escalating_classes": escalating,
-                    "default_remote_resolves": default_remote is not None,
+                    **{k: v for k, v in posture.items() if k != "reasons"},
                     "budget_tokens_per_day": policy.defaults.remote_budget_tokens_per_day,
                     "drift": drift,
                 },
@@ -476,9 +488,11 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             LEVEL_OK,
             "HF_HUB_OFFLINE="
             f"{offline['HF_HUB_OFFLINE'] or 'unset'}, "
-            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — governs the "
-            "load paths that bypass the resolver: `hearth train`, `hearth models convert` / "
-            "`export-coreml`. Serving is covered by serving_load_egress above",
+            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — no longer "
+            "load-bearing for HEARTH's own paths: serve, train, convert and export-coreml all "
+            "resolve from disk (train/convert children get the offline vars set for them). "
+            "It still governs code that calls huggingface_hub directly, and `hearth models "
+            "pull`. Measure every path with `hearth doctor --offline`",
             {k: v for k, v in offline.items() if v is not None},
         )
     )
@@ -1297,6 +1311,7 @@ __all__ = [
     "Weights",
     "hub_cache_dir",
     "min_n_for_alpha",
+    "policy_posture",
     "probe_egress",
     "probe_environment",
     "probe_learning",

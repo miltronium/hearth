@@ -182,8 +182,18 @@ def version() -> None:
 
 
 @app.command()
-def doctor() -> None:
-    """Run environment preflight checks."""
+def doctor(
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Answer 'is it safe to use HEARTH offline right now?' — measures the routing "
+        "profile, model resolution and every load path; exits 1 when unsafe.",
+    ),
+) -> None:
+    """Run environment preflight checks (or, with --offline, the offline-safety checks)."""
+    if offline:
+        _doctor_offline()
+        return
     checks = run_checks()
     table = Table(title="hearth doctor", show_header=True, header_style="bold")
     table.add_column("check")
@@ -200,6 +210,28 @@ def doctor() -> None:
         console.print("[red]Fatal checks failed.[/red]")
         raise typer.Exit(code=1)
     console.print("[green]Ready.[/green] (warnings are non-fatal)")
+
+
+def _doctor_offline() -> None:
+    """Render ``run_offline_checks`` and exit 1 when any safety check fails."""
+    from .doctor import OFFLINE_LIMITS, run_offline_checks
+
+    checks = run_offline_checks()
+    table = Table(title="hearth doctor --offline", show_header=True, header_style="bold")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+    for c in checks:
+        mark = "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]"
+        table.add_row(c.name, mark, c.detail)
+    console.print(table)
+    for limit in OFFLINE_LIMITS:
+        console.print(f"[dim]not measured: {limit}[/dim]")
+    failed = [c.name for c in checks if c.fatal and not c.ok]
+    if failed:
+        console.print(f"[red]UNSAFE offline:[/red] {', '.join(failed)}")
+        raise typer.Exit(code=1)
+    console.print("[green]SAFE offline[/green] — no check found a path off this machine.")
 
 
 @app.command()
