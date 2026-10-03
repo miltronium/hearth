@@ -8,6 +8,7 @@ Install it with: ``uv sync --extra mlx``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 
 from ..config import get_settings
 from .base import (
@@ -33,8 +34,12 @@ def mlx_available() -> bool:
     return importlib.util.find_spec("mlx_lm") is not None
 
 
-def resolve_local_model(model_id: str) -> str:
-    """Return a local snapshot path for ``model_id`` if HEARTH has one, else ``model_id``.
+class ModelNotOnDiskError(RuntimeError):
+    """Raised when a model would have to be downloaded to load, and downloads are off."""
+
+
+def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> str:
+    """Return a local path for ``model_id``, never touching the network unless allowed.
 
     ``hearth models pull`` downloads into ``settings.models_dir`` (``~/.hearth/models``),
     but ``mlx_lm.load`` asks huggingface_hub, which resolves ``HF_HUB_CACHE`` ->
@@ -44,27 +49,46 @@ def resolve_local_model(model_id: str) -> str:
     followed by a run would report X missing — or quietly serve a *different* model that
     happened to sit in the default cache.
 
-    Resolution is explicit rather than by mutating ``os.environ``: a hidden global would
-    make this module disagree with anything that inspects the environment (such as
-    ``scripts/hearth_status.py``), which is the class of bug this is fixing. HEARTH's own
-    directory is checked first; anything else falls through to huggingface_hub's normal
-    resolution, so a model in the default cache still loads and an operator who set
-    ``HF_HUB_CACHE`` deliberately is unaffected.
+    Resolution order: an existing filesystem path, as-is; HEARTH's own directory; then the
+    huggingface_hub cache (its normal ``HF_HUB_CACHE`` -> ``HF_HOME/hub`` -> default order).
+    Both cache lookups are ``local_files_only``. Handing ``mlx_lm.load`` a bare repo id is
+    what used to reach huggingface.co — it calls ``snapshot_download`` with the network on,
+    on every load — so a model in neither place raises :class:`ModelNotOnDiskError` unless
+    ``allow_downloads`` (default ``settings.allow_downloads``, ``HEARTH_ALLOW_DOWNLOADS``)
+    is set. A load is never a download by accident.
+
+    Resolution is explicit rather than by mutating ``os.environ`` (e.g. ``HF_HUB_OFFLINE``):
+    a hidden global would make this module disagree with anything that inspects the
+    environment (such as ``scripts/hearth_status.py``), which is the class of bug this is
+    fixing.
     """
+    settings = get_settings()
+    if allow_downloads is None:
+        allow_downloads = settings.allow_downloads
+    candidate = Path(model_id).expanduser()
+    if candidate.exists():
+        return str(candidate)
     try:  # deferred: huggingface_hub is only present with the mlx/embeddings extras
         from huggingface_hub import snapshot_download
     except ImportError:
+        # No hub client means mlx_lm cannot download either; let its own error speak.
         return model_id
-    models_dir = get_settings().models_dir
-    if not models_dir.is_dir():
+    models_dir = settings.models_dir
+    cache_dirs = ([str(models_dir)] if models_dir.is_dir() else []) + [None]
+    for cache_dir in cache_dirs:  # None = huggingface_hub's own cache resolution
+        try:
+            return snapshot_download(
+                repo_id=model_id, cache_dir=cache_dir, local_files_only=True
+            )
+        except Exception:  # noqa: BLE001 — not cached here (or not a repo id); try the next
+            continue
+    if allow_downloads:
         return model_id
-    try:
-        return snapshot_download(
-            repo_id=model_id, cache_dir=str(models_dir), local_files_only=True
-        )
-    except Exception:
-        # Not in HEARTH's directory (or not a repo id at all — it may already be a path).
-        return model_id
+    raise ModelNotOnDiskError(
+        f"model {model_id!r} is not on disk (looked in {models_dir} and the huggingface "
+        f"hub cache) and HEARTH does not download on load. Fetch it deliberately with "
+        f"`hearth models pull {model_id}`, or set HEARTH_ALLOW_DOWNLOADS=1."
+    )
 
 
 class MLXProvider:

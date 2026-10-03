@@ -466,6 +466,8 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
         )
     )
 
+    facts.append(_serving_load_fact(env))
+
     offline = {k: env.get(k) for k in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_ENDPOINT")}
     facts.append(
         Fact(
@@ -474,8 +476,9 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             LEVEL_OK,
             "HF_HUB_OFFLINE="
             f"{offline['HF_HUB_OFFLINE'] or 'unset'}, "
-            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — the router "
-            "is not the only thing that can reach the network; a model load can too",
+            f"TRANSFORMERS_OFFLINE={offline['TRANSFORMERS_OFFLINE'] or 'unset'} — governs the "
+            "load paths that bypass the resolver: `hearth train`, `hearth models convert` / "
+            "`export-coreml`. Serving is covered by serving_load_egress above",
             {k: v for k, v in offline.items() if v is not None},
         )
     )
@@ -493,6 +496,46 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             "Whether the SERVER was started with the profile reported as active is "
             "unverified — this reads the environment of the status command, not of the daemon.",
         ),
+    )
+
+
+_PROBE_MODEL_ID = "hearth-status/no-such-model"
+
+
+def _serving_load_fact(env: dict[str, str]) -> Fact:
+    """Whether a SERVING model load could download — measured on the real resolver.
+
+    Asks ``providers/mlx.py:resolve_local_model`` to resolve an id that cannot be on disk.
+    Disk-only resolution raises :class:`ModelNotOnDiskError`; anything else (the bare id
+    handed back) is exactly what makes ``mlx_lm.load`` call ``snapshot_download`` with the
+    network on. Asserting on what the resolver does, not on the setting that should make it
+    do so, means a resolver regressed to the old fall-through reports as such. Read-only and
+    offline: every lookup is ``local_files_only`` and nothing is loaded.
+    """
+    allow = (env.get("HEARTH_ALLOW_DOWNLOADS") or "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        from ..providers.mlx import ModelNotOnDiskError, resolve_local_model
+    except Exception as exc:  # noqa: BLE001 — a probe reports, it does not crash
+        return Fact("serving_load_egress", "unmeasured", LEVEL_UNVERIFIED, str(exc), {})
+    try:
+        resolved = resolve_local_model(_PROBE_MODEL_ID, allow_downloads=allow)
+    except ModelNotOnDiskError:
+        return Fact(
+            "serving_load_egress",
+            "disk-only",
+            LEVEL_OK,
+            "a model on neither ~/.hearth/models nor the hub cache fails to load instead of "
+            "downloading (HEARTH_ALLOW_DOWNLOADS unset) — serve, chat, agent, MCP, RAG",
+            {"allow_downloads": False, "resolver_raised": True},
+        )
+    return Fact(
+        "serving_load_egress",
+        "a load can download",
+        LEVEL_WARN,
+        f"resolve_local_model handed back {resolved!r} for a model that is not on disk, so "
+        "mlx_lm.load would fetch it from huggingface.co"
+        + (" — HEARTH_ALLOW_DOWNLOADS is set" if allow else " — and downloads are NOT opted in"),
+        {"allow_downloads": allow, "resolver_raised": False},
     )
 
 

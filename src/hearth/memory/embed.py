@@ -138,7 +138,11 @@ class MLXEmbedder:
                 "(install: uv sync --extra embeddings)"
             ) from exc
         try:
-            self._model, self._tokenizer = load(self.model_id)
+            from ..providers.mlx import resolve_local_model
+
+            # Disk-only resolution, like the chat provider: a bare repo id handed to
+            # mlx_lm.load is a network download, and an embed call must never be one.
+            self._model, self._tokenizer = load(resolve_local_model(self.model_id))
         except Exception as exc:  # pragma: no cover - needs a pre-pulled model
             raise EmbeddingUnavailableError(
                 f"could not load embedding model {self.model_id!r}: {exc}. "
