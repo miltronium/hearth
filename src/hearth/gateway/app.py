@@ -11,11 +11,14 @@ liveness probe ``/v1/hearth/admin/health``.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterator
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 
 from .. import __version__
 from ..config import Settings, get_settings
@@ -199,8 +202,10 @@ def create_app(
         )
         if req.stream:
             return StreamingResponse(
-                _stream_sse(
-                    router, gen_req, intent, allow_escalation, adapter, response_format
+                _close_on_disconnect(
+                    _stream_sse(
+                        router, gen_req, intent, allow_escalation, adapter, response_format
+                    )
                 ),
                 media_type="text/event-stream",
             )
@@ -402,6 +407,40 @@ def _sse(payload: object) -> str:
 
         return f"data: {json.dumps(payload)}\n\n"
     return f"data: {payload.model_dump_json(exclude_none=True)}\n\n"
+
+
+async def _close_on_disconnect(stream: Iterator[str]) -> AsyncIterator[str]:
+    """Relay a sync SSE generator, and CLOSE it however the response ends.
+
+    Starlette drives a sync body from a threadpool and, when the client disconnects, simply
+    stops pulling — it never calls ``close()``. The generator then sits suspended, so the
+    provider's cancellation (``providers/mlx.py:iterate_on_mlx_thread``, which fires on
+    close) never runs and the MLX thread keeps generating to ``max_tokens`` while every
+    other request queues behind it. Measured against Coder-14B: a stream abandoned 1.6 s in
+    made the next 0.5 s request take 69.8 s — the full generation.
+    """
+    try:
+        async for chunk in iterate_in_threadpool(stream):
+            yield chunk
+    finally:
+        # Not awaited: this runs inside a cancelled task. A helper thread closes the
+        # generator as soon as any in-flight next() on a pool thread has returned.
+        threading.Thread(
+            target=_close_when_idle, args=(stream,), name="hearth-stream-close", daemon=True
+        ).start()
+
+
+def _close_when_idle(stream: Iterator[str]) -> None:
+    """``close()`` a generator, retrying while a pool thread is still inside ``next()``."""
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    while True:
+        try:
+            close()
+            return
+        except ValueError:  # "generator already executing" — the in-flight next() ends soon
+            time.sleep(0.02)
 
 
 def _stream_sse(

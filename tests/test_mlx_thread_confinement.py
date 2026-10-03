@@ -142,3 +142,49 @@ def test_calls_already_on_the_mlx_thread_do_not_deadlock(monkeypatch):
     result = run_on_mlx_thread(lambda: (on_mlx_thread(), provider.generate(_req("nested"))))
     assert result[0] is True
     assert result[1].text.startswith("nested")
+
+
+def test_a_client_disconnect_stops_generation_through_the_gateway_wrapper():
+    """Abandon the async body the way Starlette does on disconnect; generation must stop.
+
+    Starlette never calls close() on a sync body when the client goes away. Measured before
+    this wrapper: a stream abandoned 1.6 s in made the next request wait 69.8 s.
+    """
+    import asyncio
+
+    from hearth.gateway.app import _close_on_disconnect
+    from hearth.providers.mlx import iterate_on_mlx_thread
+
+    emitted = [0]
+
+    def endless():
+        while True:
+            time.sleep(0.002)
+            emitted[0] += 1
+            yield "tok"
+
+    def sse_body():  # stands in for _stream_sse: a sync generator over the MLX stream
+        for item in iterate_on_mlx_thread(endless):
+            yield f"data: {item}\n\n"
+
+    # Held, as the live server evidently holds it: with no outside reference CPython's
+    # refcounting would close the generator on its own and this test would pass with or
+    # without the wrapper (it did — a mutant that never closes still passed).
+    held = sse_body()
+
+    async def client_reads_three_then_leaves():
+        body = _close_on_disconnect(held)
+        for _ in range(3):
+            await body.__anext__()
+        await body.aclose()  # what cancellation of the response task amounts to
+
+    asyncio.run(client_reads_three_then_leaves())
+    deadline = time.perf_counter() + 3.0
+    while time.perf_counter() < deadline:
+        before = emitted[0]
+        time.sleep(0.2)
+        if emitted[0] == before:
+            break
+    else:
+        raise AssertionError(f"generation never stopped ({emitted[0]} tokens and counting)")
+    run_on_mlx_thread(lambda: None)  # and the MLX thread is free for the next request
