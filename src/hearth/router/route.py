@@ -38,6 +38,8 @@ REASON_CLASS_POLICY = "class_policy"
 REASON_LOW_CONFIDENCE = "low_confidence"
 REASON_EXPLICIT = "explicit"
 REASON_LOCAL_FAILURE = "local_failure"
+# Not an escalation reason: the reason a request that tried to escalate was served LOCAL.
+REASON_REMOTE_FAILURE = "remote_failed; served local"
 
 
 class BudgetExhaustedError(RuntimeError):
@@ -52,8 +54,9 @@ class ProviderError(RuntimeError):
 
     A provider raising (missing weights, backend crash, remote unreachable) is turned into
     this clean error rather than a bare traceback, so the gateway can return a tidy 503
-    envelope instead of a 500. The router first attempts a local degrade (see
-    :meth:`Router.route`); this surfaces only when even that fails.
+    envelope instead of a 500. When an *escalation's* remote call fails, the router
+    degrades to the local provider (:meth:`Router.degrade_to_local`); this surfaces only
+    when the local provider itself fails.
     """
 
 
@@ -217,7 +220,20 @@ class Router:
             adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
 
         started = time.perf_counter()
-        result = self._generate(provider, decision, req, adapter_path)
+        escalation_failed: str | None = None
+        try:
+            result = self._generate(provider, decision, req, adapter_path)
+        except ProviderError as exc:
+            if not decision.would_escalate:
+                raise
+            # The remote failed (unreachable, offline, SDK missing, rejected the call).
+            # Serve the request locally rather than turning a frontier outage into an
+            # error: local is always the more private answer. The record says local served
+            # AND that an escalation was attempted and failed (``escalation_failed``).
+            escalation_failed = str(exc)
+            decision = self.degrade_to_local(req, decision, exc)
+            adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
+            result = self._generate(self.local, decision, req, adapter_path)
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         served_by = "remote" if decision.would_escalate else "local"
@@ -239,6 +255,7 @@ class Router:
             latency_ms=latency_ms,
             escalated=decision.would_escalate,
             escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
             adapter=adapter,
             estimated_frontier_tokens_saved=saved,
         )
@@ -246,6 +263,32 @@ class Router:
         return RouteResult(result=result, decision=decision, record=record)
 
     # -- helpers ----------------------------------------------------------------------
+
+    def degrade_to_local(
+        self, req: GenRequest, decision: RouteDecision, exc: Exception
+    ) -> RouteDecision:
+        """The local decision to serve with after an escalation's remote call failed.
+
+        Shared by :meth:`route` and the gateway's streaming path so both degrade the same
+        way. The returned decision is a plain local one (``would_escalate=False``) whose
+        reason names the failure, so telemetry records local as what served.
+        """
+        logger.warning(
+            "escalation failed (class=%s model=%s); serving locally instead: %s",
+            decision.task_class,
+            decision.model,
+            exc,
+        )
+        rule = self.policy.rule_for(decision.task_class)
+        return RouteDecision(
+            task_class=decision.task_class,
+            method=decision.method,
+            backend="local",
+            model=self._local_model(req, rule),
+            would_escalate=False,
+            reason=f"{REASON_REMOTE_FAILURE}: {exc}",
+            confidence=decision.confidence,
+        )
 
     def _generate(
         self,

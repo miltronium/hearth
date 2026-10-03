@@ -506,6 +506,7 @@ def stats(
     table.add_row("estimated frontier tokens saved", str(roll["estimated_frontier_tokens_saved"]))
     table.add_row("escalations", str(roll["escalations"]))
     table.add_row("escalation rate", f"{roll['escalation_rate']:.2%}")
+    table.add_row("escalations failed (served local)", str(roll["escalations_failed"]))
     backend_mix = ", ".join(f"{k}={v}" for k, v in roll["backend_mix"].items())
     class_mix = ", ".join(f"{k}={v}" for k, v in roll["class_mix"].items())
     table.add_row("backend mix", backend_mix or "-")

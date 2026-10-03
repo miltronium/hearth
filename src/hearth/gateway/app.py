@@ -476,20 +476,49 @@ def _stream_sse(
     started = time.perf_counter()
     parts: list[str] = []
     finish_reason = "stop"
-    for event in iter_stream(provider, stream_req):
-        if event.finish_reason:
-            finish_reason = event.finish_reason
-        if not event.text:
-            continue
-        parts.append(event.text)
-        yield _sse(
-            ChatCompletionChunk(
-                id=chunk_id,
-                created=created,
-                model=decision.model,
-                choices=[base_choice(ChatChunkDelta(content=event.text))],
+    escalation_failed: str | None = None
+
+    def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
+        nonlocal finish_reason
+        for event in iter_stream(provider, stream_req):
+            if event.finish_reason:
+                finish_reason = event.finish_reason
+            if not event.text:
+                continue
+            parts.append(event.text)
+            yield _sse(
+                ChatCompletionChunk(
+                    id=chunk_id,
+                    created=created,
+                    model=model,
+                    choices=[base_choice(ChatChunkDelta(content=event.text))],
+                )
             )
+
+    try:
+        yield from relay(provider, stream_req, decision.model)
+    except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
+        if not decision.would_escalate or parts:
+            # Local failed, or a remote failed mid-answer: nothing honest to splice in.
+            yield from _stream_failure(provider, exc)
+            return
+        # The remote failed before saying anything: serve the whole answer locally, as
+        # Router.route does. The final hearth chunk reports local as what served.
+        escalation_failed = f"provider {provider.name!r} failed: {exc}"
+        decision = router.degrade_to_local(gen_req, decision, exc)
+        provider = router.local
+        stream_req = GenRequest(
+            messages=gen_req.messages,
+            model=decision.model,
+            max_tokens=gen_req.max_tokens,
+            temperature=gen_req.temperature,
+            adapter=router._resolve_adapter(adapter, decision.task_class, decision.model),
         )
+        try:
+            yield from relay(provider, stream_req, decision.model)
+        except Exception as local_exc:  # noqa: BLE001
+            yield from _stream_failure(provider, local_exc)
+            return
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
 
@@ -514,6 +543,7 @@ def _stream_sse(
             latency_ms=latency_ms,
             escalated=decision.would_escalate,
             escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
             adapter=adapter,
             estimated_frontier_tokens_saved=saved,
         )
@@ -551,6 +581,26 @@ def _stream_sse(
                     "hearth": {"finish_reason": finish_reason},
                 }
             )
+    yield _sse("[DONE]")
+
+
+def _stream_failure(provider: ModelProvider, exc: Exception):
+    """Terminate a stream whose provider raised: an error event, then ``[DONE]``.
+
+    Without this the generator died mid-response with no ``[DONE]``, which a client sees as
+    a dropped connection, not as a failure it can name — the /chat page showed only
+    "[stream failed]". Mirrors the non-streaming path's ``hearth.provider.unavailable``.
+    """
+    logger.error("provider %s failed mid-stream: %s", provider.name, exc)
+    yield _sse(
+        {
+            "error": {
+                "message": f"provider {provider.name!r} failed: {exc}",
+                "type": "provider_unavailable",
+                "code": "hearth.provider.unavailable",
+            }
+        }
+    )
     yield _sse("[DONE]")
 
 
