@@ -9,8 +9,8 @@ commands in §2 before trusting it — status rots, measurements don't.
 - **Branch:** `cmux/integration` — code as of `35708f5`; this doc is the commit right after
   it (local only — **nothing has been pushed**).
 - **State:** HEARTH is safe to use offline by default (§1). Item 2 ("the model you pick is the
-  model that serves" + truthful `/ready`) is **half-done, uncommitted-or-WIP** on branch
-  `worktree-agent-ac0ade7fd1fa99aba` (worktree `.claude/worktrees/agent-ac0ade7fd1fa99aba`).
+  model that serves" + truthful `/ready`) is **code-complete but not live-verified**, committed
+  as WIP `d1d8434` on branch `worktree-agent-ac0ade7fd1fa99aba` (§4.1). Not merged.
 - **Do next, in order:**
   1. Verify state (§2).
   2. Finish item 2 (§4.1), verify live, merge, update `docs/BUGS.md` B-004/B-005.
@@ -68,13 +68,31 @@ the default model (Coder-7B, or `HEARTH_DEFAULT_MODEL` if it names a registry en
 
 ### 4.1 Item 2 — model selection is real; `/ready` is truthful (IN PROGRESS)
 
-Branch `worktree-agent-ac0ade7fd1fa99aba`, worktree
-`~/Claude/apps/HEARTH/.claude/worktrees/agent-ac0ade7fd1fa99aba`. At handoff it had edits to
-`cli.py`, `gateway/{app,agent_route}.py`, `providers/{__init__,base,echo,mlx,remote}.py`,
-`router/route.py`, `serving/{__init__,manager}.py`, new `serving/pool.py` and
-`tests/test_model_selection.py`. The agent was told to commit a `wip(model-selection):`
-commit describing done / not done / test result — read `git log` on that branch first; if no
-WIP commit exists, the work is uncommitted in that worktree (do not delete it).
+**Committed as WIP `d1d8434`** on branch `worktree-agent-ac0ade7fd1fa99aba` (worktree
+`~/Claude/apps/HEARTH/.claude/worktrees/agent-ac0ade7fd1fa99aba`, based on `d803f1a`, clean
+tree). Read its commit message first (`git -C <worktree> log -1`) — it lists what is done,
+what is not, and mutation results. Independently re-run at handoff: **1023 passed, 1 skipped**.
+
+Done in the WIP (unit-tested with a fake mlx_lm, 30 tests, 11 of 12 mutants killed):
+`serving/pool.py` `ModelPool` (one `MLXProvider` per registry id, LRU under the RAM ceiling,
+everything on the MLX thread); unknown ids → 404 `model_not_found` / CLI exit 2; telemetry
+from the provider that ran; warmup really loads; `/ready` 503 "loading"/"failed" with reason;
+new `GET /v1/hearth/admin/models`; `hearth run/agent --model` default to `auto` (the ladder).
+
+**Remaining before merge:**
+1. Rebase/merge onto current `cmux/integration` (it is based on `d803f1a`; integration has
+   since gained `doctor --offline`, disk-only train/convert, BUGS.md). Expect conflicts in
+   `cli.py` and `providers/mlx.py`; re-run the full suite after.
+2. Add a timeout to `test_concurrent_churn_never_holds_weights_outside_the_ceiling` so mutant
+   M10 fails cleanly instead of HANGING (deadlock), then run M10b (stream path) — not run.
+3. **Live verification — none done yet.** No server was started, no real weights loaded.
+   Do the live acceptance below, reading `/v1/hearth/admin/models` (loaded_path,
+   generations per instance) and the server INFO log for server-side proof.
+4. `/chat` dropdown lists echo and the embed model (now 404 instead of silent default) —
+   filter to servable models. `examples/finance/run_finance_ladder.py` still has its own
+   `LadderProvider`. `docs/API.md` lacks the 404, `/ready` reasons and admin/models.
+5. Then merge, update BUGS.md B-004/B-005 (and B-029: `/ready` now reports a typo'd
+   `HEARTH_DEFAULT_MODEL`, but `Registry.default_id` still silently ignores it).
 
 Goal (BUGS.md B-004, B-005):
 - `MLXProvider` serves the requested model; one provider per model id held by the
@@ -118,7 +136,7 @@ real issues). Then fix, re-verify, update BUGS.md.
 | `~/Claude/apps/HEARTH-wt-offline` | `fix/offline-by-default` | merged (`d803f1a`) — safe to remove |
 | `.claude/worktrees/agent-a62e0c3304b322af6` | `worktree-agent-a62e0c…` | merged (`13105ef`) — safe to remove |
 | `.claude/worktrees/agent-acee173b3fb359e44` | `worktree-agent-acee…` | merged (`8c7220e`) — safe to remove |
-| `.claude/worktrees/agent-ac0ade7fd1fa99aba` | `worktree-agent-ac0ade…` | **item 2 WIP — keep** |
+| `.claude/worktrees/agent-ac0ade7fd1fa99aba` | `worktree-agent-ac0ade…` | **item 2 WIP `d1d8434` — keep** |
 
 Remove merged ones with `git worktree remove <path>` (check `git -C <path> status` is clean first).
 
