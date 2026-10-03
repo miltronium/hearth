@@ -151,6 +151,7 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
         return str(candidate)
     try:  # deferred: huggingface_hub is only present with the mlx/embeddings extras
         from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
     except ImportError:
         # No hub client means mlx_lm cannot download either; let its own error speak.
         return model_id
@@ -161,7 +162,11 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
             return snapshot_download(
                 repo_id=model_id, cache_dir=cache_dir, local_files_only=True
             )
-        except Exception:  # noqa: BLE001 — not cached here (or not a repo id); try the next
+        # Exactly the two "not here" outcomes of a local-only lookup: not cached, or not a
+        # repo id at all. Anything else — a network error, a blocked socket — is NOT a cache
+        # miss and must surface: swallowing it would let a resolver that reached for the
+        # network still end in ModelNotOnDiskError and read as disk-only.
+        except (LocalEntryNotFoundError, HFValidationError):
             continue
     if allow_downloads:
         return model_id
@@ -170,6 +175,38 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
         f"hub cache) and HEARTH does not download on load. Fetch it deliberately with "
         f"`hearth models pull {model_id}`, or set HEARTH_ALLOW_DOWNLOADS=1."
     )
+
+
+def audit_resolution(model_id: str, allow_downloads: bool) -> tuple[object, list[object]]:
+    """Resolve ``model_id`` with every socket connect refused AND recorded.
+
+    Returns ``(outcome, connect_attempts)`` where ``outcome`` is the resolved path or the
+    exception raised. The connect list is the evidence the status probe needs: the exception
+    type cannot tell disk-only resolution from a lookup that tried the network, because
+    huggingface_hub converts a refused connection into ``LocalEntryNotFoundError`` — the
+    same error a plain cache miss raises — so both end in :class:`ModelNotOnDiskError`
+    (measured: 8 connects, then ModelNotOnDiskError). Lives here, not in ``hearth.status``,
+    which may not import a networking module at all (tests/test_status_readonly.py).
+    Single-threaded use only: it swaps ``socket.socket.connect`` for the duration.
+    """
+    import socket
+
+    attempts: list[object] = []
+
+    def refuse(self, address, *args, **kwargs):
+        attempts.append(address)
+        raise OSError(f"resolution audit refused a network connect to {address!r}")
+
+    real = (socket.socket.connect, socket.socket.connect_ex)
+    socket.socket.connect = refuse
+    socket.socket.connect_ex = refuse
+    try:
+        outcome: object = resolve_local_model(model_id, allow_downloads=allow_downloads)
+    except Exception as exc:  # noqa: BLE001 — the outcome IS the exception; caller judges
+        outcome = exc
+    finally:
+        socket.socket.connect, socket.socket.connect_ex = real
+    return outcome, attempts
 
 
 class MLXProvider:

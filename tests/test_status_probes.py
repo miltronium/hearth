@@ -545,7 +545,49 @@ def test_serving_loads_are_reported_disk_only_by_default(tmp_path: Path, monkeyp
 def test_opting_in_to_downloads_is_reported(tmp_path: Path, monkeypatch):
     fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": "1"})
     assert fact.level == LEVEL_WARN
-    assert fact.data == {"allow_downloads": True, "resolver_raised": False}
+    assert fact.data == {"allow_downloads": True, "resolver_raised": False, "connect_attempts": 0}
+
+
+@pytest.mark.parametrize("value", ["y", "t", "on", "YES"])
+def test_the_probe_parses_the_flag_exactly_as_settings_does(tmp_path, monkeypatch, value):
+    """A value Settings reads as True must not be reported disk-only (review finding F2)."""
+    from hearth.config import Settings
+
+    monkeypatch.setenv("HEARTH_ALLOW_DOWNLOADS", value)
+    assert Settings().allow_downloads is True
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": value})
+    assert fact.level == LEVEL_WARN
+    assert fact.data["allow_downloads"] is True
+
+
+def test_an_unparseable_flag_is_a_failure_not_a_default(tmp_path, monkeypatch):
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_ALLOW_DOWNLOADS": "maybe"})
+    assert fact.level == LEVEL_FAIL
+
+
+def test_a_resolver_that_goes_online_is_a_failure_even_if_it_ends_in_not_on_disk(
+    tmp_path, monkeypatch
+):
+    """The adversarial review's case: lookups with the network ON, every connect failing.
+
+    huggingface_hub converts the refused connection into the same "not cached" error a
+    cache miss raises, so the resolver still ends in ModelNotOnDiskError. Only the counted
+    connect attempts tell the two apart — and they must turn the fact red.
+    """
+    import huggingface_hub
+
+    real = huggingface_hub.snapshot_download
+
+    def online(*args, **kwargs):
+        kwargs["local_files_only"] = False
+        return real(*args, **kwargs)
+
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", online)
+    fact = _serving_fact(tmp_path, monkeypatch, environ={})
+    assert fact.level == LEVEL_FAIL
+    assert fact.data["connect_attempts"] > 0
 
 
 def test_a_resolver_that_regressed_to_fall_through_is_caught(tmp_path: Path, monkeypatch):

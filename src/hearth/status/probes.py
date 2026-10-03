@@ -502,40 +502,87 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
 _PROBE_MODEL_ID = "hearth-status/no-such-model"
 
 
+def _parse_allow_downloads(raw: str | None) -> bool:
+    """Parse ``HEARTH_ALLOW_DOWNLOADS`` with pydantic's own bool rules — Settings' parser.
+
+    A hand-rolled ``in {"1", "true", ...}`` disagreed with Settings on ``y``/``t``/``on``-style
+    values, so the probe said disk-only while serving would download. Raises on a value
+    Settings itself would reject.
+    """
+    if raw is None or raw.strip() == "":
+        return False
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(bool).validate_python(raw.strip())
+
+
 def _serving_load_fact(env: dict[str, str]) -> Fact:
     """Whether a SERVING model load could download — measured on the real resolver.
 
-    Asks ``providers/mlx.py:resolve_local_model`` to resolve an id that cannot be on disk.
-    Disk-only resolution raises :class:`ModelNotOnDiskError`; anything else (the bare id
-    handed back) is exactly what makes ``mlx_lm.load`` call ``snapshot_download`` with the
-    network on. Asserting on what the resolver does, not on the setting that should make it
-    do so, means a resolver regressed to the old fall-through reports as such. Read-only and
-    offline: every lookup is ``local_files_only`` and nothing is loaded.
+    Asks the real resolver to resolve an id that cannot be on disk, with every socket
+    connect refused AND counted (``providers/mlx.py:audit_resolution``). ``disk-only`` requires both outcomes: the
+    resolver raised :class:`ModelNotOnDiskError`, and it attempted no connection. Either
+    alone is not enough — a resolver that went online for a nonexistent id could also end
+    in ModelNotOnDiskError if it swallowed the failure, which is the case this guards.
+    Read-only: lookups are ``local_files_only`` and nothing is loaded.
     """
-    allow = (env.get("HEARTH_ALLOW_DOWNLOADS") or "").strip().lower() in {"1", "true", "yes", "on"}
     try:
-        from ..providers.mlx import ModelNotOnDiskError, resolve_local_model
+        allow = _parse_allow_downloads(env.get("HEARTH_ALLOW_DOWNLOADS"))
+    except Exception as exc:  # noqa: BLE001 — Settings would refuse this value at startup
+        return Fact(
+            "serving_load_egress",
+            "HEARTH_ALLOW_DOWNLOADS unparseable",
+            LEVEL_FAIL,
+            f"{env.get('HEARTH_ALLOW_DOWNLOADS')!r} is not a boolean Settings accepts: {exc}",
+            {},
+        )
+    try:
+        from ..providers.mlx import ModelNotOnDiskError, audit_resolution
     except Exception as exc:  # noqa: BLE001 — a probe reports, it does not crash
         return Fact("serving_load_egress", "unmeasured", LEVEL_UNVERIFIED, str(exc), {})
-    try:
-        resolved = resolve_local_model(_PROBE_MODEL_ID, allow_downloads=allow)
-    except ModelNotOnDiskError:
+
+    outcome, attempts = audit_resolution(_PROBE_MODEL_ID, allow_downloads=allow)
+
+    data = {
+        "allow_downloads": allow,
+        "resolver_raised": isinstance(outcome, ModelNotOnDiskError),
+        "connect_attempts": len(attempts),
+    }
+    if attempts:
+        return Fact(
+            "serving_load_egress",
+            "resolver attempted the network",
+            LEVEL_FAIL,
+            f"resolving a model that is not on disk tried {len(attempts)} connect(s) "
+            f"({attempts[0]!r}…) — a serving load is NOT disk-only",
+            data,
+        )
+    if isinstance(outcome, ModelNotOnDiskError):
         return Fact(
             "serving_load_egress",
             "disk-only",
             LEVEL_OK,
             "a model on neither ~/.hearth/models nor the hub cache fails to load instead of "
-            "downloading (HEARTH_ALLOW_DOWNLOADS unset) — serve, chat, agent, MCP, RAG",
-            {"allow_downloads": False, "resolver_raised": True},
+            "downloading, with no connect attempted — serve, chat, agent, MCP, RAG. Measured "
+            "with THIS command's environment, not the running daemon's",
+            data,
+        )
+    if isinstance(outcome, Exception):
+        return Fact(
+            "serving_load_egress",
+            "unmeasured",
+            LEVEL_UNVERIFIED,
+            f"the resolver raised {type(outcome).__name__}: {outcome}",
+            data,
         )
     return Fact(
         "serving_load_egress",
         "a load can download",
         LEVEL_WARN,
-        f"resolve_local_model handed back {resolved!r} for a model that is not on disk, so "
+        f"resolve_local_model handed back {outcome!r} for a model that is not on disk, so "
         "mlx_lm.load would fetch it from huggingface.co"
         + (" — HEARTH_ALLOW_DOWNLOADS is set" if allow else " — and downloads are NOT opted in"),
-        {"allow_downloads": allow, "resolver_raised": False},
+        data,
     )
 
 

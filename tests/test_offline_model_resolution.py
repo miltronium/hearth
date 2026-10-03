@@ -1,9 +1,11 @@
 """A model load must never be a download by accident (providers/mlx.py:resolve_local_model).
 
 ``mlx_lm.load`` given a bare repo id calls ``snapshot_download`` with the network ON. These
-tests plant real hub-layout caches on disk and block sockets, so a "not found" outcome
-cannot be a network attempt that merely happened to fail: if resolution ever reaches for
-the network again, the blocked socket turns that into a loud, different error.
+tests plant real hub-layout caches on disk and refuse every socket connect — and COUNT them,
+failing any test that attempted one. Counting is the instrument because the exception type
+is not: huggingface_hub turns a refused connection into ``LocalEntryNotFoundError``, the very
+"not cached" error a cache miss raises, so a resolver that reached for the network can still
+end in ModelNotOnDiskError looking exactly like a disk-only one (measured: 8 connects).
 """
 
 from __future__ import annotations
@@ -30,19 +32,25 @@ from hearth.providers.mlx import (  # noqa: E402
 REPO = "org/model-a"
 
 
-class NetworkAttempted(AssertionError):
-    pass
-
-
 @pytest.fixture(autouse=True)
-def no_network(monkeypatch):
-    """Any socket connect during these tests is a failure, not a slow fallback."""
+def connects(monkeypatch):
+    """Refuse every socket connect the way a dead network does (OSError), and record it.
+
+    Proxy variables are cleared so a request would connect directly rather than to a local
+    proxy. Any test that leaves an attempt recorded fails at teardown.
+    """
+    attempts: list = []
 
     def refuse(self, address, *args, **kwargs):
-        raise NetworkAttempted(f"network connect attempted to {address!r}")
+        attempts.append(address)
+        raise OSError(f"network connect refused by test: {address!r}")
 
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(socket.socket, "connect", refuse)
     monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    yield attempts
+    assert attempts == [], f"network connect attempted: {attempts!r}"
 
 
 @pytest.fixture
@@ -144,3 +152,22 @@ def test_the_provider_refuses_to_load_a_missing_model(isolated, monkeypatch):
     with pytest.raises(ModelNotOnDiskError):
         MLXProvider(REPO)._load_variant(None)
     assert calls == []  # mlx_lm.load — the thing that downloads — was never reached
+
+
+def test_the_connect_counter_catches_a_resolver_that_goes_online(isolated, monkeypatch, connects):
+    """Validate the instrument: a regressed resolver that looks up with the network ON IS
+    detected by the connect count — even though it still ends in ModelNotOnDiskError, which
+    is why no test here may rely on the exception type alone."""
+    import huggingface_hub
+
+    real = huggingface_hub.snapshot_download
+
+    def online(*args, **kwargs):  # the regression: a lookup with the network ON
+        kwargs["local_files_only"] = False
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", online)
+    with pytest.raises(Exception):
+        resolve_local_model(REPO)
+    assert connects, "the instrument failed to see a lookup that went online"
+    connects.clear()  # the attempt was the point of this test, not a failure of it
