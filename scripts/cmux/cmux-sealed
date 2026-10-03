@@ -78,7 +78,9 @@ echo
 mandatory_ok=1; advisory_ok=1
 
 # 1) MANDATORY: repo classifies to the sealed tier (ADR-C003).
-if uv run --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --require-sealed >/dev/null 2>&1; then
+# --no-sync: a bare `uv run` re-syncs the venv to the default set and uninstalls mlx — and
+# with output discarded here, it would do so silently on every sealed launch (CLAUDE.md §1).
+if uv run --no-sync --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --require-sealed >/dev/null 2>&1; then
   pass "tier: '$REPO' classifies as sealed (config/cmux/tiers.yaml)"
 else
   fail "tier: '$REPO' does NOT classify as sealed — refusing (default-sealed means this is a config or path error)"

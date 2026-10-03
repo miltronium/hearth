@@ -165,7 +165,7 @@ loopback-only pf firewall is the structural seal (browser/iroh have no code swit
 
 **Delivered:** `scripts/cmux/{cmux-open, cmux-open.1}`, `docs/cmux/RUNBOOK_open.md`. Fail-closed-to-sealed
 guard reuses the C3 classifier (`--assert-open`, unit-tested). No pf seal in this tier; frontier
-escalation permitted (`routing.yaml`); networked Docker allowed. Config-only; HEARTH untouched.
+escalation permitted (`routing.yaml` then; `routing.remote.yaml` since the 2026-10 no-egress default); networked Docker allowed. Config-only; HEARTH untouched.
 
 ---
 

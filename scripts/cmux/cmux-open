@@ -39,7 +39,7 @@ done
 
 if [ "$MODE" = "cost" ]; then
   echo "==> open-tier frontier cost (HEARTH escalation rollup):"
-  HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.yaml" uv run --project "$REPO_ROOT" hearth stats 2>/dev/null || true
+  HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.remote.yaml" uv run --no-sync --project "$REPO_ROOT" hearth stats 2>/dev/null || true
   echo "    Note: this counts work HEARTH itself escalated. Frontier spend from a pane's own agent"
   echo "    (e.g. Claude Code -> Anthropic) is outside HEARTH's meter — track via your provider."
   exit 0
@@ -51,7 +51,7 @@ REMOTE="$(git -C "$REPO" remote get-url origin 2>/dev/null || echo '-')"
 echo "==> cmux-open — checking OPEN-tier eligibility for: $REPO"
 
 # MANDATORY GATE: the repo must classify OPEN. Anything else fails closed to sealed.
-if uv run --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --assert-open >/dev/null 2>&1; then
+if uv run --no-sync --project "$REPO_ROOT" python "$REPO_ROOT/scripts/cmux/tier_classify.py" "$REPO" --assert-open >/dev/null 2>&1; then
   printf '  \033[32mPASS\033[0m  tier: repo classifies as OPEN (explicit opt-in in config/cmux/tiers.yaml)\n'
 else
   printf '  \033[31mREFUSED\033[0m  tier: repo is sealed/unclassified — the open tier is off-limits.\n'
@@ -74,8 +74,11 @@ mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
 printf '%s\topen-GRANTED\t%s\tremote=%s\tuser=%s\n' "$(date -u +%FT%TZ)" "$REPO" "$REMOTE" "${USER:-?}" >> "$AUDIT_LOG"
 echo "  logged open-tier grant to $AUDIT_LOG"
 
-# Open-tier posture: frontier escalation permitted (routing.yaml), cloud/Docker allowed, NO pf seal.
-export HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.yaml"
+# Open-tier posture: frontier escalation permitted, cloud/Docker allowed, NO pf seal.
+# routing.remote.yaml is the escalating profile; config/routing.yaml is no-egress since
+# 2026-10, so pointing the open tier at it would silently turn escalation off.
+export HEARTH_ROUTING_YAML="$REPO_ROOT/config/routing.remote.yaml"
+[ -f "$HEARTH_ROUTING_YAML" ] || { echo "error: open-tier profile missing: $HEARTH_ROUTING_YAML" >&2; exit 1; }
 APP="/Applications/cmux.app"
 if [ "$DRY_RUN" = 1 ]; then
   echo "==> --dry-run: would launch: open -a '$APP' '$REPO'  (open tier: cloud/Docker + frontier escalation)"
