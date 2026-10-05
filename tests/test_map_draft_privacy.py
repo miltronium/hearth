@@ -304,6 +304,25 @@ def test_workbook_metadata_is_not_printed_in_process_either(tmp_path, capsys, mo
 
 # -- the model path: it may SEE what it needs; nothing it returns prints raw -------------------
 
+
+def test_a_bom_csv_drafts_the_clean_header_name_and_the_parser_agrees(
+    tmp_path, capsys, monkeypatch
+):
+    """B-094: the draft got '<BOM>Date' (invisible in the YAML) while stdout withheld it."""
+    root = tmp_path / "in"
+    root.mkdir()
+    (root / "s.csv").write_bytes(hostile.BOM_CSV)
+    code, out = _run(root, capsys, monkeypatch, "--no-model")
+    assert code == 0, out
+    assert "[0] Date " in out and "verification: verified" in out
+    assert "SECRETBOM" not in out and hostile.BOM not in out
+    draft = (tmp_path / "in-mappings" / "format-1.yaml").read_text(encoding="utf-8")
+    assert hostile.BOM not in draft
+    mapping = ColumnMapping.from_yaml(tmp_path / "in-mappings" / "format-1.yaml")
+    assert mapping.date_column == "Date"
+    parsed = parse_rows(read_table(root / "s.csv", Settings(file_roots=str(root))), mapping)
+    assert [str(t.amount) for t in parsed] == ["-4.50", "1.00"]
+
 HOSTILE_HEADER = (
     "Date,Description,Amount,Jane Public 4417\n"
     "2024-01-02,COFFEE,-4.50,7.25\n"
@@ -513,7 +532,10 @@ def test_property_no_random_text_or_digit_run_reaches_stdout(
                 path.write_bytes(hostile.xlsx_with_metadata(rows))
                 all_secrets += list(META_SECRETS)
             else:
-                path.write_text(_csv(rows), encoding="utf-8")
+                body = _csv(rows)
+                if rng.random() < 0.2:  # Excel "CSV UTF-8": a BOM before the first cell
+                    body = hostile.BOM + body
+                path.write_text(body, encoding="utf-8")
             expected_names += shown
             if skip is not None:
                 expected_skips[path] = skip

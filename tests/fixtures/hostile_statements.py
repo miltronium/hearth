@@ -10,6 +10,7 @@ so the bytes each test relies on are visible here rather than hidden in a binary
   print-area defined name (openpyxl warns, quoting its value) and a defined name for a sheet
   index that does not exist (openpyxl warns). All three reach stderr through
   ``warnings.warn`` in openpyxl 3.1, in read-only mode too (B-090).
+* :data:`BOM_CSV`, :data:`BOM_JSON` - UTF-8 files that start with a byte-order mark (B-094).
 """
 
 from __future__ import annotations
@@ -93,3 +94,18 @@ def xlsx_with_metadata(
                     )
             target.writestr(name, data)
     return out.getvalue()
+
+
+BOM = chr(0xFEFF)  # spelled as a code point so this source file itself carries no BOM
+
+#: Excel "CSV UTF-8" shape: a BOM, then the header (B-094).
+BOM_CSV = (
+    BOM + "Date,Description,Amount\n"
+    '2024-01-02,"MULTI\nLINE SECRETBOM",-4.50\n'
+    "2024-01-03,SECRETBOMTWO,1.00\n"
+).encode("utf-8")
+
+BOM_JSON = (
+    BOM + '[{"Date":"2024-01-02","Description":"SECRETBOMJSON","Amount":"-1.00"},'
+    '{"Date":"2024-01-03","Description":"SECRETBOMJSONTWO","Amount":"2.00"}]'
+).encode("utf-8")

@@ -188,6 +188,16 @@ def test_workbook_metadata_is_not_printed_in_process_either(tmp_path, monkeypatc
 # -- file names and paths ----------------------------------------------------------------
 
 
+def test_a_bom_csv_shows_its_first_header_name(tmp_path, monkeypatch, capsys):
+    """B-094: the BOM made the first cell '<BOM>Date', which the rule rightly withheld."""
+    (tmp_path / "s.csv").write_bytes(hostile.BOM_CSV)
+    code, out = _run_on(tmp_path, monkeypatch, capsys)
+    assert code == 0
+    assert re.search(r"^ +0  Date +date-like$", out, re.M), out
+    assert not re.search(r"^ +\d+  \(withheld\)", out, re.M), out
+    assert "SECRETBOM" not in out and hostile.BOM not in out
+
+
 def test_file_and_directory_names_are_never_printed(tmp_path, monkeypatch, capsys):
     body, markers = _statement([], "Posting Date,Description,Amount,Balance")
     out = _run(tmp_path, monkeypatch, capsys, {
@@ -397,7 +407,10 @@ def test_property_no_random_cell_text_or_digit_run_is_ever_printed(
                 all_secrets += [s.lower() for s in META_SECRETS]
                 expected += shown
             else:
-                (folder / f"{name}.csv").write_text(_csv(rows))
+                body = _csv(rows)
+                if rng.random() < 0.2:  # Excel "CSV UTF-8": a BOM before the first cell
+                    body = hostile.BOM + body
+                (folder / f"{name}.csv").write_text(body, encoding="utf-8")
                 expected += shown
         _code, out = _run_on(root, monkeypatch, capsys)
         lowered = out.lower()

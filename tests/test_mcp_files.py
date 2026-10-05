@@ -877,3 +877,34 @@ def test_a_print_or_warning_inside_any_handler_is_discarded(tmp_path, root, capf
         read_table(root / "s.csv", settings=_settings(tmp_path, [root]))
     captured = capfd.readouterr()
     assert seen == [] and "CANARY" not in captured.out + captured.err
+
+
+# -- B-094: a byte-order mark is not part of the first header cell -------------------------
+
+
+def test_a_bom_csv_reads_with_a_clean_first_header_cell(tmp_path, root):
+    (root / "s.csv").write_bytes(hostile.BOM_CSV)
+    settings = _settings(tmp_path, [root])
+    rows = read_table(root / "s.csv", settings=settings)
+    assert rows[0] == ["Date", "Description", "Amount"]
+    assert not read_text_file(root / "s.csv", settings=settings).startswith(hostile.BOM)
+
+
+def test_a_bom_json_array_reads_as_a_table_instead_of_being_refused(tmp_path, root):
+    (root / "s.json").write_bytes(hostile.BOM_JSON)
+    rows = read_table(root / "s.json", settings=_settings(tmp_path, [root]))
+    assert rows[0] == ["Amount", "Date", "Description"]
+
+
+def test_a_bom_in_plain_text_is_dropped(tmp_path, root):
+    (root / "n.txt").write_bytes(hostile.BOM.encode() + b"hello\n")
+    assert read_text_file(root / "n.txt", settings=_settings(tmp_path, [root])) == "hello\n"
+
+
+@needs_openpyxl
+def test_a_bom_inside_a_workbook_cell_is_dropped(tmp_path, root):
+    (root / "w.xlsx").write_bytes(
+        _xlsx_bytes({"S": [[hostile.BOM + "Date", "Amount"], ["2024-01-01", "1.00"]]})
+    )
+    rows = read_table(root / "w.xlsx", settings=_settings(tmp_path, [root]))
+    assert rows[0] == ["Date", "Amount"]

@@ -550,7 +550,9 @@ def _cell_text(value: object) -> str:
         return value.date().isoformat() if value.time() == time.min else value.isoformat(" ")
     if isinstance(value, date):
         return value.isoformat()
-    return str(value).strip()
+    # A workbook converted from a BOM-carrying CSV can hold the mark inside its first cell;
+    # str.strip() does not treat U+FEFF as whitespace (B-094, same as _decode).
+    return str(value).strip().strip("\N{ZERO WIDTH NO-BREAK SPACE}").strip()
 
 
 def _json_cell(value: object) -> str:
@@ -640,11 +642,18 @@ def _reader_for(suffix: str, readers: Mapping[str, _Reader], what: str) -> _Read
 
 
 def _decode(data: bytes, requested: str) -> str:
-    """Decode ``data`` as UTF-8, refusing binary rather than returning mojibake."""
+    """Decode ``data`` as UTF-8, refusing binary rather than returning mojibake.
+
+    A leading byte-order mark is dropped (``utf-8-sig``): Excel's "CSV UTF-8" export writes
+    one, and kept it becomes part of the first header cell, so ``Date`` reads as
+    ``<BOM>Date`` - withheld by the shape tools, copied invisibly into a drafted mapping, and
+    fatal to ``json.loads`` (B-094). Every reader goes through here, so the drafts and the
+    parser see the same header.
+    """
     if b"\x00" in data:  # NUL byte ⇒ almost certainly binary
         raise FileAccessError(f"file is not UTF-8 text: {requested!r}")
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         # Never echo the offending bytes — the decoder's own message would quote them.
         raise FileAccessError(f"file is not UTF-8 text: {requested!r}") from None
