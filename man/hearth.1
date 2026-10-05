@@ -784,6 +784,31 @@ Minimum lift that would count. (default: 0.0)
 \fB\-\-min\-n\fR \fIINTEGER\fR
 Minimum golden\-set size. (default: 30)
 .RE
+.SS "hearth prereg anchor"
+\fBhearth prereg anchor\fR [OPTIONS] [REPO]
+.PP
+Show or set the evals repository that pre\-registrations and golden sets must live in.
+.PP
+A promotion requires the prereg and the golden set to be committed in the evals repository HEARTH was anchored to when the adapter was FIRST measured: every eval records the anchor in force in the signed measurement ledger, before any score exists. A copy of the golden set in a throwaway repository therefore does not count, and re\-anchoring after seeing a score does not help an adapter already measured. Unset, the anchor is HEARTH's own repository (next to data/<task>_golden.jsonl). The setting lives in HEARTH_HOME/evals\-repo.
+.PP
+Examples:
+.RS 4
+.nf
+hearth prereg anchor
+hearth prereg anchor ~/src/my\-evals
+.fi
+.RE
+.PP
+Env: HEARTH_HOME.
+.PP
+Exit: 0 shown or set; 1 REPO is not inside a git repository, or (when showing) the current anchor does not resolve to one.
+.PP
+Arguments and options:
+.RS 4
+.TP
+\fIREPO\fR
+Git repository to anchor promotions to (omit to show the current anchor). (optional)
+.RE
 .SS "hearth prereg check"
 \fBhearth prereg check\fR [OPTIONS] PATH
 .PP

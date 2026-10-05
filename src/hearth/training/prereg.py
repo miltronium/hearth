@@ -464,6 +464,8 @@ def check_provenance(
        committed and unmodified there (``golden_git``) — re-derived from the committed
        blob, whose content sha must be the ``golden_sha`` that was scored
        (:func:`committed_golden_problems`).
+    4. **That repository is the anchored evals repository** recorded in the ledger at the
+       first measurement (:func:`resolve_anchor`, B-081).
     """
     status = verify_committed(registration.path)
     if not status.committed:
@@ -498,6 +500,20 @@ def check_provenance(
             f"the pre-registration lives in {status.repo_root}, but the golden set is "
             f"versioned in {golden_root}: register the bar in the repository that holds the "
             "golden set"
+        )
+    # The repository is not "wherever the golden file happens to be": a copy of the golden
+    # set in a throwaway `git init` satisfied that (B-081). It must be the evals repository
+    # HEARTH was anchored to when the adapter was FIRST measured — a choice recorded in the
+    # signed ledger before any score existed, so it cannot be made after seeing one.
+    anchor = first_measurement.get("anchor") or {}
+    anchor_dir = str(anchor.get("common_dir") or "")
+    if not anchor_dir or _repo_identity(status.repo_root)[1] != anchor_dir:
+        raise PreRegError(
+            f"the pre-registration and golden set live in {status.repo_root}, which is not "
+            f"the evals repository HEARTH was anchored to when {adapter!r} was first measured "
+            f"({anchor.get('path') or 'none resolved'}): register the bar next to the golden "
+            "set in the anchored repository (`hearth prereg anchor` shows it), before the "
+            "adapter is first measured"
         )
     first_head = str((first_measurement.get("golden_git") or {}).get("head") or "")
     if not first_head or not _is_ancestor(status.commit, first_head, root=status.repo_root):
@@ -562,6 +578,55 @@ def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[st
         "blob": status.blob,
         "head": head,
     }
+
+
+# -- the evals-repository anchor (B-081) --------------------------------------------------
+
+ANCHOR_FILENAME = "evals-repo"
+
+
+def _repo_identity(directory: str | Path) -> tuple[str, str]:
+    """``(toplevel, common_dir)`` of the repository containing ``directory`` ("" on failure).
+
+    The identity is the resolved common git dir, so every worktree of one repository is the
+    same repository, and a copy of its files in a fresh ``git init`` is not.
+    """
+    try:
+        top = _git(["rev-parse", "--show-toplevel"], cwd=str(directory))
+        common = _git(["rev-parse", "--git-common-dir"], cwd=str(directory))
+    except (_GitError, FileNotFoundError, NotADirectoryError):
+        return "", ""
+    return top, str((Path(directory) / common).resolve())
+
+
+def resolve_anchor(home: Path | str) -> dict[str, str]:
+    """The evals repository promotions are anchored to, as of now.
+
+    ``<HEARTH_HOME>/evals-repo`` (written by ``hearth prereg anchor``) names it; unset, it
+    is HEARTH's own repository — the one holding the ``data/<task>_golden.jsonl`` sets the
+    runbook registers bars next to. Returns ``{"path", "common_dir", "source"}``;
+    ``common_dir`` is "" when the anchor does not resolve to a git repository.
+    """
+    pin = Path(home) / ANCHOR_FILENAME
+    if pin.exists():
+        target = pin.read_text(encoding="utf-8").strip()
+        source = str(pin)
+    else:
+        target = str(Path(__file__).resolve().parent)
+        source = "HEARTH's own repository (default)"
+    top, common = _repo_identity(target) if Path(target).is_dir() else ("", "")
+    return {"path": top or target, "common_dir": common, "source": source}
+
+
+def pin_anchor(home: Path | str, repo: Path | str) -> dict[str, str]:
+    """Anchor promotions to the git repository containing ``repo``; raise if it is none."""
+    top, common = _repo_identity(repo) if Path(repo).is_dir() else ("", "")
+    if not common:
+        raise PreRegError(f"{repo} is not inside a git repository")
+    Path(home).mkdir(parents=True, exist_ok=True)
+    (Path(home) / ANCHOR_FILENAME).write_text(top + "\n", encoding="utf-8")
+    return resolve_anchor(home)
+
 
 
 def _parse_time(value: str, label: str) -> datetime:
@@ -675,8 +740,11 @@ __all__ = [
     "GitStatus",
     "PreRegError",
     "PreRegistration",
+    "ANCHOR_FILENAME",
     "check_provenance",
     "committed_golden_problems",
+    "pin_anchor",
+    "resolve_anchor",
     "golden_git_status",
     "provenance_proof",
     "load_prereg",

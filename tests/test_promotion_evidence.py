@@ -98,6 +98,10 @@ class World:
         self.prereg = self.repo / "prereg.yaml"
         self.report = tmp_path / "report.json"
         self.store = AdapterStore(path=self.home / "adapters.json")
+        # The repo is this install's evals repository (B-081), set before any measurement.
+        from hearth.training.prereg import pin_anchor
+
+        pin_anchor(self.home, self.repo)
 
     @property
     def env(self) -> dict[str, str]:

@@ -15,6 +15,7 @@ refusal, and each was run against the old code first to confirm it promoted ther
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -464,3 +465,86 @@ def test_A_the_legitimate_order_records_the_first_measurement_in_the_proof(world
     assert proof["first_ledger_seq"] == first["ledger_seq"] == 0
     assert proof["ledger_seq"] == 1
     assert proof["first_measured_at"] == first["measured_at"]
+
+
+# -- C: the evals repository is anchored before the first measurement (B-081) -------------
+
+
+def test_C_a_throwaway_repo_holding_a_golden_copy_is_refused(world, tmp_path):
+    other = tmp_path / "throwaway"
+    other.mkdir()
+    pe._git(other, "init", "-q")
+    world.golden = other / "golden.jsonl"
+    world.golden.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS))
+    world.prereg = other / "prereg.yaml"
+    world.repo = other
+    world.registered()
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not the evals repository HEARTH was anchored to" in _flat(result)
+    assert world.status() == "candidate"
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1 and "not the evals repository" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_C_re_anchoring_after_the_first_measurement_does_not_help(world, tmp_path):
+    from hearth.training.prereg import pin_anchor
+
+    world.eval("extract-1")  # first measured while anchored to world.repo
+    other = tmp_path / "throwaway"
+    other.mkdir()
+    pe._git(other, "init", "-q")
+    pin_anchor(world.home, other)  # ...then point HEARTH somewhere convenient
+    world.golden = other / "golden.jsonl"
+    world.golden.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS))
+    world.prereg = other / "prereg.yaml"
+    world.repo = other
+    world.registered()
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not the evals repository" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_C_a_worktree_of_the_anchored_repo_is_the_same_repository(world, tmp_path):
+    """Identity is the common git dir: a worktree is the anchored repo, a copy is not."""
+    world.registered()
+    tree = tmp_path / "tree"
+    pe._git(world.repo, "worktree", "add", "-q", str(tree))
+    world.golden = tree / "golden.jsonl"
+    world.prereg = tree / "prereg.yaml"
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 0, _flat(result)
+
+
+def test_C_prereg_anchor_shows_sets_and_refuses_a_non_repository(world, tmp_path):
+    show = pe.runner.invoke(pe.app, ["prereg", "anchor"], env=world.env)
+    assert show.exit_code == 0 and str(world.repo.resolve()) in _flat(show)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    bad = pe.runner.invoke(pe.app, ["prereg", "anchor", str(plain)], env=world.env)
+    assert bad.exit_code == 1 and "not inside a git repository" in _flat(bad)
+    other = tmp_path / "other"
+    other.mkdir()
+    pe._git(other, "init", "-q")
+    ok = pe.runner.invoke(pe.app, ["prereg", "anchor", str(other)], env=world.env)
+    assert ok.exit_code == 0, _flat(ok)
+    show = pe.runner.invoke(pe.app, ["prereg", "anchor"], env=world.env)
+    assert str(other.resolve()) in _flat(show)
+    (world.home / "evals-repo").write_text(str(plain))
+    show = pe.runner.invoke(pe.app, ["prereg", "anchor"], env=world.env)
+    assert show.exit_code == 1 and "No evals repository" in _flat(show)
+
+
+def test_C_unset_the_anchor_is_hearths_own_repository(tmp_path):
+    import hearth
+    from hearth.training.prereg import resolve_anchor
+
+    anchor = resolve_anchor(tmp_path / "empty-home")
+    assert "default" in anchor["source"]
+    assert anchor["common_dir"]  # this test runs from a checkout of HEARTH
+    assert Path(hearth.__file__).resolve().is_relative_to(Path(anchor["path"]).resolve())

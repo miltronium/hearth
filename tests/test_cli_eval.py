@@ -87,8 +87,12 @@ def _git(tmp_path, *args: str) -> None:
 def _committed_prereg(tmp_path, rows, *, task="extract", name="prereg.yaml", **bar) -> str:
     """Write a matching pre-registration and commit it — with the golden set, when one has
     been written — to a throwaway repo. Promotion requires the prereg to live in the
-    repository that versions the golden set, both committed before the measurement."""
+    repository that versions the golden set, both committed before the measurement, and
+    that repository to be the install's anchored evals repository (B-081)."""
     _git(tmp_path, "init", "-q")
+    from hearth.training.prereg import pin_anchor
+
+    pin_anchor(tmp_path / ".hearth", tmp_path)
     body = {
         "task": task,
         "hypothesis": "the adapter learns the labels the base model cannot guess",

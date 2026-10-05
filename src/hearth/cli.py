@@ -1524,6 +1524,7 @@ def eval_adapter(
         PreRegError,
         check_provenance,
         golden_git_status,
+        resolve_anchor,
         load_prereg,
         provenance_proof,
     )
@@ -1631,6 +1632,9 @@ def eval_adapter(
             "golden_git": {k: golden_git.get(k)
                            for k in ("repo_root", "head", "committed", "commit", "rel_path")},
             "prereg_sha": registration.sha if registration is not None else "",
+            # The evals repository in force now (B-081): promotion requires the prereg to
+            # live in the one recorded at the adapter's FIRST measurement.
+            "anchor": resolve_anchor(home),
         }, key)
     except (AttestationError, LedgerError, OSError) as exc:
         console.print(f"[red]Refusing to measure:[/red] cannot record the measurement: {exc}")
@@ -1989,6 +1993,54 @@ def prereg_init(
         f"Wrote [cyan]{out}[/cyan]. Fill in hypothesis/stopping_rule/kill_condition, then "
         "[bold]git commit[/bold] it — an uncommitted prereg cannot gate a promotion."
     )
+
+
+@prereg_app.command("anchor")
+def prereg_anchor(
+    repo: Path = typer.Argument(
+        None, help="Git repository to anchor promotions to (omit to show the current anchor)."
+    ),
+) -> None:
+    """Show or set the evals repository that pre-registrations and golden sets must live in.
+
+    A promotion requires the prereg and the golden set to be committed in the evals
+    repository HEARTH was anchored to when the adapter was FIRST measured: every eval
+    records the anchor in force in the signed measurement ledger, before any score
+    exists. A copy of the golden set in a throwaway repository therefore does not count,
+    and re-anchoring after seeing a score does not help an adapter already measured.
+    Unset, the anchor is HEARTH's own repository (next to data/<task>_golden.jsonl). The
+    setting lives in HEARTH_HOME/evals-repo.
+
+    Examples:
+      hearth prereg anchor
+      hearth prereg anchor ~/src/my-evals
+
+    Env: HEARTH_HOME.
+
+    Exit: 0 shown or set; 1 REPO is not inside a git repository, or (when showing) the
+    current anchor does not resolve to one.
+    """
+    from .config import Settings
+    from .training.prereg import PreRegError, pin_anchor, resolve_anchor
+
+    home = Settings().home
+    if repo is not None:
+        try:
+            anchor = pin_anchor(home, repo)
+        except PreRegError as exc:
+            console.print(f"[red]Cannot anchor:[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        console.print(
+            f"Anchored promotions to [cyan]{anchor['path']}[/cyan]. Adapters already measured "
+            "stay bound to the anchor recorded at their first measurement."
+        )
+        return
+    anchor = resolve_anchor(home)
+    if not anchor["common_dir"]:
+        console.print(f"[red]No evals repository:[/red] {anchor['path']} ({anchor['source']}) "
+                      "is not a git repository — `hearth prereg anchor <repo>`.")
+        raise typer.Exit(code=1)
+    console.print(f"evals repository: [cyan]{anchor['path']}[/cyan] ({anchor['source']})")
 
 
 @prereg_app.command("check")
