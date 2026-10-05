@@ -74,12 +74,12 @@ must fail when the fix is reverted.
 - [B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)
 - [B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)
 - [B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)
-- [B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)
-- [B-039](#b-039) `training/dataset.py` promises headerless datasets, then refuses them (P3)
-- [B-040](#b-040) Example docs give install/run commands that prune the venv (P2)
-- [B-041](#b-041) `docs/RUNBOOK_training.md` still teaches the removed `--candidate-score` promote path (P2)
-- [B-042](#b-042) `Settings.default_model` is never read (P3)
-- [B-043](#b-043) `hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2 (P3)
+- ~~[B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)~~ — fixed in `48634a5`
+- ~~[B-039](#b-039) `training/dataset.py` promises headerless datasets, then refuses them (P3)~~ — fixed in `46bddeb`
+- ~~[B-040](#b-040) Example docs give install/run commands that prune the venv (P2)~~ — fixed in `0c3b5f9`
+- ~~[B-041](#b-041) `docs/RUNBOOK_training.md` still teaches the removed `--candidate-score` promote path (P2)~~ — fixed in `e5761b1`
+- ~~[B-042](#b-042) `Settings.default_model` is never read (P3)~~ — fixed in `eef3bd5`
+- ~~[B-043](#b-043) `hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2 (P3)~~ — fixed in `cf3b6e9`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -781,7 +781,7 @@ must fail when the fix is reverted.
 ### B-038
 **`docs/PRIVACY.md` "Formats" row says text/CSV only**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED in `48634a5` (Formats row lists the real suffix table from `mcp/files.py`)** · **Effort:** S
 - **Evidence:** Reported by the docs agent: `src/hearth/mcp/files.py:566-575` also reads `.json`, `.xlsx`, `.pdf`.
 - **Impact:** Understates what the path-taking tools can read.
 - **Fix outline:** Update the row from the code.
@@ -790,7 +790,7 @@ must fail when the fix is reverted.
 ### B-039
 **`training/dataset.py` promises headerless datasets, then refuses them**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED in `46bddeb` (docstring fixed; a headerless file is refused with an error naming the missing header)** · **Effort:** S
 - **Evidence:** Reported by the docs agent: `src/hearth/training/dataset.py:182` docstring vs `load_dataset` raising "dataset task must be non-empty".
 - **Impact:** Doc/code disagreement in the training path.
 - **Fix outline:** Either support headerless files with an explicit `--task`, or fix the docstring.
@@ -799,7 +799,7 @@ must fail when the fix is reverted.
 ### B-040
 **Example docs give install/run commands that prune the venv**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `0c3b5f9` (one-command sync and `uv run --no-sync [--project]` across `examples/`)** · **Effort:** S
 - **Evidence:** Checked: `examples/claude_code_mcp.md:17,24,52,105` use `uv sync --extra mcp` and bare `uv run hearth ...`; `examples/cmux/hearth.mcp.json:8` says `uv sync --extra mlx --extra mcp` (prunes dev/files). The 54b152f sweep excluded `examples/`.
 - **Impact:** Following the MCP setup example uninstalls mlx (CLAUDE.md §1).
 - **Fix outline:** Apply the one-command sync and `uv run --no-sync` to `examples/`.
@@ -808,7 +808,7 @@ must fail when the fix is reverted.
 ### B-041
 **`docs/RUNBOOK_training.md` still teaches the removed `--candidate-score` promote path**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `e5761b1` (promotion section rewritten around `prereg init/check` and `eval --promote --prereg`)** · **Effort:** S
 - **Evidence:** Reported by the docs agent: `docs/RUNBOOK_training.md:182,198,204` (a current runbook). `hearth adapters promote` rejects those flags (cli.py, see B-015).
 - **Impact:** Following the runbook fails at the promotion step.
 - **Fix outline:** Rewrite the promotion section around `hearth eval --promote --prereg ...` (CLAUDE.md §7).
@@ -817,7 +817,7 @@ must fail when the fix is reverted.
 ### B-042
 **`Settings.default_model` is never read**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED in `eef3bd5` (dead field removed; the registry is the single source)** · **Effort:** S
 - **Evidence:** Checked: no reader of `.default_model` in `src/` (only a docstring in `registry/__init__.py:68`); the registry reads `HEARTH_DEFAULT_MODEL` from `os.environ` directly.
 - **Impact:** A dead setting invites a second source of truth.
 - **Fix outline:** Remove the field, or make the registry read it from Settings.
@@ -826,7 +826,7 @@ must fail when the fix is reverted.
 ### B-043
 **`hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED in `cf3b6e9` (sample refreshed from a synthetic run)** · **Effort:** S
 - **Evidence:** Reported by the docs agent.
 - **Impact:** Cosmetic doc drift.
 - **Fix outline:** Refresh the sample from a synthetic run.
@@ -861,3 +861,9 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `3fae564` | **B-026.** `hearth train` resolves the base model (and checks the mlx extra) before creating the run dir; a failed run leaves nothing behind. |
 | `0f1bbe2` | **B-027.** A failed `mlx_lm.lora` child ends `hearth train` with exit 1, its return code and any captured stderr tail, no traceback. |
 | `d931473` | **B-029.** `hearth doctor` / `doctor --offline` WARN when `HEARTH_DEFAULT_MODEL` is unregistered and ignored, naming the model that serves; the registry logs it once (seen at `hearth serve` startup). |
+| `48634a5` | **B-038.** `docs/PRIVACY.md` Formats row matches `mcp/files.py`: UTF-8 text suffixes and extension-less, `.csv`, `.json`, `.xlsx` (refuses uncached formulas), `.pdf` (text layer only, refuses scans), the `[files]` extra, and what `read_table` accepts. |
+| `46bddeb` | **B-039.** `load_dataset` no longer claims headerless files load. A headerless file is refused with an error naming the missing header (the header is the only place the task lives; `hearth train --task` is not passed in). |
+| `0c3b5f9` | **B-040.** `examples/` uses the one-command sync and `uv run --no-sync`. The Claude Code MCP registration is `uv run --no-sync --project <repo> hearth mcp`, so it works from any cwd. |
+| `e5761b1` | **B-041.** `docs/RUNBOOK_training.md` promotion is `hearth prereg init/check`, `hearth eval --prereg --report-json`, then `eval --promote` or `adapters promote --report --prereg`. Every no-weights command was run on the echo backend. |
+| `eef3bd5` | **B-042.** `Settings.default_model` removed. `Registry.default_id` is the single source of the default model; the status probe lists `HEARTH_DEFAULT_MODEL` as read outside Settings. |
+| `cf3b6e9` | **B-043.** `RUNBOOK_finance.md` §2 `hearth_peek.py` sample regenerated from a synthetic CSV. |
