@@ -3,6 +3,9 @@
 The start-to-finish guide for using HEARTH on this Mac. It is task-oriented: each section is a
 thing you want to do, with commands you can paste. Every command and variable here was
 checked against the code at `d628c4f` (`cmux/integration`, 2026-10-05, model selection merged).
+Everything the B-0xx fixes merged since then changed (B-003, B-006, B-031, B-033 to B-037, B-046
+to B-049) was re-run on the merged code (after `c97df9e`, with the CLI-polish batch) and is
+described as it behaves now.
 
 **New here? Do [§0, Learn HEARTH in 15 minutes](#0-learn-hearth-in-15-minutes) first.** The
 same material is in the tool itself: `hearth --help`, `hearth COMMAND --help`, and the man page
@@ -18,9 +21,8 @@ same material is in the tool itself: `hearth --help`, `hearth COMMAND --help`, a
   the real app, not over a live socket. The verification sandbox could not bind a port.
 - **(not run in docs verification)** means the command was not run. Usually it needs real
   weights, the network, or changes to your Claude Code configuration.
-- **⚠ changing (B-0xx)** marks behaviour that is being changed on another branch right now.
-  The text describes what the code does **today** (measured); the note says what is changing.
-  The B-numbers are in [docs/BUGS.md](BUGS.md).
+- **B-0xx** numbers are entries in [docs/BUGS.md](BUGS.md): open limits are named where they
+  bite, and a "(fixed)" note says the behaviour described is the fixed one.
 
 Always run HEARTH from the repo with **`uv run --no-sync hearth …`**. Never use a bare
 `uv run` or `uv sync` (see §2 and §11).
@@ -78,7 +80,7 @@ uv run --no-sync hearth doctor --offline; echo "exit=$?"
 │ backend                                │ PASS   │ HEARTH_BACKEND=auto
 │ bind_host                              │ PASS   │ HEARTH_HOST=127.0.0.1 (loopback)
 │ allow_downloads                        │ PASS   │ HEARTH_ALLOW_DOWNLOADS is off
-│ serving_resolution                     │ PASS   │ disk-only: a model on neither ~/.hearth/models nor the hub cache fails to load …
+│ serving_resolution                     │ PASS   │ disk-only: a model on neither /Users/…/.hearth/models nor the hub cache fails to load …
 │ model mlx-community/Qwen2.5-Coder-7B-… │ PASS   │ default model: on disk at /Users/…/.cache/huggingface/hub/models--mlx-community--…
 │ load path: hearth train                │ PASS   │ disk-only: an absent model fails with no connect; …
 │ load path: hearth models convert       │ PASS   │ …
@@ -188,7 +190,7 @@ agent refuses to start (exit 2), because it could read nothing.
 ```sh
 curl -s -H "Authorization: Bearer $(cat ~/.hearth/token)" "http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h"
 # {"requests":2,"estimated_frontier_tokens_saved":26,"escalations":0,"escalation_rate":0.0,"escalations_failed":0,
-#  "backend_mix":{"local":2},"class_mix":{"chat":2},"latency_ms":{"p50":0.01,"p95":0.01}}
+#  "failed":0,"failure_rate":0.0,"backend_mix":{"local":2},"class_mix":{"chat":2},"latency_ms":{"p50":0.01,"p95":0.01}}
 uv run --no-sync hearth stats
 ```
 *[in-process] for the metrics call (two echo requests).*
@@ -265,9 +267,10 @@ uv sync --extra mlx --extra mcp --extra dev --extra files
 
 **This must be one command.** `uv sync --extra X` syncs the environment to exactly that set
 and **uninstalls every extra you did not name**. A bare `uv run` syncs to the default set and
-removes 33 packages, including `mlx`, `mlx-lm`, `mcp` and `pytest`. Local inference then dies
-silently: HEARTH falls back to the echo stub (§11). To add an optional extra, append it to the
-full command, e.g. `… --extra files --extra remote`.
+removes 33 packages, including `mlx`, `mlx-lm`, `mcp` and `pytest`. Local inference then
+stops: HEARTH falls back to the echo stub, with a startup WARNING and `/ready` 503 `stub`
+(§11). To add an optional extra, append it to the full command, e.g.
+`… --extra files --extra remote`.
 
 | Extra | What it enables |
 |---|---|
@@ -294,8 +297,18 @@ uv run --no-sync hearth doctor
 
 The checks are `apple_silicon`, `memory`, `mlx_backend` ("mlx-lm importable") and `state_dir`
 (`~/.hearth` writable). It ends with `Ready. (warnings are non-fatal)` and exits 0. A FAIL row
-is fatal (exit 1). A WARN row is not: for example, an unregistered `HEARTH_DEFAULT_MODEL` adds
-a `default_model` WARN row naming the model that will serve instead (§3.4).
+is fatal (exit 1); a WARN row is not. An unregistered `HEARTH_DEFAULT_MODEL` adds a
+`default_model` **FAIL** row, because `serve`, `run`, `agent`, `mcp` and `rag query --answer`
+refuse to start on it (§3.4). Measured with `HEARTH_DEFAULT_MODEL=bogus/x`:
+
+```text
+│ default_model │ FAIL   │ HEARTH_DEFAULT_MODEL='bogus/x' is not in the model registry (…/config/models.yaml). Registered
+│               │        │ ids: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit, … Fix the id, register the model, or unset
+│               │        │ HEARTH_DEFAULT_MODEL to use the catalog default. `hearth serve`/`run`/`agent`/`mcp` refuse to start …
+Fatal checks failed.
+```
+
+and exit 1.
 
 ### 2.4 `hearth doctor --offline`: is it safe to use offline right now?
 
@@ -312,10 +325,10 @@ Each row is a measurement, not a reading of a config value:
 | `backend` | the `HEARTH_BACKEND` value is a built-in backend |
 | `bind_host` | `HEARTH_HOST` is loopback |
 | `allow_downloads` | `HEARTH_ALLOW_DOWNLOADS` is off |
-| `serving_resolution` | a model that is not on disk fails to load, and no connection is attempted |
+| `serving_resolution` | a model that is not on disk fails to load, and no connection is attempted; the detail names the models directory the resolver searched (`$HEARTH_HOME/models`) |
 | `model <id>` | each reachable model (the default, plus every class's `local_model` in the profile) is on disk; the row names the path. Not shown on the echo backend, which loads nothing |
 | `load path: hearth train / models convert / models export-coreml` | each is handed a local path with the hub pinned offline |
-| `default_model` | only present when `HEARTH_DEFAULT_MODEL` is set but unregistered; non-fatal |
+| `default_model` | only present when `HEARTH_DEFAULT_MODEL` is set but unregistered. Here it is a non-fatal **WARN** (a command that refuses to start is not an egress path); plain `doctor` FAILs it (§2.3) |
 | `hf_hub_offline`, `models_pull` | informational |
 
 The last line is either `SAFE offline — no check found a path off this machine.` (exit 0), or
@@ -328,9 +341,15 @@ HEARTH_ROUTING_YAML=config/routing.remote.yaml HEARTH_HOST=0.0.0.0 HEARTH_ALLOW_
 #   load path: hearth train, load path: hearth models convert, load path: hearth models export-coreml
 ```
 
-> ⚠ changing (B-031). Today the non-fatal `default_model` row is drawn as **FAIL** (its detail
-> starts with `WARN:`) while the verdict still says `SAFE offline` and exit 0. It will render
-> as WARN.
+A non-fatal row is drawn **WARN**, never FAIL, so the table cannot contradict the verdict
+(B-031, fixed). Measured with `HEARTH_DEFAULT_MODEL=bogus/x HEARTH_BACKEND=echo`:
+
+```text
+│ default_model                          │ WARN   │ HEARTH_DEFAULT_MODEL='bogus/x' is not in the model registry …
+SAFE offline — no check found a path off this machine.
+```
+
+and exit 0.
 
 **Two limits, both printed as `not measured:` lines.** First, doctor measures **this
 command's environment**. A `hearth serve` you started earlier with different variables is not
@@ -455,19 +474,27 @@ HEARTH_DEFAULT_MODEL=mlx-community/Qwen2.5-3B-Instruct-4bit uv run --no-sync hea
 **Trap 1: the name.** The variable is `HEARTH_DEFAULT_MODEL`, not `HEARTH_MODEL`. Settings
 ignore unknown `HEARTH_*` names silently (§2.5 flags them).
 
-**Trap 2: an unregistered id.** Measured with `HEARTH_DEFAULT_MODEL=bogus/x`:
+**Trap 2: an unregistered id refuses to start** (B-047, fixed). Measured with
+`HEARTH_DEFAULT_MODEL=bogus/x` (echo backend):
 
-- every command logs `HEARTH_DEFAULT_MODEL='bogus/x' is not in the model registry and is
-  IGNORED; serving the catalog default 'mlx-community/Qwen2.5-Coder-7B-Instruct-4bit' instead`;
-- `hearth doctor` shows a `default_model` WARN row and still exits 0;
-- `hearth run` answers from the catalog default (exit 0);
-- on the mlx backend, `/v1/hearth/admin/ready` answers **503 `failed`** with the reason
-  `HEARTH_DEFAULT_MODEL='bogus/no-such-model' is not in the model registry …; refusing to report
-  ready while 'auto' would be served by '…Coder-7B…' instead` [in-process], while `auto`
-  requests are still served by the catalog default.
+- `serve`, `run`, `agent`, `mcp` and `rag query --answer` print, and exit **2**:
 
-> ⚠ changing (B-047). An explicitly set but unregistered `HEARTH_DEFAULT_MODEL` is becoming a
-> startup error for `serve` / `run` / `agent` (exit 2, naming the variable) and a doctor FAIL.
+  ```text
+  Refusing to start: HEARTH_DEFAULT_MODEL='bogus/x' is not in the model registry (…/config/models.yaml).
+  Registered ids: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit, …, echo, mlx-community/bge-small-en-v1.5-bf16.
+  Fix the id, register the model, or unset HEARTH_DEFAULT_MODEL to use the catalog default.
+  ```
+
+- an app built directly with `create_app()` raises `UnregisteredDefaultModelError` with the
+  same message [in-process];
+- `hearth doctor` shows a `default_model` **FAIL** row and exits 1 (§2.3); `doctor --offline`
+  shows it as a non-fatal WARN and keeps its SAFE/UNSAFE verdict (§2.4);
+- commands that only need an id keep working: `hearth models list` still marks the catalog
+  default and adds `HEARTH_DEFAULT_MODEL='bogus/x' is not in the model registry:
+  hearth serve/run/agent/mcp refuse to start on it; anything asking only for an id gets the
+  catalog default '…Coder-7B…'`; plain `rag query` (no `--answer`) exits 0.
+
+Unset, the variable means the catalog default.
 
 **Always confirm with `hearth models list`.** To use a new model, register it first (§3.3).
 
@@ -575,9 +602,11 @@ was not driven in docs verification, B-014.)*
 | `GET /v1/hearth/admin/ready` | no | readiness, 200 or 503 with a reason (§4.7) |
 | `GET /chat` | no | the chat page |
 
-`docs/API.md` also describes `/v1/hearth/classify`, `/v1/hearth/summarize`, `/v1/hearth/train/*`
-and `/admin/adapters/{id}/promote|retire`. **These do not exist in the current gateway**
-(B-037); `/admin/models/{id}/load|unload` is marked planned there.
+This is every `/v1` route the gateway serves. `docs/API.md` lists the same set, and
+`tests/test_api_doc_routes.py` fails if the two drift (B-037, fixed). Endpoints that earlier
+drafts promised (`/v1/hearth/classify`, `/summarize`, `/train/*`, admin model load/unload and
+adapter promote/retire) are listed there under **Not implemented**: use chat completions with
+a `hearth.intent`, the MCP tools, or the CLI instead.
 
 **curl** [in-process]:
 
@@ -660,10 +689,18 @@ Request (optional; plain OpenAI clients never need it):
   automatically when its base model is the one serving. On this machine
   `classify-20260710T020135Z` is promoted on Coder-7B, so `classify` requests use it (B-010).
 
-> ⚠ changing (B-034). Today an **unknown** adapter id silently falls back to base weights
-> (the server logs `adapter 'no-such-adapter' unresolved; serving base weights`), yet the
-> response's `hearth.adapter` still echoes the id you asked for, with a 200 [in-process]. Do
-> not trust `hearth.adapter` for an id you have not checked with `hearth adapters list`.
+An **unknown or retired** adapter id is refused before anything runs (B-034, fixed).
+Measured [in-process], echo backend, `"hearth": {"adapter": "no-such-adapter"}`:
+
+```json
+HTTP 404
+{"error":{"message":"adapter 'no-such-adapter' cannot be served: unknown adapter: 'no-such-adapter'",
+          "type":"invalid_request_error","param":"hearth.adapter","code":"adapter_not_found"}}
+```
+
+The response's `hearth.adapter` names the adapter whose weights actually generated, or `null`
+for base weights (no adapter, a base-weights retry after an adapter failed to load, a remote,
+or a backend that ignores adapters such as echo: measured `"adapter": null` on echo).
 
 Response `hearth` block: `served_by` (`local` | `remote`), `backend`, `model`, `adapter`,
 `escalated`, `estimated_frontier_tokens_saved`.
@@ -700,24 +737,26 @@ resident model its `loaded_path` (the directory the weights were read from) and 
 [in-process]; with real weights loaded (not run in docs verification) each entry names its
 snapshot path.
 
-**`GET /v1/hearth/admin/ready`** (no token) answers **200 `ready`** only when the default
-model's weights are actually in memory. Otherwise **503**, with a `status` and a `reason`.
-Measured [in-process] on the mlx backend:
+**`GET /v1/hearth/admin/ready`** (no token) answers **200 `ready`** when the default model can
+serve a request now: it has loaded with weights at least once (warmup or any request), its
+last load did not fail, and its weights still resolve on disk. Residency is reported
+separately as `loaded`, so a default that was evicted to make room for another model stays
+200 and reloads on demand (B-035, B-048, fixed). Otherwise **503**, with a `status` and a
+`reason`. On the mlx backend [in-process]:
 
 | Situation | Response |
 |---|---|
 | warmup still loading | 503 `loading`, `warmup in progress` *(from the code; too brief to catch with no weights on disk)* |
-| weights not on disk | 503 `failed`, `warmup of '…Coder-7B…' failed: ModelNotOnDiskError: … Fetch it deliberately with hearth models pull …` |
-| `HEARTH_WARMUP=false` | 503 `loading`, `weights for '…Coder-7B…' are not loaded (HEARTH_WARMUP is off)` |
-| unregistered `HEARTH_DEFAULT_MODEL` | 503 `failed`, `HEARTH_DEFAULT_MODEL='…' is not in the model registry …` (§3.4) |
-| echo backend | always 200 `ready` (nothing to load) |
+| weights not on disk (warmup on) | 503 `failed`, `weights for '…Coder-7B…' do not resolve on disk: ModelNotOnDiskError: … Fetch it deliberately with hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit.` (measured, with the warmup's `warmup of … failed … NOT READY; serving in degraded mode` in the log); a load that fails for another reason reads `warmup of '<id>' failed: …` |
+| `HEARTH_WARMUP=false`, weights on disk | 200 `ready`, `loaded: false`, detail `warmup disabled (HEARTH_WARMUP=false); '…Coder-7B…' is on disk and loads on the first request` (measured with planted weights; nothing was loaded) |
+| `HEARTH_WARMUP=false`, weights not on disk (or deleted) | 503 `failed`, `weights for '…Coder-7B…' do not resolve on disk: ModelNotOnDiskError: … Fetch it deliberately with hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit.` (measured) |
+| default evicted (LRU) after loading | 200 `ready`, `loaded: false`, detail `… loaded before and is not resident now (evicted to make room); it reloads on demand` *(from `tests/test_model_selection.py`, which drives a fake mlx_lm; not run with real weights)* |
+| echo chosen explicitly (`HEARTH_BACKEND=echo`) | 200 `ready` (nothing to load) |
+| `auto` fell back to echo (`mlx_lm` missing) | 503 `stub`, reason `HEARTH_BACKEND=auto found no importable mlx_lm, so the echo STUB is serving …` (§11) |
 
-Every body also carries `backend`, `model` (the default id) and `resident`.
-
-> ⚠ changing (B-035, B-048). Today `/ready` stays 503 `loading` forever with
-> `HEARTH_WARMUP=false`, even after requests have been served, and it turns 503 again if the
-> default model is evicted to make room for another. Both are being changed so a healthy
-> server reports ready.
+Every body also carries `backend`, `model` (the default id), `loaded` and `resident`. An
+unregistered `HEARTH_DEFAULT_MODEL` no longer gets this far: the server refuses to start
+(§3.4).
 
 ---
 
@@ -736,7 +775,8 @@ uv run --no-sync hearth run --model mlx-community/Qwen2.5-3B-Instruct-4bit "hell
 - It prints the model's text on stdout, and `[served by <model> via <backend>; class=<c>]` on
   stderr. With `--intent`, a dim `intent=<x>` line comes first.
 - An empty prompt prints `No prompt provided.` and exits 1. An unservable `--model` prints
-  `Unknown model: …` and exits 2.
+  `Unknown model: …` and exits 2; so do an unregistered `HEARTH_DEFAULT_MODEL` (§3.4) and a
+  missing routing profile (§8).
 - Defaults: `--max-tokens 512`, `--model auto` (the per-class ladder, §4.7).
 - **Always local.** `hearth run` never escalates, whatever the routing profile.
 - It has **no tools**: it cannot read files you mention. Use `--file` to send a file's
@@ -814,7 +854,8 @@ uv run --no-sync hearth rag query "descale" --collection notes --answer  # local
   `Done. N file(s), M chunk(s) in collection <name>.` Options: `--collection` (default
   `default`), `--size 800`, `--overlap 100` (characters).
 - `query` prints a table of score, source and text. `--k` defaults to 6. A missing or empty
-  collection prints `No chunks in collection '<name>'.` and exits 0.
+  collection prints `No chunks in collection '<name>'.` and exits 0, without embedding the
+  query or running `--answer` (measured with `HEARTH_EMBEDDER=mlx`, which cannot load).
 - `--answer` sends the retrieved chunks plus your question to the local model, never escalated.
   *(Checked on echo only; a real answer needs the mlx backend.)*
 - Storage: `~/.hearth/rag/<collection>.db` holds the **raw chunk text**. Delete that file to
@@ -830,9 +871,17 @@ the text. `HEARTH_EMBEDDER=mlx` **does not work today (B-011)**. Its default mod
 (`…-mlx`) is not on disk, and the registered `…-bf16` weights are a BERT model that `mlx_lm`
 cannot load. Stay on `hash`.
 
-> ⚠ changing (B-036). Today `rag ingest` with `HEARTH_EMBEDDER=mlx` exits 1 with a traceback
-> ending in `EmbeddingUnavailableError` / `ModelNotOnDiskError`. It is becoming a one-line
-> error.
+With `HEARTH_EMBEDDER=mlx`, `rag ingest` (and `rag query` on a non-empty collection) ends
+with one message and exit 1, no traceback (B-036, fixed). Measured:
+
+```text
+Ingesting /tmp/a5db_doc.txt → collection k (embedder=mlx) …
+Embedder unavailable: could not load embedding model 'mlx-community/bge-small-en-v1.5-mlx': model
+'mlx-community/bge-small-en-v1.5-mlx' is not on disk (looked in /tmp/…/models and the huggingface hub cache) and
+HEARTH does not download on load. It is not in the model registry, so `hearth models pull` refuses it: … Note:
+mlx-lm has no BERT architecture, so the registered bge embedder cannot load even when it is on disk
+(docs/BUGS.md B-011); HEARTH_EMBEDDER=hash works offline.
+```
 
 `HEARTH_VECTOR_STORE` is `sqlite` (default) or `sqlite-vec` (needs `--extra vec`).
 
@@ -904,15 +953,17 @@ local model serves it. Select one with **`HEARTH_ROUTING_YAML`**:
 - `~` is expanded;
 - a **relative path resolves against the repo root**, not the current directory, so
   `HEARTH_ROUTING_YAML=config/routing.finance.yaml` means the same file from anywhere;
-- a named file that **does not exist is an error**: `serve`, `run` and `agent` refuse to start
-  (exit 1) with `HEARTH_ROUTING_YAML='config/no-such.yaml' selects <repo>/config/no-such.yaml,
-  which does not exist (relative paths resolve against the repo root, <repo>). Fix or unset
-  HEARTH_ROUTING_YAML.`, and `doctor --offline` fails its `routing_profile` row. (A file that
-  exists but does not parse still falls back to all-local defaults with a warning.)
+- a named file that **does not exist is an error**: `serve`, `run`, `agent`, `mcp` and
+  `rag query` refuse to start with one line and exit **2**, no traceback (B-033, fixed), and
+  `serve` prints no `Serving on …` banner. Measured:
 
-> ⚠ changing (B-033). Today that refusal is printed under a full Python traceback (and
-> `serve` prints its `Serving on …` line first). It is becoming a clean one-line error with
-> exit 2.
+  ```text
+  Routing profile not found: HEARTH_ROUTING_YAML='config/no-such.yaml' selects <repo>/config/no-such.yaml,
+  which does not exist (relative paths resolve against the repo root, <repo>). Fix or unset HEARTH_ROUTING_YAML.
+  ```
+
+  `doctor --offline` fails its `routing_profile` row. (A file that exists but does not parse
+  still falls back to all-local defaults with a warning.)
 
 | Profile | Egress | What it is for |
 |---|---|---|
@@ -953,10 +1004,13 @@ an error. A failed remote call may still have transmitted the prompt. Per reques
 `"hearth": {"allow_escalation": false}` pins the call local. `hearth run`, `hearth agent` and
 all MCP tools never escalate.
 
-> ⚠ changing (B-003). Today a request that fails outright (local failure, or a failed
-> escalation followed by a failed local fallback) is **not recorded** in the metrics, so
-> `hearth stats` / `/admin/metrics` undercount exactly the cases where something went wrong.
-> Failure records are being added.
+A request that fails outright (the local provider fails, a failed escalation is followed by
+a failed local fallback, or a remote stream dies mid-answer) **is recorded** (B-003, fixed):
+it counts in `requests` and in `failed` / `failure_rate`, and, after a failed escalation, in
+`escalations_failed`. `backend_mix` and latency count answered requests only. Measured
+[in-process] with a provider that always fails: the client gets 503
+`hearth.provider.unavailable`, and `/admin/metrics` reads
+`{"requests":1, … "failed":1,"failure_rate":1.0,"backend_mix":{}, …}`.
 
 **Dry-run a routing decision** [in-process]:
 
@@ -973,7 +1027,9 @@ uv run --no-sync hearth stats --since 24h
 ```
 
 The rows are requests, estimated frontier tokens saved, escalations, escalation rate,
-escalations failed (served local), backend mix, class mix, and p50/p95 latency. **Metrics are
+escalations failed (remote errored; prompt may have left), failed (error, no answer), failure
+rate, backend mix, class mix, and p50/p95 latency. "Escalations failed" counts every request
+whose remote call errored, whether the local fallback then answered or failed too. **Metrics are
 in-memory per process**, so `hearth stats` in a fresh shell always shows zeros. For a running
 server, read `GET /v1/hearth/admin/metrics?since=24h` instead. It returns the same rollup as
 JSON [in-process].
@@ -1049,9 +1105,9 @@ print(store.total(start=date(2026, 1, 1), end=date(2026, 1, 31)))   # Figure(lab
 Once a ledger exists under your `HEARTH_HOME`, `hearth agent` offers `finance_total`,
 `finance_explain` and `finance_rows` (measured: the header line then reads
 `tools=finance_explain, finance_rows, finance_total, list_files, read_file`). For real data, use `scripts/hearth_private.sh --profile
-config/routing.finance.yaml --check` and the runbook's sealed setup. Note that
-`examples/finance/run_finance_ladder.py` currently computes money with `float` (B-049); use the
-`hearth.finance` API above, not that example, for figures.
+config/routing.finance.yaml --check` and the runbook's sealed setup.
+`examples/finance/run_finance_ladder.py` parses amounts with `hearth.finance.parse_money` and
+keeps every figure `Decimal` (B-049, fixed; an AST test fails on any `float(` in it).
 
 ### 9.2 Training, eval and promotion
 
@@ -1079,15 +1135,19 @@ registered adapter.)*
   `{"kind":"hearth.dataset.header","schema_version":1,"task":"classify","version":"v1"}`,
   followed by at least **two** `{"prompt","completion"}` or `{"messages":[…]}` rows. A
   headerless file is refused (exit 1) with `Dataset error: dataset task must be non-empty: the
-  file has no header line. …`.
+  file has no header line. …`. A file with one row is refused before training starts, exit 1,
+  no traceback (measured): `Dataset error: need at least 2 records to split into train/valid`.
 - `train` only produces a **candidate** (`~/.hearth/train/<run-id>/`). It needs the base model
   on disk; one that is not fails cleanly (exit 1) with `model '…' is not on disk (looked in
   ~/.hearth/models and the huggingface hub cache) and HEARTH does not download on load. Fetch
   it deliberately with hearth models pull …`, and **leaves no run directory behind** (measured).
   If the training process itself fails, `train` exits 1 with its return code and the tail of
   its stderr, not a traceback.
-- After a successful run, the message says `Eval it, then hearth adapters promote`; the
-  actual path is `prereg` → `eval --prereg --promote` (B-046, open).
+- After a successful run it prints `Registered candidate <id>. It is not served until it
+  passes the eval gate:` followed by `hearth eval <id> --golden <set> --prereg <committed
+  prereg> --promote`, or `--report-json <file>` then `hearth adapters promote <id> --report
+  <file> --prereg <committed prereg>` (B-046, fixed; from the code and
+  `tests/test_cli_training.py`, since a real run needs weights).
 
 **Pre-registration.** `prereg init` writes a template pinning the golden set (content sha) and
 the decode parameters, with `hypothesis`, `stopping_rule` and `kill_condition` blank. **You
@@ -1159,14 +1219,14 @@ fields.
 |---|---|---|---|
 | `HEARTH_HOST` | `127.0.0.1` | `hearth serve` bind; `doctor --offline` `bind_host` | non-loopback makes doctor UNSAFE; `--host` overrides |
 | `HEARTH_PORT` | `8080` | `hearth serve` | `--port` overrides |
-| `HEARTH_BACKEND` | `auto` | `providers/__init__.py:select_provider` (serve, run, agent, mcp, rag query, eval) | `auto` = mlx if `mlx_lm` imports, **else echo, silently** (B-006); `mlx`; `echo`; or a plugin name. An unknown value makes the command fail with a traceback (`Unknown HEARTH_BACKEND`) |
+| `HEARTH_BACKEND` | `auto` | `providers/__init__.py:select_provider` (serve, run, agent, mcp, rag query, eval) | `auto` = mlx if `mlx_lm` imports, else the echo stub **with a WARNING** at startup, `/ready` 503 `stub` and `/health` `backend_fallback` (B-006, fixed); `mlx`; `echo`; or a plugin name. An unknown value makes the command fail with a traceback (`Unknown HEARTH_BACKEND`) |
 | `HEARTH_REQUIRE_AUTH` | `true` | `gateway/auth.py` | `false` disables bearer auth on `/v1/*` |
 | `HEARTH_EMBEDDER` | `hash` | `memory/embed.py:select_embedder` (rag, `/v1/embeddings`, agent `rag_search`) | `mlx` is broken (B-011) |
 | `HEARTH_EMBED_DIM` | `256` | hash embedder (`memory/embed.py`) | vector dimension |
 | `HEARTH_EMBED_MODEL` | `mlx-community/bge-small-en-v1.5-mlx` | MLX embedder; doctor | this default id is not on disk (B-011) |
 | `HEARTH_VECTOR_STORE` | `sqlite` | `memory/store.py:select_vector_store` | `sqlite-vec` (`--extra vec`) or a plugin name |
 | `HEARTH_RAM_CEILING_GB` | `24.0` | `ModelPool` / `ModelManager` (`serving/`) | resident-model budget; LRU eviction above it (§3.5) |
-| `HEARTH_WARMUP` | `true` | `gateway/app.py` | load the default model in the background at `serve` start; no-op on echo. Off: `/ready` stays 503 (⚠ changing, B-035) |
+| `HEARTH_WARMUP` | `true` | `gateway/app.py` | load the default model in the background at `serve` start; no-op on echo. Off: nothing loads until the first request, and `/ready` is 200 (`loaded: false`) while the default's weights resolve on disk (§4.7) |
 | `HEARTH_FILE_ROOTS` | `""` (deny all) | `mcp/files.py:allowed_roots`: MCP `*_file` tools, agent `read_file`/`list_files` (CLI and HTTP), finance `read_table`, `scripts/hearth_peek.py` | colon-separated directories; `~` is expanded; non-existent entries are dropped |
 | `HEARTH_FILE_MAX_BYTES` | `2000000` | `mcp/files.py` | larger files are refused, not truncated |
 | `HEARTH_ALLOW_DOWNLOADS` | `false` | `providers/mlx.py:resolve_local_model`; doctor | `1` lets loads fetch missing models; makes doctor UNSAFE |
@@ -1178,7 +1238,7 @@ From `status/probes.py:_EXTRA_ENV_NAMES`:
 
 | Variable | Default | Read by | Notes |
 |---|---|---|---|
-| `HEARTH_DEFAULT_MODEL` | the `default:` key of `config/models.yaml` | `registry/__init__.py:Registry.default_id` (the only reader; there is no Settings field, B-042); `/ready` | applied only if it names a registered id; otherwise ignored with a logged warning, a doctor WARN row and `/ready` 503 `failed` (§3.4). ⚠ changing (B-047): becoming a startup error |
+| `HEARTH_DEFAULT_MODEL` | the `default:` key of `config/models.yaml` | `registry/__init__.py:Registry.default_id` (the only reader; there is no Settings field, B-042); `/ready` | an unregistered id makes `serve`/`run`/`agent`/`mcp`/`rag query --answer` refuse to start (exit 2) and `create_app()` raise; `doctor` FAIL, `doctor --offline` WARN (§3.4) |
 | `HEARTH_ROUTING_YAML` | `<repo>/config/routing.yaml` | `router/policy.py:resolve_routing_selection` (router, doctor, status probe); `scripts/hearth_private.sh` | `~` expanded; relative paths resolve against the repo root; a missing named file is an error (§8) |
 | `HEARTH_MODELS_YAML` | `<repo>/config/models.yaml` | `registry/__init__.py` | alternate registry file |
 | `HEARTH_BASE_MODEL` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | `scripts/train_lora_real.sh` only | |
@@ -1207,23 +1267,23 @@ Used only by examples (not HEARTH itself): `HEARTH_URL`, `HEARTH_TOKEN`
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Answers start with `[echo] …`; serve banner, `served by … via echo` or `/v1/hearth/admin/health` says `echo` | `mlx_lm` is missing, so `HEARTH_BACKEND=auto` fell back to the echo stub **silently**, and `/ready` says 200 (B-006). Usually a bare `uv run`/`uv sync` pruned the venv | `uv sync --extra mlx --extra mcp --extra dev --extra files`, then the verify import (§2.2). Set `HEARTH_BACKEND=mlx` so a missing MLX fails loudly instead of degrading |
+| Answers start with `[echo] …`; serve banner, `served by … via echo` or `/v1/hearth/admin/health` says `echo` | `mlx_lm` is missing, so `HEARTH_BACKEND=auto` fell back to the echo stub. It says so: a startup WARNING `HEARTH_BACKEND=auto found no importable mlx_lm, so the echo STUB is serving …`, `/ready` 503 `stub` and `/health` `backend_fallback` (B-006, fixed; measured [in-process] with `mlx_lm` hidden). Usually a bare `uv run`/`uv sync` pruned the venv | `uv sync --extra mlx --extra mcp --extra dev --extra files`, then the verify import (§2.2). Set `HEARTH_BACKEND=mlx` so a missing MLX fails loudly instead of degrading |
 | `ModuleNotFoundError: mlx_lm` / `mcp`, or `The MCP server requires the 'mcp' extra.` | the venv was pruned by a partial sync | same one-command sync |
 | `model '<id>' is not on disk (looked in ~/.hearth/models and the huggingface hub cache) and HEARTH does not download on load` (`ModelNotOnDiskError`); chat returns 503 `hearth.provider.unavailable`; `/ready` 503 `failed` | the weights are not in either location | `uv run --no-sync hearth models pull <id>`, then `hearth doctor --offline` shows where it resolved. Do not set `HEARTH_ALLOW_DOWNLOADS=1` to "fix" it |
 | `404` `model_not_found` from the API, or `Unknown model: …` and exit 2 from `run` / `agent` | the requested id is not a chat model this backend can serve (a typo, `echo` on mlx, the embedder) | pick one from the message's `Servable models:` list, or `GET /v1/models`; register new models in `config/models.yaml` |
 | `401` `hearth.auth.unauthorized` | missing or wrong bearer token, or `/chat` has a stale token | send `Authorization: Bearer $(cat ~/.hearth/token)`; re-paste the token in `/chat`. Under a custom `HEARTH_HOME` the token is `$HEARTH_HOME/token` |
-| `/v1/hearth/admin/ready` returns 503 | read `status` and `reason` in the body (§4.7): `loading` + `warmup in progress` (wait a few seconds); `failed` + `ModelNotOnDiskError` (pull it); `failed` + `HEARTH_DEFAULT_MODEL … not in the model registry` (fix the variable); `loading` + `(HEARTH_WARMUP is off)` (⚠ changing, B-035: stays 503 even while serving) | as the reason says; leave `HEARTH_WARMUP` on |
+| `/v1/hearth/admin/ready` returns 503 | read `status` and `reason` in the body (§4.7): `loading` + `warmup in progress` (wait a few seconds); `failed` + `ModelNotOnDiskError` (pull it); `failed` + `… do not resolve on disk` (pulled weights deleted, or never pulled with warmup off); `stub` (the echo fallback, row above) | as the reason says |
 | `hearth doctor --offline` says UNSAFE | each FAIL row names one cause: `routing_profile` (a remote profile is selected, or the named file does not exist), `bind_host` (`HEARTH_HOST` not loopback), `allow_downloads` (`HEARTH_ALLOW_DOWNLOADS` on, which also fails `serving_resolution` and the `load path` rows), `model <id>` (weights not on disk) | unset the offending variable, or pull the model; re-run until `SAFE offline` |
-| A `default_model` row shows FAIL but the verdict is SAFE | a non-fatal WARN drawn as FAIL (⚠ changing, B-031) | fix `HEARTH_DEFAULT_MODEL` (§3.4) |
-| The model you set as default is not the one answering | `HEARTH_DEFAULT_MODEL` misspelled as `HEARTH_MODEL` (silently ignored), or set to an unregistered id (ignored with a warning, §3.4) | `uv run --no-sync hearth models list` shows the real `(default)` |
-| `hearth.adapter` in a response names an adapter that did not serve | an unknown adapter id falls back to base weights but is echoed back (⚠ changing, B-034) | check the id with `hearth adapters list` |
-| `RoutingProfileNotFoundError` traceback, `… which does not exist (relative paths resolve against the repo root …)` | `HEARTH_ROUTING_YAML` names a missing file (⚠ changing, B-033: becoming a clean error) | fix the path (relative to the repo root) or unset it |
+| `Refusing to start: HEARTH_DEFAULT_MODEL='…' is not in the model registry`, exit 2; `doctor` FAIL `default_model` | the variable names an unregistered id (§3.4) | fix the id, register the model, or unset the variable |
+| The model you set as default is not the one answering | `HEARTH_DEFAULT_MODEL` misspelled as `HEARTH_MODEL` (silently ignored, §3.4) | `uv run --no-sync hearth models list` shows the real `(default)` |
+| `404` `adapter_not_found` | the request names an adapter that is unknown or retired (§4.6) | check the id with `hearth adapters list` |
+| `Routing profile not found: … which does not exist (relative paths resolve against the repo root …)`, exit 2 | `HEARTH_ROUTING_YAML` names a missing file (§8) | fix the path (relative to the repo root) or unset it |
 | `error while attempting to bind on address ('127.0.0.1', 8080): address already in use` *(message not reproduced in docs verification)* | another `hearth serve` (or other process) holds the port | `lsof -nP -iTCP:8080 -sTCP:LISTEN` to find it, or `hearth serve --port 8081` |
 | Agent exits 2 `No readable file roots` / `Refusing to start` | `HEARTH_FILE_ROOTS` is unset or names no existing directory | `HEARTH_FILE_ROOTS=/abs/dir hearth agent …` |
 | Agent exits 1 `NO ANSWER — … 'max_iterations'` (or `'invalid_output'`) | the task needs more steps than the budget, or the model wandered; on echo, always `invalid_output` | narrow the task, raise `--max-iterations`, read the step table; check `backend=` |
 | `hearth stats` shows all zeros | metrics are per-process, in memory | query `GET /v1/hearth/admin/metrics` on the running server |
-| `hearth train` ends in a traceback `DatasetError: need at least 2 records to split into train/valid` | the dataset has only one row (this error is not caught cleanly) | add rows: at least 2 after the header |
-| `HEARTH_EMBEDDER=mlx` traceback | B-011 (⚠ changing, B-036: becoming a clean error) | use `hash` |
+| `hearth train`: `Dataset error: need at least 2 records to split into train/valid`, exit 1 | the dataset has only one row | add rows: at least 2 after the header |
+| `Embedder unavailable: could not load embedding model …`, exit 1 | `HEARTH_EMBEDDER=mlx`: its default id is not on disk, and even the registered bge weights cannot load (B-011) | use `HEARTH_EMBEDDER=hash` |
 
 ---
 
