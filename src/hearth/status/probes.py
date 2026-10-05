@@ -579,11 +579,15 @@ def _serving_load_fact(env: dict[str, str]) -> Fact:
             data,
         )
     if isinstance(outcome, ModelNotOnDiskError):
+        # Name the directory the resolver actually searched (it reports it), not the
+        # default path: under a custom HEARTH_HOME "~/.hearth/models" was simply false.
+        looked = getattr(outcome, "models_dir", None) or _home_dir(env, None) / "models"
+        data["models_dir"] = str(looked)
         return Fact(
             "serving_load_egress",
             "disk-only",
             LEVEL_OK,
-            "a model on neither ~/.hearth/models nor the hub cache fails to load instead of "
+            f"a model on neither {looked} nor the hub cache fails to load instead of "
             "downloading, with no connect attempted — serve, chat, agent, MCP, RAG. Measured "
             "with THIS command's environment, not the running daemon's",
             data,

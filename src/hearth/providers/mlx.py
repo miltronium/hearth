@@ -119,7 +119,16 @@ def mlx_available() -> bool:
 
 
 class ModelNotOnDiskError(RuntimeError):
-    """Raised when a model would have to be downloaded to load, and downloads are off."""
+    """Raised when a model would have to be downloaded to load, and downloads are off.
+
+    ``models_dir`` is HEARTH's own models directory the resolver looked in (``None`` when
+    raised elsewhere), so a report can name the directory actually searched instead of
+    re-deriving it (``hearth doctor --offline`` under a custom ``HEARTH_HOME``).
+    """
+
+    def __init__(self, message: str, models_dir: Path | None = None) -> None:
+        super().__init__(message)
+        self.models_dir = models_dir
 
 
 class ModelMismatchError(RuntimeError):
@@ -187,7 +196,9 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
             continue
     if allow_downloads:
         return model_id
-    raise ModelNotOnDiskError(_not_on_disk_message(model_id, models_dir, not_a_repo_id))
+    raise ModelNotOnDiskError(
+        _not_on_disk_message(model_id, models_dir, not_a_repo_id), models_dir=models_dir
+    )
 
 
 def _not_on_disk_message(model_id: str, models_dir: Path, not_a_repo_id: bool) -> str:

@@ -598,3 +598,13 @@ def test_a_resolver_that_regressed_to_fall_through_is_caught(tmp_path: Path, mon
     fact = _serving_fact(tmp_path, monkeypatch, environ={})
     assert fact.level == LEVEL_WARN
     assert "NOT opted in" in fact.detail
+
+
+def test_serving_resolution_names_the_models_dir_the_resolver_searched(tmp_path, monkeypatch):
+    """`hearth doctor --offline` said "~/.hearth/models" even with HEARTH_HOME elsewhere. The
+    detail now names the directory the resolver reports it searched."""
+    fact = _serving_fact(tmp_path, monkeypatch, environ={"HEARTH_HOME": str(tmp_path / "home")})
+    assert fact.level == LEVEL_OK, fact.detail
+    assert str(tmp_path / "home" / "models") in fact.detail
+    assert "~/.hearth/models" not in fact.detail
+    assert fact.data["models_dir"] == str(tmp_path / "home" / "models")
