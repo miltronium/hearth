@@ -11,7 +11,7 @@ Pointing this at a LIVE daemon
 ------------------------------------------------------------------------------------------
 1. Start HEARTH in another terminal:
 
-       uv run hearth serve                       # binds 127.0.0.1:8080 by default
+       uv run --no-sync hearth serve                       # binds 127.0.0.1:8080 by default
 
    On first start HEARTH writes a bearer token to ``~/.hearth/token`` (0600). Read it:
 
@@ -20,7 +20,7 @@ Pointing this at a LIVE daemon
 
 2. Run this example against the live daemon:
 
-       uv run python examples/cambot_offload.py --live
+       uv run --no-sync python examples/cambot_offload.py --live
 
    (Without ``--live`` it only prints what it *would* send — safe to run offline/in CI.)
 
@@ -32,7 +32,7 @@ layer estimates the frontier tokens it saved. Read it two ways:
 
   * CLI rollup (per-process; reflects the running daemon):
 
-        uv run hearth stats --since 24h
+        uv run --no-sync hearth stats --since 24h
 
   * Admin metrics endpoint (same numbers, JSON; needs the bearer token):
 

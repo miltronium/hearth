@@ -12,7 +12,7 @@ separate CLI can't see a running daemon's numbers. Running the offloads and read
 ONE process is the honest way to measure until metrics are persisted (a future HEARTH phase).
 
 Run (real local inference):
-    HEARTH_BACKEND=mlx uv run python examples/cmux/offload_demo.py
+    HEARTH_BACKEND=mlx uv run --no-sync python examples/cmux/offload_demo.py
 
 With no MLX/model it falls back to the echo backend (savings still tallied, text is stubbed).
 """

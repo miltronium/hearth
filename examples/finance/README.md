@@ -42,7 +42,7 @@ Everything downstream of that is arithmetic, and arithmetic stays in Python.
 # from the repo root
 HEARTH_BACKEND=mlx HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 HEARTH_ROUTING_YAML=config/routing.finance.yaml \
-uv run python examples/finance/run_finance_ladder.py
+uv run --no-sync python examples/finance/run_finance_ladder.py
 ```
 
 Useful flags: `--limit N` (first N rows), `--max-tokens` (tier-2 budget),

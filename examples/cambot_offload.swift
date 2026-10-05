@@ -10,10 +10,10 @@
 // target, or paste `offloadExample()` into an existing CAMBOT call site.
 //
 // Live wiring:
-//   1. Start the daemon:   uv run hearth serve            (127.0.0.1:8080)
+//   1. Start the daemon:   uv run --no-sync hearth serve            (127.0.0.1:8080)
 //   2. Read the token:     cat ~/.hearth/token
 //   3. Pass baseURL + token below.
-//   4. Measure savings:    uv run hearth stats --since 24h
+//   4. Measure savings:    uv run --no-sync hearth stats --since 24h
 //      (or GET /v1/hearth/admin/metrics — see docs/RUNBOOK_consumer_wiring.md)
 
 import Foundation

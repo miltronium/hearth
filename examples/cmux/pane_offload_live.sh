@@ -10,7 +10,7 @@
 #   ./pane_offload_live.sh <file-to-summarize> [mcp-config.json]
 #
 # Prereqs (both matter — see the FAILURE MODE note below):
-#   uv sync --extra mlx --extra mcp        # the `mcp` extra is REQUIRED for `hearth mcp`
+#   uv sync --extra mlx --extra mcp --extra dev --extra files   # one command; `mcp` is REQUIRED for `hearth mcp`
 #   an mcp config pointing at an ABSOLUTE `hearth` path (see hearth.mcp.json)
 
 set -u

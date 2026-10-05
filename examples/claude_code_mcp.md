@@ -14,18 +14,22 @@ The MCP server lives behind the optional `mcp` extra (it is the only place the `
 imported; the tool logic in `hearth.mcp.tools` needs no extras):
 
 ```sh
-uv sync --extra mcp
+uv sync --extra mlx --extra mcp --extra dev --extra files
 ```
+
+Sync **every** extra in one command. `uv sync --extra mcp` on its own prunes the others
+(including `mlx`, which kills local inference), and so does a bare `uv run`, which syncs to the
+default dependency set. Always run HEARTH with `uv run --no-sync` (see `CLAUDE.md` §1).
 
 Sanity-check the command exists and starts (Ctrl-C to exit — it speaks stdio and will wait
 for a client):
 
 ```sh
-uv run hearth mcp
+uv run --no-sync hearth mcp
 ```
 
 If the extra is missing, `hearth mcp` fails loudly with the fix hint
-(`uv sync --extra mcp`) rather than a traceback.
+(`uv sync --extra mlx --extra mcp --extra dev --extra files`) rather than a traceback.
 
 ## The server command
 
@@ -48,23 +52,22 @@ ways:
 ### Option A — the `claude mcp add` CLI
 
 ```sh
-# Run this from the HEARTH repo root so `uv run` resolves the project env.
-claude mcp add hearth -- uv run hearth mcp
+# --project makes this work from any cwd; --no-sync stops uv pruning the extras.
+claude mcp add hearth -- uv run --no-sync --project /absolute/path/to/HEARTH hearth mcp
 ```
 
 ### Option B — an MCP config JSON block
 
 Add a `hearth` entry to the `mcpServers` map in your Claude Code MCP config
-(`~/.claude.json`, or a project `.mcp.json`). Set `cwd` to your HEARTH checkout so
-`uv run` finds the project:
+(`~/.claude.json`, or a project `.mcp.json`). `--project` points `uv` at your HEARTH checkout,
+so the entry works whatever cwd the MCP client launches it from:
 
 ```json
 {
   "mcpServers": {
     "hearth": {
       "command": "uv",
-      "args": ["run", "hearth", "mcp"],
-      "cwd": "/absolute/path/to/HEARTH",
+      "args": ["run", "--no-sync", "--project", "/absolute/path/to/HEARTH", "hearth", "mcp"],
       "env": {
         "HEARTH_BACKEND": "mlx"
       }
@@ -102,7 +105,7 @@ The MCP path shares HEARTH's observability with the HTTP gateway. After a sessio
 rollup (see `docs/RUNBOOK_consumer_wiring.md` for detail):
 
 ```sh
-uv run hearth stats --since 24h
+uv run --no-sync hearth stats --since 24h
 ```
 
 `estimated_frontier_tokens_saved` is the headline number.
