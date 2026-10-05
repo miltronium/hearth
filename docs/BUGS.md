@@ -81,6 +81,11 @@ must fail when the fix is reverted.
 - ~~[B-042](#b-042) `Settings.default_model` is never read (P3)~~ — fixed in `eef3bd5`
 - ~~[B-043](#b-043) `hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2 (P3)~~ — fixed in `cf3b6e9`
 
+**Added 2026-10-05 (second batch)**
+- ~~[B-044](#b-044) `hearth_peek.py` printed preamble values as headers~~ — fixed in `1883397` (P0)
+- ~~[B-045](#b-045) unedited prereg template / empty baselines could gate a promotion~~ — fixed in `9165034` (P1)
+- [B-046](#b-046) `hearth train` steers to `adapters promote` without `--report/--prereg` (P3)
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -832,6 +837,36 @@ must fail when the fix is reverted.
 - **Fix outline:** Refresh the sample from a synthetic run.
 - **Acceptance test:** —
 
+### B-044
+**`hearth_peek.py` printed a statement's preamble (cell values) as "header names"**
+
+- **Priority:** P0 (privacy) · **Status:** **FIXED** in `1883397` · **Effort:** S
+- **Evidence:** It took `rows[0]` as the header. On the synthetic `examples/finance/statements.csv`
+  it printed the `#` preamble text as headers, then announced "No cell values were printed".
+  Real exports put account name/number above the header; the output is meant to be pasted to a
+  cloud agent. Also, unexpected-error reasons echoed the exception message (can quote content).
+- **Fix:** real header detection (modal width + every cell label-like); preamble counted, never
+  printed; no confident header → no names; error type only. Tests plant a marker in every
+  non-header cell and assert none appears in the output.
+
+### B-045
+**An unedited `prereg init` template, or `must_beat_baselines: []`, could gate a promotion**
+
+- **Priority:** P1 (promotion gate) · **Status:** **FIXED** in `9165034` · **Effort:** S
+- **Evidence:** `training/prereg.py` required only task/golden_sha/metric; blank hypothesis /
+  stopping_rule / kill_condition loaded, and `[]` baselines loaded as `()` (measured).
+- **Fix:** both refused at load; defaults may be extended, never dropped.
+
+### B-046
+**`hearth train` help and output steer users to `adapters promote` without `--report/--prereg`**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs-hygiene agent: `src/hearth/cli.py` train docstring (~815)
+  and the post-train message (~879) say "eval it, then `hearth adapters promote`" with no
+  mention of the report/prereg the command requires.
+- **Fix outline:** Point at `hearth eval ... --prereg ... --promote` (or `--report-json` then
+  `adapters promote --report --prereg`). Do with the cli.py help pass.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -867,3 +902,5 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `e5761b1` | **B-041.** `docs/RUNBOOK_training.md` promotion is `hearth prereg init/check`, `hearth eval --prereg --report-json`, then `eval --promote` or `adapters promote --report --prereg`. Every no-weights command was run on the echo backend. |
 | `eef3bd5` | **B-042.** `Settings.default_model` removed. `Registry.default_id` is the single source of the default model; the status probe lists `HEARTH_DEFAULT_MODEL` as read outside Settings. |
 | `cf3b6e9` | **B-043.** `RUNBOOK_finance.md` §2 `hearth_peek.py` sample regenerated from a synthetic CSV. |
+| `1883397` | **B-044.** `hearth_peek.py` never prints preamble or value-like cells; output asserted marker-free. |
+| `9165034` | **B-045.** A prereg needs written hypothesis/stopping_rule/kill_condition and cannot drop default baselines. |
