@@ -501,7 +501,10 @@ def test_C_re_anchoring_after_the_first_measurement_does_not_help(world, tmp_pat
     world.golden.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS))
     world.prereg = other / "prereg.yaml"
     world.repo = other
-    world.registered()
+    world.write_prereg()  # backdated, so only the anchor rule stands between it and a promotion
+    from datetime import UTC, datetime, timedelta
+
+    world.commit("golden.jsonl", "prereg.yaml", when=datetime.now(tz=UTC) - timedelta(days=1))
     world.eval_report()
     result = world.promote()
     assert result.exit_code == 1, _flat(result)
@@ -548,3 +551,50 @@ def test_C_unset_the_anchor_is_hearths_own_repository(tmp_path):
     assert "default" in anchor["source"]
     assert anchor["common_dir"]  # this test runs from a checkout of HEARTH
     assert Path(hearth.__file__).resolve().is_relative_to(Path(anchor["path"]).resolve())
+
+
+# -- B-086: guards whose deletion no test noticed (reviewer mutation run) -----------------
+
+
+@pytest.mark.parametrize(
+    ("flags", "text"),
+    [
+        (("--max-tokens", "32"), "decode config"),
+        (("--metric", "f1"), "metric 'token_f1' != registered 'exact_match'"),
+    ],
+)
+def test_gap_a_report_that_is_not_the_registered_experiment_is_refused(world, flags, text):
+    """`adapters promote` must compare the report with the prereg (registration.mismatches)."""
+    world.registered()
+    world.eval_report("extract-1", *flags)  # measured AFTER the bar, but not under it
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not the registered experiment" in _flat(result) and text in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_gap_the_proof_names_the_commit_that_last_changed_the_bar(world):
+    """Introduced at one commit, tightened at a later one (both before measuring): the bar in
+    force is the later commit, and that is the commit the proof and the checks use."""
+    world.write_prereg()
+    introduced = world.commit("golden.jsonl", "prereg.yaml")
+    world.prereg.write_text(world.prereg.read_text().replace("min_n: 30", "min_n: 35"))
+    last = world.commit("prereg.yaml")
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 0, _flat(result)
+    proof = world.store.get("extract-1").promotion_proof
+    assert proof["prereg_commit"] == last != introduced
+    assert proof["prereg_introduced_commit"] == introduced
+    assert proof["min_n"] == 35
+
+
+def test_gap_a_bar_tightened_after_the_first_measurement_is_refused_even_in_the_same_second(world):
+    world.registered()
+    world.eval_report()
+    world.prereg.write_text(world.prereg.read_text().replace("min_n: 30", "min_n: 35"))
+    world.commit("prereg.yaml")  # no backdating needed: same-second commits are common
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert world.status() == "candidate"

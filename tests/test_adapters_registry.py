@@ -162,3 +162,41 @@ def test_a_failed_write_leaves_the_registry_intact(tmp_path, monkeypatch):
         _register(store, "extract-2")
     assert store.path.read_bytes() == before
     assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+# -- B-086: the weights digest binds names and sizes, not just concatenated bytes ----------
+
+
+def test_weights_digest_changes_when_a_file_is_renamed(tmp_path):
+    from hearth.registry.adapters import adapter_weights_sha
+
+    d = tmp_path / "w"
+    d.mkdir()
+    (d / "adapters.safetensors").write_bytes(b"tensor bytes")
+    before = adapter_weights_sha(d)
+    (d / "adapters.safetensors").rename(d / "0000100_adapters.safetensors")
+    assert adapter_weights_sha(d) != before
+
+
+def test_weights_digest_changes_when_bytes_move_between_files(tmp_path):
+    from hearth.registry.adapters import adapter_weights_sha
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d, (x, y) in ((a, (b"xy", b"z")), (b, (b"x", b"yz"))):
+        d.mkdir()
+        (d / "1.safetensors").write_bytes(x)
+        (d / "2.safetensors").write_bytes(y)
+    assert adapter_weights_sha(a) != adapter_weights_sha(b)
+
+
+def test_weights_digest_ignores_dot_files_but_not_other_files(tmp_path):
+    from hearth.registry.adapters import adapter_weights_sha
+
+    d = tmp_path / "w"
+    d.mkdir()
+    (d / "adapters.safetensors").write_bytes(b"tensor bytes")
+    before = adapter_weights_sha(d)
+    (d / ".DS_Store").write_bytes(b"finder")
+    assert adapter_weights_sha(d) == before
+    (d / "adapter_config.json").write_text("{}")
+    assert adapter_weights_sha(d) != before

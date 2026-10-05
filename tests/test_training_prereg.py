@@ -364,3 +364,17 @@ def test_verify_committed_refuses_a_staged_but_uncommitted_file(tmp_path):
     status = verify_committed(path)
     assert status.committed is False
     assert "not in any commit" in status.reason
+
+
+def test_check_provenance_refuses_a_naive_measurement_timestamp(tmp_path):
+    """B-086: a timestamp with no zone cannot be ordered against a commit time."""
+    from hearth.training.prereg import check_provenance
+
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    with pytest.raises(PreRegError, match="has no timezone"):
+        check_provenance(load_prereg(path),
+                         first_measurement={"measured_at": "2999-01-01T00:00:00"},
+                         golden_git={}, golden_sha=GOLDEN.sha)
