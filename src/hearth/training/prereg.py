@@ -308,7 +308,9 @@ def _checked_bar(bar: dict) -> dict[str, object]:
     }
 
 
-def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatus:
+def verify_committed(
+    path: Path | str, *, data: bytes | None = None, role: str = "pre-registration"
+) -> GitStatus:
     """Are ``path``'s bytes exactly the blob committed at HEAD? (B-061, B-078)
 
     Compares the bytes on disk (or ``data``, the bytes a caller already read and will use)
@@ -322,7 +324,9 @@ def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatu
     rewrites on commit (LFS, eol conversion) is refused, which is the fail-closed side.
 
     An untracked file, a file absent from HEAD, edited bytes, no git, no repository, or
-    any git error are all reported as *not committed*: the gate fails closed.
+    any git error are all reported as *not committed*: the gate fails closed. ``role``
+    names the file in the reasons ("golden set", "pre-registration"), so the operator is
+    told which file to commit (B-128).
     """
     path = Path(path)
     if data is None:
@@ -357,7 +361,7 @@ def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatu
     except _GitError:
         return GitStatus(
             committed=False,
-            reason=f"{path} is not tracked by git — commit the pre-registration first",
+            reason=f"{path} is not tracked by git — commit the {role} first",
             repo_root=root,
         )
     try:
@@ -607,7 +611,7 @@ def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[st
     Pass ``data`` — the bytes the eval actually parsed and scored — so the status is about
     those bytes, not a second read of the file that could differ.
     """
-    status = verify_committed(path, data=data)
+    status = verify_committed(path, data=data, role="golden set")
     head = ""
     if status.repo_root:
         try:  # the repository's HEAD at measurement time, committed file or not (B-079)

@@ -14,6 +14,7 @@ ported to assert the refusal; each was run against 3caecb0 first and promoted th
         measurement and promotion on the install (B-124)
     M5  near-duplicate prompts passed as distinct via zero-width / soft hyphen / word joiner,
         fullwidth forms, NFC vs NFD, or trailing punctuation, inflating n (B-125)
+    L3  an untracked GOLDEN SET was reported as "commit the pre-registration first" (B-128)
 """
 
 from __future__ import annotations
@@ -514,3 +515,40 @@ def test_M5_a_near_duplicate_golden_set_is_refused_end_to_end(tmp_path):
     w.golden.write_text("".join(json.dumps(r) + "\n" for r in rows))
     result = w.eval("a1")
     assert result.exit_code == 1 and "repeats" in _flat(result), _flat(result)
+
+
+# -- L3: the refusal names the file that is actually uncommitted (B-128) ------------------
+
+
+def test_L3_an_untracked_golden_set_is_named_as_the_golden_set(tmp_path):
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.write_prereg()
+    w.commit("prereg.yaml")  # the bar is committed; the golden set is not
+    result = w.eval("a1", "--prereg", str(w.prereg), "--promote")
+    _refused(result, w, "a1", "not tracked by git — commit the golden set first")
+    assert "commit the pre-registration first" not in _flat(result)
+
+
+def test_L3_an_untracked_prereg_is_named_as_the_pre_registration(tmp_path):
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.write_prereg()
+    w.commit("golden.jsonl")
+    result = w.eval("a1", "--prereg", str(w.prereg), "--promote")
+    _refused(result, w, "a1", "not tracked by git — commit the pre-registration first")
+
+
+def test_L3_a_case_alias_of_the_committed_golden_path_is_refused(tmp_path):
+    """Reviewer R6 (documented behaviour): on a case-insensitive filesystem `Golden.jsonl`
+    opens the committed file, but git tracks `golden.jsonl` — fail closed, and say which."""
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.registered()
+    alias = w.repo / "Golden.jsonl"
+    if not alias.exists():
+        pytest.skip("case-sensitive filesystem: the alias does not exist")
+    result = pe.runner.invoke(pe.app, ["eval", "a1", "--golden", str(alias), "--metric",
+                                       "exact", "--max-tokens", "24", "--prereg",
+                                       str(w.prereg), "--promote"], env=w.env)
+    _refused(result, w, "a1", "commit the golden set first")
