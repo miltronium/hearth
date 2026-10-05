@@ -111,6 +111,44 @@ def test_serve_with_a_missing_profile_prints_no_traceback_in_a_real_process(tmp_
     assert "Fix or unset HEARTH_ROUTING_YAML" in " ".join(out.split())
 
 
+# -- serve: the banner is printed only once the app has been built ------------------------
+
+
+def test_serve_with_a_missing_profile_never_prints_the_serving_banner(tmp_path, no_server):
+    """"Serving on http://..." used to be printed before create_app raised, so a server that
+    never started announced that it was serving."""
+    result = CliRunner().invoke(
+        app, ["serve"], env=_env(tmp_path, HEARTH_ROUTING_YAML=MISSING_PROFILE)
+    )
+    assert result.exit_code == 2, result.output
+    assert "Serving on" not in result.output
+    assert "backend=" not in result.output  # the banner's first line, too
+    assert no_server == []
+
+
+def test_serve_prints_no_banner_when_create_app_raises(tmp_path, no_server, monkeypatch):
+    """Any failure building the app (not only the routing profile) precedes the banner."""
+    import hearth.gateway as gateway
+
+    def broken(**_kw):
+        raise RuntimeError("synthetic create_app failure")
+
+    monkeypatch.setattr(gateway, "create_app", broken)
+    result = CliRunner().invoke(app, ["serve"], env=_env(tmp_path))
+    assert isinstance(result.exception, RuntimeError), repr(result.exception)
+    assert "Serving on" not in result.output
+    assert no_server == []
+
+
+def test_serve_prints_the_banner_once_the_app_is_built(tmp_path, no_server):
+    """Guard the guard: on a healthy start the banner is there, so its absence above means
+    something."""
+    result = CliRunner().invoke(app, ["serve", "--port", "18999"], env=_env(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "Serving on http://127.0.0.1:18999" in result.output
+    assert len(no_server) == 1
+
+
 # -- B-036: an embedder that cannot embed -------------------------------------------------
 
 #: An embedding model id that cannot be on disk, so MLXEmbedder's disk-only load fails
