@@ -176,21 +176,32 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
   count only requests that were served an answer.
 - `GET /admin/health` — liveness (unauthenticated): the process is up. Says nothing about
   weights.
-- `GET /admin/ready` — readiness (unauthenticated). `200 {"status": "ready"}` only when the
-  default model is resident in the manager requests are served from **and** its provider
-  reports weights in memory. Otherwise `503` with a `status` and a `reason`:
+- `GET /admin/ready` — readiness (unauthenticated). **Ready means the default model can
+  serve a request now**: a load of it has completed with weights in memory at least once
+  (warmup or any request; residency granted without a load never counts), its most recent
+  load did not fail, and — for a backend that can check without loading (`mlx`) — its
+  weights still resolve on disk. Residency is reported separately, so a default that was
+  LRU-evicted to make room for another model stays `200` (it reloads on demand). With
+  `HEARTH_WARMUP=false` nothing loads until the first request, so a default whose weights
+  resolve on disk is `200` before that request; a backend that cannot check the disk stays
+  `503 loading` until its first load.
 
-  | `status` | `reason` (examples) | meaning |
-  |---|---|---|
-  | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
-  | `loading` | `weights for '<id>' are not loaded` (+ ` (HEARTH_WARMUP is off)`) | nothing is loading them: warmup off, or the default was evicted to make room for another model |
-  | `failed` | `warmup of '<id>' failed: ModelNotOnDiskError: …` | the load raised (weights not on disk, corrupt checkpoint, mlx missing) |
-  | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
-  | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
+  | code | `status` | `reason` / `detail` (examples) | meaning |
+  |---|---|---|---|
+  | 200 | `ready` | — | the default holds weights now (`loaded: true`) |
+  | 200 | `ready` | detail `'<id>' loaded before and is not resident now (evicted to make room); it reloads on demand` | `loaded: false`, weights on disk |
+  | 200 | `ready` | detail `warmup disabled (HEARTH_WARMUP=false); '<id>' is on disk and loads on the first request` | `loaded: false`, never loaded yet |
+  | 503 | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
+  | 503 | `loading` | `weights for '<id>' are not loaded (HEARTH_WARMUP is off) and the '<backend>' backend cannot verify them without loading` | a plugin/test backend without a disk probe, before its first load |
+  | 503 | `failed` | `weights for '<id>' do not resolve on disk: ModelNotOnDiskError: …` | never pulled, or deleted after loading |
+  | 503 | `failed` | `last load of '<id>' failed: …` / `warmup of '<id>' failed: …` | the load raised (corrupt checkpoint, mlx missing, over the RAM ceiling) |
+  | 503 | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
+  | 503 | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
 
-  Every body also carries `backend`, `model` (the default id) and `resident` (ids in memory).
-  The `echo` backend is always ready. Measured on 2026-10-05 with real weights: `503 loading`
-  at 0.05 s after start, `200 ready` at ~1.05 s (7B from page cache).
+  Every body also carries `backend`, `model` (the default id), `loaded` (the default holds
+  weights right now) and `resident` (ids in memory). The `echo` backend is always ready.
+  Measured on 2026-10-05 with real weights (warmup on): `503 loading` at 0.05 s after start,
+  `200 ready` at ~1.05 s (7B from page cache).
 - `GET /admin/models` — what is resident right now, read off the provider instances
   themselves (auth required):
 

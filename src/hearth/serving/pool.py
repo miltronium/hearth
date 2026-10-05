@@ -146,11 +146,17 @@ class ModelPool:
         backend: str = "mlx",
         ram_ceiling_gb: float,
         registry=None,
+        locate: Callable[[str], object] | None = None,
     ) -> None:
         self.name = backend
         self._backend = backend
         self._registry = registry
         self._factory = factory
+        # ``locate(model_id)`` resolves a model's weights on disk WITHOUT loading them (and
+        # without downloading), raising when they are absent. Readiness uses it so a server
+        # whose default was evicted — or never loaded because warmup is off — can still say
+        # truthfully whether the default can be loaded. ``None``: this pool cannot tell.
+        self._locate = locate
         self.manager = ModelManager(self._make, ram_ceiling_gb=ram_ceiling_gb)
 
     # -- registry ------------------------------------------------------------------------
@@ -188,6 +194,25 @@ class ModelPool:
 
     def evict(self, model_id: str) -> bool:
         return run_on_mlx_thread(self.manager.evict, model_id)
+
+    @property
+    def can_locate(self) -> bool:
+        """Whether :meth:`weights_problem` actually checks the disk."""
+        return self._locate is not None
+
+    def weights_problem(self, model_id: str) -> str | None:
+        """Why ``model_id``'s weights do not resolve on disk, or ``None`` if they do.
+
+        Also ``None`` when this pool has no ``locate`` (it cannot tell) — callers must check
+        :attr:`can_locate` before treating ``None`` as "on disk".
+        """
+        if self._locate is None:
+            return None
+        try:
+            self._locate(model_id)
+        except Exception as exc:  # noqa: BLE001 — any failure to resolve is "not loadable"
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
     # -- the provider contract -------------------------------------------------------------
 

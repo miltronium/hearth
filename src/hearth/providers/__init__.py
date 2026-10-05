@@ -13,10 +13,27 @@ core edits.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..config import Settings, get_settings
+from . import mlx as _mlx
 from .base import ModelProvider
 from .echo import EchoProvider
 from .mlx import MLXProvider, mlx_available
+
+
+def _locate_on_disk(model_id: str) -> str:
+    """Resolve ``model_id``'s weights on disk only — never a download (readiness probe).
+
+    Looked up on the module at call time so a patched resolver (tests) is the one used.
+    The returned path must exist: without huggingface_hub the resolver hands back the bare
+    id (leaving the error to mlx_lm), which is not evidence of weights on disk.
+    """
+    path = _mlx.resolve_local_model(model_id, allow_downloads=False)
+    if not Path(path).expanduser().exists():
+        raise _mlx.ModelNotOnDiskError(f"weights for {model_id!r} resolved to {path!r}, "
+                                       "which does not exist")
+    return path
 
 
 def mlx_pool(settings: Settings | None = None):
@@ -28,6 +45,7 @@ def mlx_pool(settings: Settings | None = None):
         lambda model_id, ram_gb: MLXProvider(model_id, ram_gb=ram_gb),
         backend="mlx",
         ram_ceiling_gb=settings.ram_ceiling_gb,
+        locate=_locate_on_disk,
     )
 
 

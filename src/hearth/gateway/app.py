@@ -152,37 +152,84 @@ def create_app(
     def ready():
         """Readiness probe (distinct from liveness /health).
 
-        Returns 200 only once the default model's weights are actually in memory: resident
-        in the manager requests are served from AND, for a provider that can say so
-        (``is_loaded``), holding weights. It used to check residency alone, and residency
-        was granted without loading anything — so /ready said 200 with zero weights loaded.
-        503 otherwise, with ``status`` ``loading`` (not loaded yet) or ``failed`` plus the
-        ``reason`` (the load raised, or ``HEARTH_DEFAULT_MODEL`` names no servable model).
-        The echo backend is always ready (nothing to load).
+        **Ready means the default model can serve a request now**, judged on outcomes:
+
+        * its last load attempt did not fail, and a load of it has completed with weights in
+          memory at least once (warmup, or any request) — residency granted without a load
+          never counts (B-005); **and**
+        * its weights still resolve on disk (for a backend that can check without loading),
+          so an evicted default reloads on demand (B-048).
+
+        With ``HEARTH_WARMUP=false`` nothing loads until the first request, so a default
+        whose weights resolve on disk is ready before that request (B-035) — reported with
+        ``loaded: false`` and a ``detail``. A backend that cannot check the disk stays 503
+        ``loading`` until its first load instead of being taken at its word.
+
+        Residency is reported separately: ``loaded`` (the default holds weights right now)
+        and ``resident`` (ids in memory). 503 ``loading`` while the first load runs; 503
+        ``failed`` with the ``reason`` when the load failed, the weights are gone, or
+        ``HEARTH_DEFAULT_MODEL`` names no servable model. The echo backend is always ready
+        (nothing to load).
         """
         default_id = registry.default_id
+        loaded = _weights_loaded(manager, default_id)
         payload: dict = {
             "backend": provider.name,
             "model": default_id,
+            "loaded": loaded,
             "resident": manager.resident_ids(),
         }
+
+        def respond(code: int, status: str, reason: str | None = None,
+                    detail: str | None = None) -> JSONResponse:
+            body = {**payload, "status": status}
+            if reason is not None:
+                body["reason"] = reason
+            if detail is not None:
+                body["detail"] = detail
+            return JSONResponse(status_code=code, content=body)
+
         if provider.name == "echo":
-            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
+            return respond(200, "ready")
         problem = _default_model_problem(provider, registry)
-        if problem is None and _weights_loaded(manager, default_id):
-            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
-        reason = problem or warmup_state.error
-        status = "failed" if reason else "loading"
-        if not reason:
-            reason = (
-                "warmup in progress"
-                if warmup_state.running
-                else f"weights for {default_id!r} are not loaded"
-                + ("" if settings.warmup else " (HEARTH_WARMUP is off)")
+        if problem is not None:
+            return respond(503, "failed", problem)
+        can_locate = bool(getattr(provider, "can_locate", False))
+        if can_locate:
+            missing = provider.weights_problem(default_id)
+            if missing is not None:
+                return respond(
+                    503, "failed", f"weights for {default_id!r} do not resolve on disk: "
+                    f"{missing}",
+                )
+        last_error = getattr(manager, "last_load_error", lambda _m: None)(default_id)
+        if last_error is not None:
+            return respond(503, "failed", f"last load of {default_id!r} failed: {last_error}")
+        if loaded:
+            return respond(200, "ready")
+        if getattr(manager, "loaded_once", lambda _m: False)(default_id):
+            return respond(
+                200, "ready",
+                detail=f"{default_id!r} loaded before and is not resident now (evicted to "
+                "make room); it reloads on demand",
             )
-        return JSONResponse(
-            status_code=503, content={**payload, "status": status, "reason": reason}
-        )
+        if warmup_state.running:
+            return respond(503, "loading", "warmup in progress")
+        if warmup_state.error:
+            return respond(503, "failed", warmup_state.error)
+        if not settings.warmup:
+            if can_locate:
+                return respond(
+                    200, "ready",
+                    detail=f"warmup disabled (HEARTH_WARMUP=false); {default_id!r} is on "
+                    "disk and loads on the first request",
+                )
+            return respond(
+                503, "loading",
+                f"weights for {default_id!r} are not loaded (HEARTH_WARMUP is off) and "
+                f"the {provider.name!r} backend cannot verify them without loading",
+            )
+        return respond(503, "loading", f"weights for {default_id!r} are not loaded yet")
 
     @app.get("/v1/hearth/admin/models", dependencies=[auth])
     def admin_models() -> dict:

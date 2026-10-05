@@ -109,7 +109,9 @@ def _app(provider, settings, *, manager=None, warmup=None):
 
 
 def test_ready_503_before_warm(tmp_path):
-    # A non-echo provider with warmup off: default model not resident → 503.
+    # A non-echo provider with warmup off that cannot check its weights on disk without
+    # loading: it is not taken at its word — 503 loading until a load succeeds. (A pool
+    # with a disk probe is ready here instead: tests/test_model_selection.py, B-035.)
     settings = Settings(backend="echo", home=tmp_path / ".hearth", require_auth=False, warmup=False)
     provider = LoadableProvider()
     client = TestClient(_app(provider, settings))
