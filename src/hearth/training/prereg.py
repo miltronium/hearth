@@ -21,6 +21,7 @@ HEAD records (``git rev-parse HEAD:<path>``) — a comparison a reviewer can rep
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -328,6 +329,14 @@ def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatu
         rel = resolved.relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         return GitStatus(committed=False, reason=f"{path} is not inside {root}", repo_root=root)
+    rewrites = _history_rewrites(root)
+    if rewrites:
+        return GitStatus(
+            committed=False,
+            reason=f"the repository {root} cannot vouch for when {path} was committed: "
+            + "; ".join(rewrites),
+            repo_root=root,
+        )
     try:
         _git(["ls-files", "--error-unmatch", "--", rel], cwd=root)
     except _GitError:
@@ -712,14 +721,91 @@ class _GitError(RuntimeError):
     """A git invocation returned non-zero."""
 
 
+# Every question the gate asks git is about content-addressed history: "is this blob in
+# that commit", "is that commit an ancestor of this one". Content addressing is what makes
+# the answers unforgeable — a commit id fixes its parents — so anything that lets git answer
+# from somewhere OTHER than the objects themselves turns the gate back into a configuration
+# check (CLAUDE.md §3, B-120). Three such mechanisms exist, and each is neutralised here:
+#
+# * ``refs/replace/*`` (``git replace``): git silently substitutes one object for another,
+#   so a fabricated, backdated commit can be grafted under the HEAD recorded at a first
+#   measurement. Off via ``GIT_NO_REPLACE_OBJECTS=1`` (config can only further disable
+#   replace refs, never re-enable them over the environment variable).
+# * ``info/grafts`` / ``GIT_GRAFT_FILE``: rewrites a commit's parents by fiat. git has no
+#   switch to ignore a grafts file, so the gate refuses a repository that has one
+#   (:func:`_history_rewrites`) and strips the env var.
+# * the commit-graph cache (``objects/info/commit-graph``): parents, trees and dates are
+#   read from it instead of from the commit objects, and its checksum is not verified on
+#   read — a hand-edited graph makes ``git log`` report a parent the commit does not have.
+#   Off via ``core.commitGraph=false`` (slower history walks; the gate walks one file).
+#
+# ``-c`` on the command line outranks every config file, so repository-local config cannot
+# turn these back on. System and global config are skipped outright (``GIT_CONFIG_NOSYSTEM``
+# / ``GIT_CONFIG_GLOBAL``): the gate's reads must not depend on ambient per-user settings.
+# Repository-local config cannot be skipped (git offers no switch for it); the keys in it
+# that change how objects or parents are read are exactly the ones overridden above, and
+# the rest (aliases, hooks, fsmonitor) do not run for these plumbing reads. Every other
+# ``GIT_*`` variable is dropped too — ``GIT_DIR``, ``GIT_OBJECT_DIRECTORY``,
+# ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_REPLACE_REF_BASE``, ``GIT_INDEX_FILE`` all
+# redirect what is read. ``protocol.allow=never`` / ``GIT_NO_LAZY_FETCH`` keep a
+# partial clone from fetching a missing object over the network mid-check.
+_GIT_OVERRIDES = (
+    "-c", "core.commitGraph=false",
+    "-c", "protocol.allow=never",
+)
+
+
+def _git_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    return env
+
+
+def _history_rewrites(root: str) -> list[str]:
+    """Every mechanism in the repository at ``root`` that rewrites history by fiat (B-120).
+
+    Replace refs are already ignored by :func:`_git`; they are refused as well because a
+    repository that carries them is one where a human reviewer running plain ``git log``
+    sees a different history from the one the gate checked. A grafts file cannot be ignored
+    at all, so it must be refused.
+    """
+    problems = []
+    try:
+        refs = _git(["for-each-ref", "--format=%(refname)", "refs/replace/"], cwd=root)
+        common = _git(["rev-parse", "--git-common-dir"], cwd=root)
+    except (_GitError, FileNotFoundError, NotADirectoryError) as exc:
+        return [f"cannot inspect the repository for history rewrites ({exc})"]
+    if refs:
+        problems.append(
+            f"it carries replace refs ({refs.splitlines()[0]}…): `git replace` substitutes "
+            "one commit for another, so its history is not the committed history — "
+            "remove them (`git replace -d`)"
+        )
+    if (Path(root) / common / "info" / "grafts").exists():
+        problems.append(
+            "it has an info/grafts file, which rewrites commit parents by fiat — remove it"
+        )
+    return problems
+
+
 def _git(args: list[str], *, cwd: str, strip: bool = True) -> str:
-    """Run ``git <args>`` in ``cwd`` and return its stdout (stripped); raise on failure."""
+    """Run ``git <args>`` in ``cwd`` and return its stdout (stripped); raise on failure.
+
+    Always with history rewriting neutralised (see ``_GIT_OVERRIDES``).
+    """
     proc = subprocess.run(
-        ["git", *args],
+        ["git", *_GIT_OVERRIDES, *args],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
     if proc.returncode != 0:
         raise _GitError((proc.stderr or proc.stdout).strip() or f"git {args[0]} failed")
