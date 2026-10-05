@@ -222,7 +222,11 @@ def _doctor_offline() -> None:
     table.add_column("status")
     table.add_column("detail", overflow="fold")
     for c in checks:
-        mark = "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]"
+        # Same three-way mark as plain `doctor`: a non-fatal failure is a WARN, not a FAIL —
+        # rendering it FAIL beside a "SAFE offline" verdict contradicted the verdict (B-031).
+        mark = "[green]PASS[/green]" if c.ok else (
+            "[red]FAIL[/red]" if c.fatal else "[yellow]WARN[/yellow]"
+        )
         table.add_row(c.name, mark, c.detail)
     console.print(table)
     for limit in OFFLINE_LIMITS:

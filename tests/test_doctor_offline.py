@@ -297,3 +297,36 @@ def test_a_rung_the_model_pool_would_refuse_is_not_safe(machine):
     assert "NOT servable" in checks["model echo"].detail
     assert "class extract" in checks["model echo"].detail
     assert checks[f"model {DEFAULT}"].ok
+
+
+def _status_column(output: str, check_name: str) -> str:
+    """The status cell of ``check_name``'s row in a rendered doctor table."""
+    row = next((ln for ln in output.splitlines() if f" {check_name} " in ln), "")
+    cells = [c.strip() for c in row.split("│")]
+    return cells[2] if len(cells) > 2 else f"<no row for {check_name!r} in:\n{output}>"
+
+
+def test_offline_table_marks_a_non_fatal_failure_warn_not_fail(monkeypatch):
+    """B-031: `--offline` rendered every non-ok row as FAIL, ignoring Check.fatal, so a
+    non-fatal row read FAIL beside a "SAFE offline" verdict. Same three-way mark as doctor."""
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+    from hearth.doctor import Check
+
+    monkeypatch.setattr(doctor_mod, "run_offline_checks", lambda: [
+        Check("routing_profile", True, "fine", fatal=True),
+        Check("soft_problem", False, "a surprise, not an egress path", fatal=False),
+    ])
+    safe = CliRunner().invoke(app, ["doctor", "--offline"], env={"COLUMNS": "200"})
+    assert safe.exit_code == 0, safe.output
+    assert _status_column(safe.output, "routing_profile") == "PASS", safe.output
+    assert _status_column(safe.output, "soft_problem") == "WARN", safe.output
+    assert "SAFE offline" in safe.output
+
+    monkeypatch.setattr(doctor_mod, "run_offline_checks", lambda: [
+        Check("hard_problem", False, "an egress path", fatal=True),
+    ])
+    unsafe = CliRunner().invoke(app, ["doctor", "--offline"], env={"COLUMNS": "200"})
+    assert unsafe.exit_code == 1, unsafe.output
+    assert _status_column(unsafe.output, "hard_problem") == "FAIL", unsafe.output
