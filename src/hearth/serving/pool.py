@@ -31,9 +31,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from pathlib import Path
 
 from ..providers.base import (
     Capabilities,
+    GenerationCancelledError,
     GenRequest,
     GenResult,
     ModelProvider,
@@ -42,7 +44,12 @@ from ..providers.base import (
     iter_stream,
     raise_if_cancelled,
 )
-from ..providers.mlx import iterate_on_mlx_thread, run_on_mlx_thread, variant_key
+from ..providers.mlx import (
+    ModelNotOnDiskError,
+    iterate_on_mlx_thread,
+    run_on_mlx_thread,
+    variant_key,
+)
 from .manager import ModelManager
 
 AUTO_MODEL_IDS = ("", "auto")
@@ -61,6 +68,38 @@ class UnknownModelError(LookupError):
 
     def __str__(self) -> str:  # LookupError would repr() a single arg; keep it readable
         return str(self.args[0])
+
+
+class AdapterLoadFailedError(RuntimeError):
+    """A (model, adapter) variant whose last load failed, refused without loading again.
+
+    Raised in place of a reload until the adapter's files change (B-102). The router's
+    degrade-and-retry then serves base weights, exactly as after the original failure — but
+    without evicting the resident base for a load already known to fail.
+    """
+
+
+def adapter_fingerprint(path: str) -> tuple | None:
+    """What identifies the adapter at ``path`` on disk: (relpath, mtime_ns, size) per entry.
+
+    ``None`` when the path does not exist. Any rewrite of the adapter (a retrain, a fixed
+    file, a file added or removed) changes it; a failed load is remembered only for the
+    fingerprint it failed with.
+    """
+    root = Path(path).expanduser()
+    try:
+        st = root.stat()
+    except OSError:
+        return None
+    entries = [("", st.st_mtime_ns, st.st_size)]
+    if root.is_dir():
+        for child in sorted(root.rglob("*")):
+            try:
+                cst = child.stat()
+            except OSError:
+                continue
+            entries.append((str(child.relative_to(root)), cst.st_mtime_ns, cst.st_size))
+    return tuple(entries)
 
 
 def servable_ids(registry, backend: str | None) -> list[str]:
@@ -166,6 +205,9 @@ class ModelPool:
         self._locate = locate
         # manager key -> (model id, adapter path) for adapter variants (see _key).
         self._variants: dict[str, tuple[str, str]] = {}
+        # variant key -> (adapter fingerprint, error) of its last FAILED load (B-102). Only
+        # touched on the MLX thread, inside the jobs that call the manager.
+        self._failed_variants: dict[str, tuple[tuple | None, str]] = {}
         self.manager = ModelManager(self._make, ram_ceiling_gb=ram_ceiling_gb)
 
     # -- registry ------------------------------------------------------------------------
@@ -216,6 +258,37 @@ class ModelPool:
 
     # -- residency -----------------------------------------------------------------------
 
+    def _get(self, key: str) -> ModelProvider:
+        """``manager.get(key)``, refusing a variant whose last load failed (MLX thread only).
+
+        A bad adapter used to cost a full reload per request: the variant's admission
+        evicted the resident base to make room, its load failed, and the router's retry on
+        base weights reloaded the base — every request, forever (B-102). A failed variant
+        load is now remembered against the adapter's on-disk fingerprint and refused with
+        :class:`AdapterLoadFailedError` (nothing evicted, nothing loaded) until the adapter
+        changes. A base that is not on disk is not the adapter's fault and is not
+        remembered; neither is a cancellation.
+        """
+        variant = self._variants.get(key)
+        if variant is None:
+            return self.manager.get(key)
+        stamp = adapter_fingerprint(variant[1])
+        failed = self._failed_variants.get(key)
+        if failed is not None:
+            if failed[0] == stamp:
+                raise AdapterLoadFailedError(
+                    f"adapter {variant[1]!r} over {variant[0]!r} failed to load before "
+                    f"({failed[1]}); not retried until its files change"
+                )
+            del self._failed_variants[key]  # the adapter changed: worth one more load
+        try:
+            return self.manager.get(key)
+        except (GenerationCancelledError, ModelNotOnDiskError):
+            raise
+        except Exception as exc:
+            self._failed_variants[key] = (stamp, f"{type(exc).__name__}: {exc}")
+            raise
+
     def provider_for(self, model_id: str | None) -> ModelProvider:
         """Load (if needed) and return the provider serving ``model_id``."""
         resolved = self.resolve(model_id)
@@ -263,7 +336,7 @@ class ModelPool:
 
         def job() -> GenResult:
             raise_if_cancelled()  # abandoned while queued: do not load weights for it
-            return self.manager.get(key).generate(concrete)
+            return self._get(key).generate(concrete)
 
         return run_on_mlx_thread(job)
 
@@ -272,7 +345,7 @@ class ModelPool:
         resolved = self.resolve(req.model)
         concrete = replace(req, model=resolved)
         key = self._key(resolved, req.adapter)
-        return iterate_on_mlx_thread(lambda: iter_stream(self.manager.get(key), concrete))
+        return iterate_on_mlx_thread(lambda: iter_stream(self._get(key), concrete))
 
     def stream(self, req: GenRequest) -> Iterator[str]:
         for delta in self.stream_deltas(req):
@@ -282,6 +355,8 @@ class ModelPool:
 
 __all__ = [
     "AUTO_MODEL_IDS",
+    "AdapterLoadFailedError",
+    "adapter_fingerprint",
     "ModelPool",
     "check_model",
     "UnknownModelError",
