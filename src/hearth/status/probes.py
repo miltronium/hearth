@@ -337,8 +337,9 @@ def _policy_outcome(path: Path) -> tuple[object | None, dict]:
         policy = load_policy(path)
     except RoutingProfileNotFoundError as exc:
         # Includes RoutingPolicyError (an unusable rung): report WHY, not a generic line
-        # that hides the one sentence the operator needs (B-077).
-        return None, {"error": str(exc)}
+        # that hides the one sentence the operator needs (B-077). ``unusable``: the router
+        # refuses to start on this file — a different finding from "can egress" (B-108).
+        return None, {"error": str(exc), "unusable": True}
     except Exception as exc:  # noqa: BLE001 — never crash a status report
         return None, {"error": f"policy failed to load: {type(exc).__name__}: {exc}"}
 
@@ -423,16 +424,30 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
     selection = resolve_routing_selection(env)
     active = selection.raw
     active_path = selection.path if selection.explicit else config_dir / "routing.yaml"
+    active_exists = active_path.exists()
 
+    # The active profile is loaded HERE, wherever it lives (B-108): a bad-rung profile used
+    # to read [ok] because only its existence was checked, and one outside config/ was
+    # never loaded at all — while `hearth serve` refused it (exit 2). Unusable is reported
+    # as unusable, not as an egress finding: the verdict is still not-safe-to-run.
+    active_meta = _policy_outcome(active_path)[1] if active_exists else {}
+    unusable = bool(active_meta.get("unusable"))
+    active_data: dict = {"path": str(active_path), "from_env": bool(active),
+                         "exists": active_exists}
+    if unusable:
+        active_data.update(unusable=True, error=active_meta.get("error"))
     facts: list[Fact] = [
         Fact(
             "active_profile",
             str(active_path),
-            LEVEL_OK if active_path.exists() else LEVEL_WARN,
+            LEVEL_FAIL if unusable else (LEVEL_OK if active_exists else LEVEL_WARN),
             ("selected by HEARTH_ROUTING_YAML" if active else "the built-in default path")
-            + ("" if active_path.exists() else " — but that file does not exist"
-               + ("; the router refuses to start on it" if active else "")),
-            {"path": str(active_path), "from_env": bool(active), "exists": active_path.exists()},
+            + ("" if active_exists else " — but that file does not exist"
+               + ("; the router refuses to start on it" if active else ""))
+            + (" — UNUSABLE: the router refuses to start on it (`hearth serve` exits 2); "
+               f"this is not an egress finding: {active_meta.get('error')}"
+               if unusable else ""),
+            active_data,
         )
     ]
 
@@ -440,12 +455,25 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
         facts.append(
             Fact("profiles", "none found", LEVEL_UNVERIFIED, f"no routing*.yaml under {config_dir}")
         )
+    # A selected profile outside config/ is judged like the ones in it.
+    if active_exists and active_path.resolve() not in {p.resolve() for p in profiles}:
+        profiles.append(active_path)
 
     no_egress_profiles: list[str] = []
     for path in profiles:
         policy, meta = _policy_outcome(path)
-        rel = path.relative_to(root).as_posix()
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = str(path)
         if policy is None:
+            if meta.get("unusable"):
+                facts.append(Fact(
+                    rel, "UNUSABLE — the router refuses to start on it", LEVEL_WARN,
+                    f"egress not judged (nothing can run on it): {meta.get('error', '')}",
+                    {"unusable": True},
+                ))
+                continue
             facts.append(Fact(rel, "unmeasured", LEVEL_UNVERIFIED, str(meta.get("error", ""))))
             continue
         posture = policy_posture(policy)

@@ -370,7 +370,9 @@ def doctor(
 
 def _doctor_offline() -> None:
     """Render ``run_offline_checks`` and exit 1 when any safety check fails."""
-    from .doctor import OFFLINE_LIMITS, run_offline_checks
+    from rich.markup import escape
+
+    from .doctor import OFFLINE_LIMITS, offline_verdict, run_offline_checks
 
     checks = run_offline_checks()
     table = Table(title="hearth doctor --offline", show_header=True, header_style="bold")
@@ -387,11 +389,13 @@ def _doctor_offline() -> None:
     console.print(table)
     for limit in OFFLINE_LIMITS:
         console.print(f"[dim]not measured: {limit}[/dim]")
-    failed = [c.name for c in checks if c.fatal and not c.ok]
-    if failed:
-        console.print(f"[red]UNSAFE offline:[/red] {', '.join(failed)}")
+    # The verdict names WHY (B-108): "unusable" (HEARTH refuses to run on it) is not "can
+    # egress", though both exit 1 — neither is safe to run.
+    safe, verdict = offline_verdict(checks)
+    if not safe:
+        console.print(f"[red]{escape(verdict)}[/red]")
         raise typer.Exit(code=1)
-    console.print("[green]SAFE offline[/green] — no check found a path off this machine.")
+    console.print(f"[green]{escape(verdict)}[/green]")
 
 
 @app.command(rich_help_panel=PANEL_USE)

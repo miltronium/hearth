@@ -25,6 +25,15 @@ class Check:
     detail: str
     # A failed check may still be non-fatal (e.g. MLX missing -> echo fallback works).
     fatal: bool = False
+    # WHY a failed check failed, for the verdict line: e.g. REASON_UNUSABLE (HEARTH cannot
+    # run on it) vs REASON_EGRESS (it can send something off the machine) — B-108.
+    reason: str | None = None
+
+
+#: A failed check whose subject HEARTH refuses to run on — not a path off the machine.
+REASON_UNUSABLE = "unusable: the router refuses to start on it"
+#: A failed check whose subject gives the router somewhere to send a task.
+REASON_EGRESS = "can egress"
 
 
 def _total_ram_gb() -> float | None:
@@ -147,6 +156,23 @@ def all_fatal_passed(checks: list[Check]) -> bool:
     return all(c.ok for c in checks if c.fatal)
 
 
+def offline_verdict(checks: list[Check]) -> tuple[bool, str]:
+    """``(safe, line)``: the ``doctor --offline`` verdict, saying WHY it is not safe (B-108).
+
+    Every fatal failure makes it not safe. When the only failures are things HEARTH refuses
+    to run on (``REASON_UNUSABLE``), the line says so instead of "UNSAFE offline", which
+    reads as "can egress": an unusable profile opens no path off the machine, it just
+    cannot be run. Each failed check is named with its reason when it has one.
+    """
+    failed = [c for c in checks if c.fatal and not c.ok]
+    if not failed:
+        return True, "SAFE offline — no check found a path off this machine."
+    names = ", ".join(f"{c.name} ({c.reason})" if c.reason else c.name for c in failed)
+    if all(c.reason == REASON_UNUSABLE for c in failed):
+        return False, f"NOT SAFE TO RUN offline — unusable, not an egress path: {names}"
+    return False, f"UNSAFE offline: {names}"
+
+
 # ---------------------------------------------------------------------------------------
 # hearth doctor --offline: "is it safe to use HEARTH offline right now?"
 # ---------------------------------------------------------------------------------------
@@ -216,10 +242,23 @@ def _check_routing(policy_path: Path | None, environ: dict[str, str] | None = No
                 "— the router refuses to start on it (relative paths resolve against the "
                 "repo root)",
                 fatal=True,
+                reason=REASON_UNUSABLE,
             )
     policy, meta = _policy_outcome(path)
     if policy is None:
-        return None, Check("routing_profile", False, f"{path}: {meta.get('error')}", fatal=True)
+        # Unusable is not "can egress" (B-108): nothing can run on this profile, so it opens
+        # no path off the machine — but it is still not safe to RUN, so the check fails.
+        unusable = bool(meta.get("unusable"))
+        return None, Check(
+            "routing_profile",
+            False,
+            f"{path}: "
+            + ("UNUSABLE — `hearth serve` refuses to start on it (exit 2); not an egress "
+               "finding: " if unusable else "")
+            + str(meta.get("error")),
+            fatal=True,
+            reason=REASON_UNUSABLE if unusable else None,
+        )
     posture = policy_posture(policy)
     if posture["no_egress"]:
         detail = f"{path}: 0 remotes, every class local/never — the router has nowhere to send"
@@ -229,7 +268,10 @@ def _check_routing(policy_path: Path | None, environ: dict[str, str] | None = No
     if note:
         detail += (f" [the router did not take the file as written ({note}); judged on what it "
                    "resolved]")
-    return policy, Check("routing_profile", posture["no_egress"], detail, fatal=True)
+    return policy, Check(
+        "routing_profile", posture["no_egress"], detail, fatal=True,
+        reason=None if posture["no_egress"] else REASON_EGRESS,
+    )
 
 
 def _check_serving(environ: dict[str, str]) -> Check:

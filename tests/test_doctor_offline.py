@@ -433,3 +433,64 @@ def test_offline_table_marks_a_non_fatal_failure_warn_not_fail(monkeypatch):
     unsafe = CliRunner().invoke(app, ["doctor", "--offline"], env={"COLUMNS": "200"})
     assert unsafe.exit_code == 1, unsafe.output
     assert _status_column(unsafe.output, "hard_problem") == "FAIL", unsafe.output
+
+
+# -- B-108: "unusable" is not "can egress" ------------------------------------------------
+
+BAD_RUNG_PROFILE = SAFE_PROFILE.replace(
+    "chat:    {backend: local, escalate: never}",
+    "chat:    {backend: local, escalate: never, local_model: mlx-community/bge-small-en-v1.5-bf16}",
+)
+
+
+def test_an_unusable_profile_is_not_safe_and_says_unusable_not_egress(machine):
+    """B-108: a profile `hearth serve` refuses (exit 2) was labelled "UNSAFE offline:
+    routing_profile" — read as "can egress". Still not safe to run; now it says why."""
+    from hearth.doctor import REASON_UNUSABLE, offline_verdict
+
+    machine.profile.write_text(BAD_RUNG_PROFILE)
+    checks, safe = machine.run()
+    assert not safe
+    routing = checks["routing_profile"]
+    assert not routing.ok and routing.fatal and routing.reason == REASON_UNUSABLE
+    assert "UNUSABLE" in routing.detail and "bge-small" in routing.detail
+    assert "CAN ESCAPE" not in routing.detail
+    ok, line = offline_verdict(list(checks.values()))
+    assert not ok
+    assert line.startswith("NOT SAFE TO RUN offline") and "UNSAFE offline" not in line
+    assert "routing_profile (unusable" in line
+
+
+def test_an_egress_profile_verdict_names_the_reason(machine):
+    from hearth.doctor import REASON_EGRESS, offline_verdict
+
+    machine.profile.write_text(LEAKY_PROFILE)
+    checks, _ = machine.run()
+    assert checks["routing_profile"].reason == REASON_EGRESS
+    ok, line = offline_verdict(list(checks.values()))
+    assert not ok and line == "UNSAFE offline: routing_profile (can egress)"
+
+
+def test_unusable_beside_an_egress_finding_is_still_unsafe():
+    from hearth.doctor import REASON_UNUSABLE, Check, offline_verdict
+
+    ok, line = offline_verdict([
+        Check("routing_profile", False, "bad rung", fatal=True, reason=REASON_UNUSABLE),
+        Check("bind_host", False, "0.0.0.0", fatal=True),
+    ])
+    assert not ok and line.startswith("UNSAFE offline:") and "bind_host" in line
+
+
+def test_cli_labels_an_unusable_profile_not_safe_to_run(monkeypatch):
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+    from hearth.doctor import REASON_UNUSABLE, Check
+
+    monkeypatch.setattr(doctor_mod, "run_offline_checks", lambda: [
+        Check("routing_profile", False, "bad rung", fatal=True, reason=REASON_UNUSABLE),
+    ])
+    result = CliRunner().invoke(app, ["doctor", "--offline"], env={"COLUMNS": "250"})
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert "NOT SAFE TO RUN offline" in flat and "UNSAFE offline" not in flat
