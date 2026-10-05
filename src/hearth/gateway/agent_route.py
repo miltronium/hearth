@@ -106,6 +106,14 @@ def register_agent_route(app: FastAPI) -> None:
         try:
             check_model(state.router.local, state.registry, req.model)
         except UnknownModelError as exc:
+            from ..providers.base import GenRequest, Message
+
+            # Recorded as a refused request (B-112), under the agent's `reason` class.
+            state.router.record_refused(
+                GenRequest(messages=[Message(role="user", content=req.task)], model=req.model),
+                exc,
+                intent="reason",
+            )
             return _model_not_found(exc)
         registry = local_toolset(
             settings=settings,

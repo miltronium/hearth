@@ -763,3 +763,30 @@ def test_v1_models_lists_only_what_the_pool_serves_and_each_listed_id_is_served(
     for unlisted in ("echo", EMBED):
         assert _chat(client, unlisted).status_code == 404
 
+
+
+# -- B-112: an unknown-model 404 is a recorded failure, like an adapter 404 ------------------
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_unknown_model_404_is_recorded_as_a_failed_request(
+    fake, tmp_path, local_policy, stream
+):
+    app, _, router = _app(tmp_path, local_policy)
+    r = TestClient(app).post("/v1/chat/completions", json={
+        "model": "no/such-model", "stream": stream,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 404
+    roll = router.metrics.rollup()
+    assert roll["requests"] == 1 and roll["failed"] == 1
+    assert fake.loads == []  # refused before any weights moved
+
+
+def test_an_unknown_model_on_the_agent_route_is_recorded(fake, tmp_path, local_policy):
+    app, _, router = _app(tmp_path, local_policy)
+    r = TestClient(app).post(
+        "/v1/hearth/agent", json={"task": "anything", "model": "no/such-model"}
+    )
+    assert r.status_code == 404
+    assert router.metrics.rollup()["failed"] == 1

@@ -286,6 +286,18 @@ def create_app(
         try:
             check_model(router.local, registry, req.model)
         except UnknownModelError as exc:
+            # Recorded like the adapter refusal below (B-112): a client hammering a model
+            # that does not exist must be visible in hearth stats, not invisible.
+            router.record_refused(
+                GenRequest(
+                    messages=[Message(role=m.role, content=m.content) for m in req.messages],
+                    model=req.model,
+                    max_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                ),
+                exc,
+                intent=intent,
+            )
             return _model_not_found(exc)
         messages = (
             json_instruction(req.messages)
