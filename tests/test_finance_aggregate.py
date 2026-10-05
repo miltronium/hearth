@@ -168,6 +168,50 @@ BANNED_IMPORTS = frozenset(
      "smtplib", "telnetlib", "xmlrpc", "asyncio"}
 )
 SOURCES = sorted(Path(hearth.finance.__file__).parent.glob("*.py"))
+PACKAGE = "hearth.finance"
+#: The only HEARTH modules outside this package it may import: the allowlisted file reader
+#: (the one seam for reading statements) and the settings it is configured by. Anything else
+#: inside HEARTH - providers (remote backends), router, gateway, serving, agent - is a way out.
+ALLOWED_INTERNAL = ("hearth.finance", "hearth.mcp.files", "hearth.config")
+#: Dynamic-import machinery. A module name in a string is invisible to every import check
+#: above, so the machinery itself is refused rather than its arguments audited (B-092).
+DYNAMIC_IMPORT_NAMES = frozenset({"importlib", "__import__", "import_module", "builtins",
+                                  "__builtins__"})
+
+
+def _resolve(path: Path, node: ast.ImportFrom) -> list[str]:
+    """Absolute module names an ``ImportFrom`` reaches, with relative levels resolved.
+
+    ``from ..providers import remote`` in ``hearth/finance/shape.py`` is
+    ``hearth.providers.remote``. Checking only ``node.level == 0`` (as this test once did)
+    skipped every relative import, which is exactly how a sibling package is reached.
+    """
+    if node.level == 0:
+        return [node.module or ""]
+    # A module's own package is hearth.finance whether it is __init__.py or a submodule.
+    parts = PACKAGE.split(".")
+    anchor = parts[: len(parts) - (node.level - 1)]
+    assert anchor, f"{path.name}: relative import climbs above the top-level package"
+    base = ".".join(anchor + ([node.module] if node.module else []))
+    if node.module:
+        # `from ..x import y` may name a submodule y; check both x and x.y.
+        return [base] + [f"{base}.{alias.name}" for alias in node.names]
+    return [f"{base}.{alias.name}" for alias in node.names]
+
+
+def _imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names += _resolve(path, node)
+    return names
+
+
+def _internal_allowed(name: str) -> bool:
+    return any(name == ok or name.startswith(ok + ".") for ok in ALLOWED_INTERNAL)
 
 
 def test_the_package_has_sources_to_check():
@@ -177,24 +221,61 @@ def test_the_package_has_sources_to_check():
 def test_no_module_imports_anything_that_could_reach_the_network():
     """Financial records are the most sensitive thing HEARTH touches. This package must have
     no way to send them anywhere, and that has to be checked mechanically rather than trusted:
-    a convenience import is exactly how such a guarantee erodes."""
+    a convenience import is exactly how such a guarantee erodes.
+
+    Relative imports are resolved and held to an allowlist of HEARTH modules, because the
+    network inside HEARTH lives in sibling packages (``hearth.providers.remote``), which a
+    root-name ban on stdlib transports never sees (B-092)."""
     for path in SOURCES:
+        for name in _imports(path):
+            root = name.split(".")[0]
+            assert root not in BANNED_IMPORTS, f"{path.name} imports {name}"
+            assert root not in DYNAMIC_IMPORT_NAMES, f"{path.name} imports {name}"
+            if root == "hearth":
+                assert _internal_allowed(name), (
+                    f"{path.name} imports {name}, outside {ALLOWED_INTERNAL}: the network "
+                    "inside HEARTH lives in its sibling packages"
+                )
+
+
+def test_the_allowed_internal_modules_import_no_transport_either():
+    """The allowlist is only as good as what it admits: one hop out, the same ban holds."""
+    src = Path(hearth.finance.__file__).parent.parent
+    for module in ALLOWED_INTERNAL[1:]:
+        path = src / (module.removeprefix("hearth.").replace(".", "/") + ".py")
+        assert path.is_file(), f"{module} not found at {path}"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             names = []
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names = [node.module]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                names = [node.module or ""]
             for name in names:
-                root = name.split(".")[0]
-                assert root not in BANNED_IMPORTS, f"{path.name} imports {name}"
+                assert name.split(".")[0] not in BANNED_IMPORTS, f"{module} imports {name}"
+
+
+def test_relative_imports_resolve_to_absolute_names():
+    """The resolver the invariant depends on, pinned: if it mis-resolves, the check is blind."""
+    shape = Path(hearth.finance.__file__).parent / "shape.py"
+    node = ast.parse("from ..providers import remote").body[0]
+    assert _resolve(shape, node) == ["hearth.providers", "hearth.providers.remote"]
+    node = ast.parse("from . import store").body[0]
+    assert _resolve(shape, node) == ["hearth.finance.store"]
+    node = ast.parse("from ..mcp.files import read_table").body[0]
+    assert all(_internal_allowed(n) for n in _resolve(shape, node)[:1])
 
 
 def test_no_module_can_reach_a_shell_or_a_dynamic_import():
     for path in SOURCES:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
+            # importlib.import_module("socket") / __import__("socket") carry the module name
+            # as a string, past every import check: refuse the machinery wherever it appears.
+            if isinstance(node, ast.Name) and node.id in DYNAMIC_IMPORT_NAMES:
+                raise AssertionError(f"{path.name} references {node.id}")
+            if isinstance(node, ast.Attribute) and node.attr in DYNAMIC_IMPORT_NAMES:
+                raise AssertionError(f"{path.name} references .{node.attr}")
             if isinstance(node, ast.Call):
                 func = node.func
                 if _dotted(func) in EXEMPT_DOTTED:
