@@ -14,6 +14,7 @@ import yaml
 
 from hearth.training.eval import EvalConfig, EvalReport, as_golden_set, score_candidate
 from hearth.training.prereg import (
+    DEFAULT_BASELINES,
     PreRegError,
     load_prereg,
     require_prereg,
@@ -36,6 +37,7 @@ def _prereg_body(**overrides) -> dict:
         "generation": {"temperature": 0.0, "max_tokens": 24, "seed": None, "system_hash": ""},
         "bar": {"test": "auto", "alpha": 0.05, "min_effect": 0.0, "min_n": 30},
         "stopping_rule": "one run at seed 0, no re-rolls",
+        "kill_condition": "no lift over the base model at alpha 0.05",
     }
     body.update(overrides)
     return body
@@ -109,15 +111,45 @@ def test_load_prereg_refuses_a_missing_or_malformed_file(tmp_path):
         load_prereg(bad)
 
 
-def test_template_round_trips_through_the_loader(tmp_path):
+def test_an_unedited_template_is_not_a_prereg_until_the_prose_is_written(tmp_path):
+    """The tool writes the numbers; the operator must write the claim before it can gate.
+
+    An unedited `prereg init` file used to load cleanly and, once committed, could gate a
+    promotion — "a bar written by the tool is not a prereg", enforced only in a comment.
+    """
     text = template(task="classify", golden_sha=GOLDEN.sha, metric="exact", max_tokens=24)
     path = tmp_path / "scaffold.yaml"
     path.write_text(text, encoding="utf-8")
+    with pytest.raises(PreRegError, match="hypothesis"):
+        load_prereg(path)
+    body = yaml.safe_load(text)
+    body.update(
+        hypothesis="the adapter learns the QX convention",
+        stopping_rule="one run at seed 0, no re-rolls",
+        kill_condition="no lift over the base model at alpha 0.05",
+    )
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
     prereg = load_prereg(path)
     assert prereg.golden_sha == GOLDEN.sha
     assert prereg.generation.fingerprint == CONFIG.fingerprint
-    # The prose is left for the operator — a bar written by the tool is not a prereg.
-    assert prereg.hypothesis == ""
+
+
+@pytest.mark.parametrize("baselines", [[], ["empty", "majority"], "copy_input"])
+def test_a_prereg_cannot_drop_a_default_baseline(tmp_path, baselines):
+    body = _prereg_body()
+    body["bar"] = {**body["bar"], "must_beat_baselines": baselines}
+    path = tmp_path / "p.yaml"
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    with pytest.raises(PreRegError, match="must include every default baseline"):
+        load_prereg(path)
+
+
+def test_a_prereg_may_add_baselines(tmp_path):
+    body = _prereg_body()
+    body["bar"] = {**body["bar"], "must_beat_baselines": [*DEFAULT_BASELINES, "extra"]}
+    path = tmp_path / "p.yaml"
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    assert "extra" in load_prereg(path).must_beat_baselines
 
 
 # -- matching --------------------------------------------------------------------------

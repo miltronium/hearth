@@ -168,7 +168,7 @@ the candidate must beat (`empty`, `majority_label`, `copy_input`). The `--metric
 `--max-tokens` and `--system` you register here must be the ones you pass to `hearth eval`
 in step 5, or the run is refused as "not the registered experiment".
 
-Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand, then commit:
+Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand — `prereg check` and `eval --promote` refuse a prereg with any of them blank, and one whose `bar.must_beat_baselines` drops a default baseline (empty / majority / copy-input) — then commit:
 
 ```sh
 git add prereg/extract.yaml && git commit -m "prereg: extract adapter bar"

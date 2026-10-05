@@ -166,6 +166,27 @@ def load_prereg(path: Path | str) -> PreRegistration:
     baselines = bar.get("must_beat_baselines", list(DEFAULT_BASELINES))
     if isinstance(baselines, str):
         baselines = [baselines]
+    # Beating the trivial baselines is part of the gate (CLAUDE.md §7), not an option a
+    # prereg may switch off: a list may ADD baselines but never drop the defaults. An empty
+    # list used to be accepted and silently removed the baseline check from the promotion.
+    dropped = [b for b in DEFAULT_BASELINES if b not in [str(x) for x in baselines]]
+    if dropped:
+        raise PreRegError(
+            f"bar.must_beat_baselines must include every default baseline; missing {dropped}. "
+            "Beating the empty/majority/copy-input baselines is part of the gate, not optional."
+        )
+
+    # The written-down claim IS the pre-registration. `hearth prereg init` leaves these
+    # blank on purpose; an unedited template used to load cleanly and, once committed, could
+    # gate a promotion — a bar the tool wrote, not one the operator registered.
+    blank = [k for k in ("hypothesis", "stopping_rule", "kill_condition")
+             if not str(obj.get(k) or "").strip()]
+    if blank:
+        raise PreRegError(
+            f"pre-registration has blank {blank}: write the hypothesis, when you will stop, "
+            "and what result would kill the idea BEFORE training — an unedited template is "
+            "not a pre-registration"
+        )
 
     return PreRegistration(
         path=path,

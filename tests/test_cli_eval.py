@@ -84,6 +84,7 @@ def _committed_prereg(tmp_path, rows, *, task="extract", name="prereg.yaml", **b
         "generation": {"temperature": 0.0, "max_tokens": 24, "seed": None, "system_hash": ""},
         "bar": {"test": "auto", "alpha": 0.05, "min_effect": 0.0, "min_n": 30, **bar},
         "stopping_rule": "one run, no re-rolls",
+        "kill_condition": "no lift over the base model",
     }
     path = tmp_path / name
     path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
@@ -351,6 +352,9 @@ def test_prereg_check_reports_an_uncommitted_bar(tmp_path):
          "--metric", "exact", "--max-tokens", "24"],
         env=_env(tmp_path),
     )
+    body = yaml.safe_load(out.read_text())  # the operator writes the claim
+    body.update(hypothesis="h", stopping_rule="one run", kill_condition="no lift")
+    out.write_text(yaml.safe_dump(body), encoding="utf-8")
     result = runner.invoke(
         app, ["prereg", "check", str(out), "--golden", golden], env=_env(tmp_path)
     )
