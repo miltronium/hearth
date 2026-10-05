@@ -15,6 +15,23 @@ from hearth.router.classify import TASK_CLASSES
 from hearth.router.policy import ClassRule, Defaults
 
 
+@pytest.fixture(autouse=True)
+def _isolated_hearth_home(tmp_path_factory, monkeypatch):
+    """No test reads or writes the operator's real ~/.hearth.
+
+    Code that builds a default store or settings without an injected one (e.g.
+    Router._adapter_store -> AdapterStore() -> ~/.hearth/adapters.json) otherwise resolved
+    against the real home: tests silently depended on the operator's adapter registry,
+    metrics and token. Every test gets an empty, throwaway HEARTH_HOME unless it sets its own.
+    """
+    from hearth.config import get_settings
+
+    monkeypatch.setenv("HEARTH_HOME", str(tmp_path_factory.mktemp("hearth_home")))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     # Force the echo backend, an isolated home, and no auth so tests never touch
