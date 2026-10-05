@@ -486,7 +486,8 @@ class Router:
           2. the class rule's ``local_model`` — the per-class rung (e.g. a small fast model
              for ``classify``/``extract``, a larger one for ``summarize``/``draft``);
           3. ``defaults.local_model`` from the routing policy;
-          4. the model registry's default id.
+          4. the model registry's default id (``require_default``: an unregistered
+             ``HEARTH_DEFAULT_MODEL`` raises instead of falling back, B-070).
 
         A rule with no ``local_model`` (or ``"auto"``) is a no-op: steps 3–4 decide exactly
         as they did before the field existed, so existing configs are unaffected.
@@ -500,7 +501,9 @@ class Router:
             return configured
         from ..registry import get_registry
 
-        return get_registry().default_id
+        # Strict: an unregistered HEARTH_DEFAULT_MODEL raises UnregisteredDefaultModelError
+        # rather than routing to the catalog default (B-070).
+        return get_registry().require_default()
 
     def _remote_model(self) -> str:
         cfg = self.policy.remote_for()

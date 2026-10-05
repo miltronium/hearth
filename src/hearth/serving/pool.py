@@ -74,11 +74,16 @@ def servable_ids(registry, backend: str | None) -> list[str]:
 def resolve_model_id(registry, model_id: str | None, backend: str | None) -> str:
     """Resolve a requested model id to a concrete, servable registry id — or refuse.
 
-    ``"auto"``/empty/``None`` mean the registry default. ``backend=None`` checks membership
-    and chat capability only (used where the serving backend is not a registry backend,
-    e.g. an injected test provider).
+    ``"auto"``/empty/``None`` mean the registry default — through ``require_default``, so
+    an explicitly set ``HEARTH_DEFAULT_MODEL`` that names no registered model raises
+    :class:`~hearth.registry.UnregisteredDefaultModelError` HERE, where the model is chosen,
+    instead of quietly resolving to the catalog default (B-070: the B-047 refusal used to
+    live only at CLI call sites, so example scripts and direct API users were answered by a
+    model they had not named). ``backend=None`` checks membership and chat capability only
+    (used where the serving backend is not a registry backend, e.g. an injected test
+    provider).
     """
-    wanted = registry.default_id if model_id in (None, *AUTO_MODEL_IDS) else model_id
+    wanted = registry.require_default() if model_id in (None, *AUTO_MODEL_IDS) else model_id
     entry = registry.get(wanted)
     known = servable_ids(registry, backend)
     if entry is None:
