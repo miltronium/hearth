@@ -473,6 +473,10 @@ class Router:
                             adapter=None,
                         )
                     ), None
+                except (UnknownModelError, GenerationCancelledError):
+                    # Same rule as the first attempt: a caller that went away while the
+                    # adapter was failing is a cancellation, never a provider outage (503).
+                    raise
                 except Exception as retry_exc:  # noqa: BLE001
                     exc = retry_exc
             logger.error("provider %s failed to generate: %s", provider.name, exc)
