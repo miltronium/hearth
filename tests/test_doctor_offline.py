@@ -281,3 +281,19 @@ def test_a_registered_default_model_override_raises_no_warning(machine, monkeypa
     monkeypatch.setenv("HEARTH_DEFAULT_MODEL", SMALL)
     checks, _ = machine.run()
     assert "default_model" not in checks
+
+
+def test_a_rung_the_model_pool_would_refuse_is_not_safe(machine):
+    """The routing loader accepts any REGISTERED id as a rung (echo is registered), but the
+    mlx backend serves through ModelPool, which 404s an id that is not a chat model of its
+    backend. Such a rung must fail here, not at the first classified request."""
+    machine.profile.write_text(SAFE_PROFILE.replace(
+        "extract: {backend: local, escalate: never}",
+        "extract: {backend: local, escalate: never, local_model: echo}",
+    ))
+    checks, safe = machine.run()
+    assert not safe
+    assert not checks["model echo"].ok
+    assert "NOT servable" in checks["model echo"].detail
+    assert "class extract" in checks["model echo"].detail
+    assert checks[f"model {DEFAULT}"].ok

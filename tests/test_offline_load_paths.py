@@ -389,8 +389,37 @@ def test_hearth_models_pull_is_the_only_call_that_may_download():
     assert [d.split(" ")[1] for d in downloading] == ["models_pull"], downloading
 
 
+def _is_resolve_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and getattr(node.func, "id", None) == "resolve_local_model"
+
+
+def _bound_only_to_resolve(path: Path, owner: str, var: str) -> bool:
+    """True when ``var`` is not a parameter of function ``owner`` and every binding of it
+    there is ``var = resolve_local_model(...)`` (at least one) — so ``load(var)`` is as
+    resolved as ``load(resolve_local_model(...))``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name == owner):
+            continue
+        if var in {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)}:
+            return False
+        stores = [
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store)
+        ]
+        good = [
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Assign) and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name) and n.targets[0].id == var
+            and _is_resolve_call(n.value)
+        ]
+        return bool(stores) and len(stores) == len(good)
+    return False
+
+
 def test_every_mlx_lm_load_is_handed_a_resolved_path():
-    """``mlx_lm.load(<repo-id>)`` downloads; each call site must wrap resolve_local_model."""
+    """``mlx_lm.load(<repo-id>)`` downloads; each call site must hand it a
+    resolve_local_model result — inline, or via a local bound only to one."""
     unresolved = []
     for path in sorted([*ROOT.glob("src/hearth/**/*.py"), *ROOT.glob("scripts/*.py")]):
         source = path.read_text(encoding="utf-8")
@@ -400,9 +429,8 @@ def test_every_mlx_lm_load_is_handed_a_resolved_path():
             if name != "load" or not isinstance(call.func, ast.Name) or not call.args:
                 continue
             first = call.args[0]
-            resolved = (
-                isinstance(first, ast.Call)
-                and getattr(first.func, "id", None) == "resolve_local_model"
+            resolved = _is_resolve_call(first) or (
+                isinstance(first, ast.Name) and _bound_only_to_resolve(path, owner, first.id)
             )
             if not resolved:
                 unresolved.append(f"{path.relative_to(ROOT)}:{call.lineno} {owner}")

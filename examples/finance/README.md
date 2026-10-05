@@ -56,8 +56,9 @@ hearth models pull mlx-community/Qwen2.5-3B-Instruct-4bit
 hearth models pull mlx-community/Qwen2.5-14B-Instruct-4bit
 ```
 
-The harness sets `HF_HUB_CACHE=~/.hearth/models` for you before importing anything, because
-`hearth models pull` stores weights there rather than in the default `~/.cache/huggingface`.
+No `HF_HUB_CACHE` export is needed: the harness serves through `hearth.serving.ModelPool`
+(the gateway's own multi-model front door), whose providers resolve weights in
+`~/.hearth/models` first and then the default hub cache, and never download on load.
 
 ### Running it sealed
 

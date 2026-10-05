@@ -247,6 +247,7 @@ def serve(
     settings = get_settings()
     ensure_home(settings)
     get_or_create_token(settings)  # ensure a token exists for bearer auth
+    _log_hearth_to_stderr()
     provider = select_provider(settings)
 
     bind_host = host or settings.host
@@ -259,6 +260,23 @@ def serve(
     uvicorn.run(create_app(provider=provider, settings=settings), host=bind_host, port=bind_port)
 
 
+def _log_hearth_to_stderr() -> None:
+    """Show HEARTH's own INFO log in the serve console (uvicorn only configures its own).
+
+    Without a handler, Python prints only WARNING and up, so the lines that say which
+    weights were loaded, which model generated each request and what was evicted never
+    appeared — the server's evidence of what it actually did was being discarded.
+    """
+    import logging
+
+    log = logging.getLogger("hearth")
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+
+
 @app.command()
 def run(
     prompt: str = typer.Argument(None, help="Prompt text. Omit to read from stdin."),
@@ -268,6 +286,11 @@ def run(
     ),
     intent: str = typer.Option(
         None, "--intent", help="Routing intent hint (recorded; used by the router in Phase 2)."
+    ),
+    model: str = typer.Option(
+        "auto",
+        "--model",
+        help="Registry model id to serve this prompt. 'auto' lets the routing ladder pick.",
     ),
 ) -> None:
     """Run a one-shot local completion and print the result."""
@@ -283,6 +306,7 @@ def run(
 
     settings = get_settings()
     provider = select_provider(settings)
+    _require_known_model(provider, model)
     # `intent` is recorded here for parity with the API's hearth.intent hint; the router
     # that consumes it arrives in Phase 2. Surface it so `--intent` is observably wired.
     if intent:
@@ -291,7 +315,9 @@ def run(
     routed = router.route(
         GenRequest(
             messages=[Message(role="user", content=text)],
-            model=get_registry().default_id,
+            # "auto" (not the registry default) so a per-class ladder rung applies; an
+            # explicit --model pins it. Pinning the default here used to bypass the ladder.
+            model=model,
             max_tokens=max_tokens,
         ),
         intent=intent,
@@ -300,6 +326,24 @@ def run(
         allow_escalation=False,
     )
     console.print(routed.result.text, markup=False, highlight=False)
+    # Which weights answered, from the provider that ran — on stderr, so piping the answer
+    # stays clean.
+    typer.echo(
+        f"[served by {routed.result.model} via {routed.result.backend}; "
+        f"class={routed.decision.task_class}]",
+        err=True,
+    )
+
+
+def _require_known_model(provider, model: str) -> None:
+    """Exit 2 with the registry's answer when ``model`` is not servable here."""
+    from .serving import UnknownModelError, check_model
+
+    try:
+        check_model(provider, get_registry(), model)
+    except UnknownModelError as exc:
+        console.print(f"[red]Unknown model:[/red] {exc}", markup=True, highlight=False)
+        raise typer.Exit(code=2) from None
 
 
 @app.command()
@@ -332,6 +376,11 @@ def agent(
     ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit the whole run as JSON instead of prose (for scripting)."
+    ),
+    model: str = typer.Option(
+        "auto",
+        "--model",
+        help="Registry model id for every step. 'auto' lets the routing ladder pick.",
     ),
 ) -> None:
     """Run a bounded, tool-using local agent over your own data (docs/AGENT.md).
@@ -432,7 +481,10 @@ def agent(
 
     tools = local_toolset(settings=settings, rag=rag, finance=store, collection=collection)
     provider = select_provider(settings)
-    model_id = get_registry().default_id
+    _require_known_model(provider, model)
+    # "auto" rather than the registry default: pinning the default bypassed the per-class
+    # ladder. Each step's served model is in the transcript, read off the provider that ran.
+    model_id = model
     try:
         budget = Budget(
             max_iterations=max_iterations,
@@ -990,6 +1042,11 @@ def eval_adapter(
     base_model = base or entry.base_model
     # Fresh Settings() (not the lru_cached get_settings) so HEARTH_BACKEND is read per call.
     provider = select_provider(Settings())
+    # The evaluated model must be the one that generates. Before ModelPool every eval ran
+    # the registry default whatever `base_model` said; now a pool refuses an unservable base
+    # (a single-model provider — echo, a plugin — has nothing to select between).
+    if callable(getattr(provider, "resolve", None)):
+        _require_known_model(provider, base_model)
     config = EvalConfig.for_system(system, temperature=temperature, max_tokens=max_tokens)
     measured_at = datetime.now(tz=UTC).isoformat(timespec="seconds")
 

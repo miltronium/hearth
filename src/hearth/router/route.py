@@ -27,6 +27,7 @@ from ..observability.metrics import (
     get_metrics,
 )
 from ..providers.base import GenRequest, GenResult, ModelProvider
+from ..serving.pool import UnknownModelError
 from .classify import classify
 from .policy import ClassRule, RoutingPolicy, get_policy
 
@@ -312,6 +313,10 @@ class Router:
         )
         try:
             return provider.generate(gen)
+        except UnknownModelError:
+            # The request named a model nobody serves. That is the caller's error (a 404),
+            # not a provider outage to retry or wrap as a 503.
+            raise
         except Exception as exc:  # noqa: BLE001 — degrade rather than 500 the request
             if adapter_path is not None:
                 logger.warning(

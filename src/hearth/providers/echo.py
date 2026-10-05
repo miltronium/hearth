@@ -56,7 +56,7 @@ class EchoProvider:
         words = text.split(" ")
         for i, word in enumerate(words):
             yield StreamDelta(text=word if i == 0 else " " + word)
-        yield StreamDelta(finish_reason=finish_reason)
+        yield StreamDelta(finish_reason=finish_reason, model=req.model)
 
     def footprint(self, model_id: str) -> ResourceEstimate:
         return ResourceEstimate(ram_gb=0.0)
