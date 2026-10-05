@@ -10,6 +10,8 @@ ported to assert the refusal; each was run against 3caecb0 first and promoted th
         were a "fresh, never-measured" adapter (B-121)
     M1  a "menu" of bars committed before the first measurement: measure under one, see the
         verdict, promote under another (B-122)
+    M4  an adapter id holding U+2028 tore its ledger record in two, bricking every later
+        measurement and promotion on the install (B-124)
 """
 
 from __future__ import annotations
@@ -360,3 +362,96 @@ def test_M1_the_ledger_records_which_prereg_each_measurement_was_made_under(tmp_
     assert first["prereg_sha"] == load_prereg(w.prereg).sha
     assert first["prereg_path"] == str(w.prereg.resolve())
     assert second["prereg_sha"] == second["prereg_path"] == ""
+
+
+# -- M4: a separator character cannot tear a ledger line and brick the install (B-124) -----
+
+
+@pytest.mark.parametrize("ch", ["\u2028", "\u2029", "\x85", "\u200b", "\u00ad", "\u202e",
+                                "\x00", "\n", "\r", "\t", "\ue000"])
+def test_M4_registration_refuses_control_format_and_separator_characters(tmp_path, ch):
+    from hearth.registry.adapters import AdapterError, AdapterStore
+
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    with pytest.raises(AdapterError, match="control, format or separator"):
+        store.register(f"a{ch}b", base_model=pe.BASE, task="extract", train_run_id="r",
+                       adapter_path=str(tmp_path))
+    assert store.get(f"a{ch}b") is None
+
+
+@pytest.mark.parametrize("aid", ["", "   "])
+def test_M4_registration_refuses_an_empty_id(tmp_path, aid):
+    from hearth.registry.adapters import AdapterError, AdapterStore
+
+    with pytest.raises(AdapterError, match="non-empty"):
+        AdapterStore(path=tmp_path / "adapters.json").register(
+            aid, base_model=pe.BASE, task="extract", train_run_id="r", adapter_path="x")
+
+
+def test_M4_ordinary_unicode_ids_still_register(tmp_path):
+    from hearth.registry.adapters import AdapterStore
+
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register("extract-café v2", base_model=pe.BASE, task="extract", train_run_id="r",
+                   adapter_path="x")
+    assert store.get("extract-café v2") is not None
+
+
+def _hand_registered(world: World, aid: str) -> None:
+    """An id that predates validation (older version, or adapters.json edited by hand)."""
+    import json
+
+    path = world.tmp / "weights" / "legacy"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "adapters.safetensors").write_bytes(b"GOOD")
+    reg = world.store.path
+    data = json.loads(reg.read_text()) if reg.exists() else {"adapters": []}
+    data["adapters"].append({"id": aid, "base_model": pe.BASE, "task": "extract",
+                             "train_run_id": "r", "adapter_path": str(path)})
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps(data))
+
+
+def test_M4_a_u2028_adapter_id_does_not_brick_the_ledger(tmp_path):
+    """Reviewer R7: measuring an id holding U+2028 made every later measurement refuse."""
+    from hearth.training.ledger import ledger_path
+
+    w = World(tmp_path)
+    w.commit("golden.jsonl")
+    _hand_registered(w, "a\u2028b")
+    _adapter(w, "ok")
+    first = w.eval("a\u2028b")
+    assert first.exit_code == 0 and "not an intact" not in _flat(first), _flat(first)
+    second = w.eval("ok")
+    assert second.exit_code == 0 and "PASS" in _flat(second), _flat(second)
+    raw = ledger_path(w.home).read_bytes()
+    assert raw.isascii() and raw.count(b"\n") == 2
+
+
+def test_M4_a_ledger_written_before_the_fix_is_read_whole(tmp_path):
+    """An install already "bricked" by a raw U+2028 reads again: records split on \\n only."""
+    import json
+
+    from hearth.training import attest, ledger
+
+    key = attest.load_key(tmp_path, create=True)
+    first = attest.sign({"adapter_id": "a\u2028b\u0085c", "schema": ledger.LEDGER_SCHEMA,
+                         "seq": 0, "prev": ""}, key)
+    second = attest.sign({"adapter_id": "d", "schema": ledger.LEDGER_SCHEMA, "seq": 1,
+                          "prev": first["signature"]["mac"]}, key)
+    ledger.ledger_path(tmp_path).write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in (first, second)),
+        encoding="utf-8")
+    records = ledger.read(tmp_path, key)
+    assert [r["adapter_id"] for r in records] == ["a\u2028b\u0085c", "d"]
+    ledger.append(tmp_path, {"adapter_id": "e"}, key)
+    assert len(ledger.read(tmp_path, key)) == 3
+
+
+def test_M4_a_ledger_that_is_not_utf8_refuses_cleanly(tmp_path):
+    from hearth.training import attest, ledger
+
+    key = attest.load_key(tmp_path, create=True)
+    ledger.ledger_path(tmp_path).write_bytes(b"\xff\xfe{}\n")
+    with pytest.raises(ledger.LedgerError, match="not UTF-8"):
+        ledger.read(tmp_path, key)

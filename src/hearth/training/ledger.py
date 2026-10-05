@@ -68,7 +68,19 @@ def _read(path: Path, key: bytes) -> list[dict]:
         return []
     records: list[dict] = []
     prev = ""
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    # Records are separated by "\n" and by nothing else (B-124). str.splitlines() also
+    # breaks on U+2028/U+2029/U+0085 (and \r, \v, \f, \x1c-\x1e): one such character in
+    # an adapter id tore its record in two and bricked every later measurement and
+    # promotion. Records are written ASCII-only, so no separator can appear raw in one; a
+    # ledger written before that is still read correctly.
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LedgerError(f"{path}: not UTF-8, so not an intact ledger ({exc})") from None
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()  # the newline that terminates the last record
+    for lineno, line in enumerate(lines, start=1):
         try:  # a blank or torn line is not JSON, and so not an intact record
             record = json.loads(line)
             if not isinstance(record, dict):
@@ -105,7 +117,9 @@ def append(home: Path, entry: dict, key: bytes) -> dict:
         body = {**entry, "schema": LEDGER_SCHEMA, "seq": len(records),
                 "prev": _mac(records[-1]) if records else ""}
         signed = attest.sign(body, key)
-        line = json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        # ensure_ascii: every non-ASCII character is a \u escape, so no line separator
+        # (U+2028, U+2029, U+0085) can appear raw inside a record (B-124).
+        line = json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:

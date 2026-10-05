@@ -25,6 +25,7 @@ import json
 import os
 import struct
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -51,6 +52,30 @@ class GateNotPassedError(AdapterError):
 
 class IncumbentChangedError(AdapterError):
     """The incumbent a promotion was measured against is no longer the incumbent (B-082)."""
+
+
+# Unicode categories an adapter id may not contain (B-124): control (Cc — includes NEL
+# U+0085), format (Cf — zero-width space/joiners, bidi overrides, soft hyphen), surrogate
+# (Cs), private-use (Co), unassigned (Cn), and the line / paragraph separators (Zl U+2028,
+# Zp U+2029). An id is written into the measurement ledger, logs and terminal output; a
+# separator in it split a ledger line for every reader that treats it as a line break
+# (Python's str.splitlines does), and the install could no longer measure or promote
+# anything. Invisible characters also make two different ids look identical.
+_FORBIDDEN_ID_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
+def validate_adapter_id(adapter_id: object) -> str:
+    """Return ``adapter_id`` if it is a usable id, else raise :class:`AdapterError`."""
+    if not isinstance(adapter_id, str) or not adapter_id.strip():
+        raise AdapterError(f"invalid adapter id {adapter_id!r}: it must be a non-empty string")
+    bad = sorted({f"U+{ord(ch):04X} ({unicodedata.category(ch)})" for ch in adapter_id
+                  if unicodedata.category(ch) in _FORBIDDEN_ID_CATEGORIES})
+    if bad:
+        raise AdapterError(
+            f"invalid adapter id {adapter_id!r}: it contains control, format or separator "
+            f"characters ({', '.join(bad)}) — use printable characters only"
+        )
+    return adapter_id
 
 
 def adapter_weights_sha(adapter_path: str | Path) -> str:
@@ -246,6 +271,7 @@ class AdapterStore:
         eval_scores: dict[str, float] | None = None,
     ) -> AdapterEntry:
         """Register a newly-trained adapter as a **candidate** (ADR-006)."""
+        validate_adapter_id(adapter_id)
         with self._locked():
             entries = self._load()
             if adapter_id in entries:
@@ -449,4 +475,5 @@ __all__ = [
     "STATUS_RETIRED",
     "adapter_served_sha",
     "adapter_weights_sha",
+    "validate_adapter_id",
 ]
