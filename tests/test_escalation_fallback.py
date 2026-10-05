@@ -227,7 +227,9 @@ def test_a_remote_that_dies_mid_stream_is_billed_and_recorded(tmp_path):
     assert roll["requests"] == 1
     assert roll["escalations"] == 1
     assert roll["escalations_failed"] == 1
-    assert roll["backend_mix"] == {"remote": 1}
+    # The client got an error event, not an answer: counted as failed, not as served.
+    assert roll["failed"] == 1
+    assert roll["backend_mix"] == {}
     assert client.app.state.router.budget.spent() > 0
 
 
@@ -278,3 +280,74 @@ def test_streaming_and_non_streaming_agree_on_a_broken_adapter(tmp_path):
     plain = client.post("/v1/chat/completions", json=body)
     assert plain.status_code == 200
     assert plain.json()["choices"][0]["message"]["content"] == "base answer"
+
+
+# -- a failed request is recorded (B-003) ----------------------------------------------
+
+
+def test_double_failure_is_recorded_non_streaming():
+    """Escalation failed, then local failed: the remote may hold the prompt — record it."""
+    router = _router(DeadRemote, local=DeadLocal())
+    with pytest.raises(ProviderError):
+        router.route(GenRequest(messages=[Message(role="user", content=PROMPT)], model="auto"))
+    roll = router.metrics.rollup()
+    assert roll["requests"] == 1
+    assert roll["escalations_failed"] == 1
+    assert roll["failed"] == 1
+    assert roll["backend_mix"] == {}  # nothing served
+    (rec,) = router.metrics._records
+    assert "offline" in rec.escalation_failed  # the remote's error
+    assert "weights missing" in rec.failed  # the local fallback's error
+
+
+def test_double_failure_is_recorded_through_the_gateway(tmp_path):
+    client = _client(tmp_path, DeadRemote, local=DeadLocal())
+    body = {"messages": [{"role": "user", "content": PROMPT}]}
+    r = client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 503  # client behaviour unchanged
+    roll = client.get("/v1/hearth/admin/metrics").json()
+    assert roll["requests"] == 1
+    assert roll["escalations_failed"] == 1
+    assert roll["failed"] == 1
+
+
+def test_double_failure_is_recorded_streaming(tmp_path):
+    client = _client(tmp_path, DeadRemote, local=DeadLocal())
+    events = _stream(client)
+    assert events[-1] == "[DONE]"
+    assert any(isinstance(e, dict) and "error" in e for e in events)
+    roll = client.app.state.metrics.rollup()
+    assert roll["requests"] == 1
+    assert roll["escalations_failed"] == 1
+    assert roll["failed"] == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_plain_local_failure_is_recorded(tmp_path, stream):
+    client = _client(tmp_path, DeadRemote, local=DeadLocal())
+    r = client.post(
+        "/v1/chat/completions",
+        json={"stream": stream, "messages": [{"role": "user", "content": "summarize this"}]},
+    )
+    if stream:
+        assert _events(r.text)[-1] == "[DONE]"
+    else:
+        assert r.status_code == 503
+    roll = client.app.state.metrics.rollup()
+    assert roll["requests"] == 1
+    assert roll["failed"] == 1
+    assert roll["failure_rate"] == 1.0
+    assert roll["escalations_failed"] == 0
+    (rec,) = client.app.state.metrics._records
+    assert rec.served_by == "local" and rec.backend == "mlx"
+    assert "weights missing" in rec.failed
+
+
+def test_a_metrics_store_that_fails_while_recording_a_failure_keeps_the_real_error():
+    class BrokenMetrics(MetricsStore):
+        def record(self, rec):
+            raise OSError("disk full")
+
+    router = _router(DeadRemote, local=DeadLocal(), metrics=BrokenMetrics())
+    with pytest.raises(ProviderError, match="weights missing"):
+        router.route(GenRequest(messages=[Message(role="user", content=PROMPT)], model="auto"))

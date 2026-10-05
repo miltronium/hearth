@@ -226,6 +226,10 @@ class Router:
             result = self._generate(provider, decision, req, adapter_path)
         except ProviderError as exc:
             if not decision.would_escalate:
+                # A plain local failure: the client gets a 503, and the record says so.
+                self.record_failure(
+                    req, decision, provider, exc, started=started, adapter=adapter
+                )
                 raise
             # The remote failed (unreachable, offline, SDK missing, rejected the call).
             # Serve the request locally rather than turning a frontier outage into an
@@ -234,7 +238,17 @@ class Router:
             escalation_failed = str(exc)
             decision = self.degrade_to_local(req, decision, exc)
             adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
-            result = self._generate(self.local, decision, req, adapter_path)
+            try:
+                result = self._generate(self.local, decision, req, adapter_path)
+            except ProviderError as local_exc:
+                # Both failed. The remote was CALLED and may already hold the prompt
+                # (docs/PRIVACY.md), so this is exactly the request the audit trail must
+                # not lose: record the failed escalation and the failed fallback, re-raise.
+                self.record_failure(
+                    req, decision, self.local, local_exc, started=started,
+                    adapter=adapter, escalation_failed=escalation_failed,
+                )
+                raise
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         served_by = "remote" if decision.would_escalate else "local"
@@ -264,6 +278,48 @@ class Router:
         return RouteResult(result=result, decision=decision, record=record)
 
     # -- helpers ----------------------------------------------------------------------
+
+    def record_failure(
+        self,
+        req: GenRequest,
+        decision: RouteDecision,
+        provider: ModelProvider,
+        exc: Exception,
+        *,
+        started: float,
+        adapter: str | None = None,
+        escalation_failed: str | None = None,
+        completion_tokens: int = 0,
+    ) -> RequestRecord | None:
+        """Record a request that ended in an error instead of an answer (``failed`` set).
+
+        Shared by :meth:`route` and the gateway's streaming path. ``served_by`` names the
+        tier that was tried and failed; ``backend_mix`` does not count it (nothing was
+        served). Never raises: a metrics store that fails here must not replace the
+        provider's error the client is about to receive with its own.
+        """
+        prompt_tokens = max(1, sum(len(m.content) for m in req.messages) // 4)
+        record = RequestRecord(
+            task_class=decision.task_class,
+            backend=provider.name,
+            model=decision.model,
+            served_by="remote" if decision.would_escalate else "local",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            escalated=decision.would_escalate,
+            escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
+            adapter=adapter,
+            estimated_frontier_tokens_saved=0,
+            failed=str(exc),
+        )
+        try:
+            self.metrics.record(record)
+        except Exception as rec_exc:  # noqa: BLE001 — the original error must surface
+            logger.error("could not record failed request (%s): %s", exc, rec_exc)
+            return None
+        return record
 
     def degrade_to_local(
         self, req: GenRequest, decision: RouteDecision, exc: Exception

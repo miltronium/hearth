@@ -607,7 +607,8 @@ def _stream_sse(
     The final chunk carries real ``served_by``/``escalated``/savings telemetry plus the
     provider's own ``finish_reason``, so a stream cut off at ``max_tokens`` reports
     ``"length"`` exactly as the non-streaming path does. A :class:`RequestRecord` is
-    written to the metrics store when the stream completes.
+    written to the metrics store when the stream completes — and when it fails (with
+    ``failed`` set), so an error is never invisible to ``hearth stats``.
 
     Under ``response_format="json_object"`` deltas still stream as they arrive (a client
     asked to stream), and the accumulated text is validated once at the end: an
@@ -760,6 +761,14 @@ def _stream_sse(
         yield _sse("[DONE]")
         return
     except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
+        # Recorded before the error event goes out: a failed request (and, after a failed
+        # escalation, a prompt the remote may already hold) must reach the metrics.
+        router.record_failure(
+            gen_req, decision, provider, exc, started=started, adapter=adapter,
+            escalation_failed=escalation_failed,
+            completion_tokens=_estimate_stream_tokens(gen_req, "".join(parts))[1]
+            if parts else 0,
+        )
         yield from _stream_failure(provider, exc)
         return
     latency_ms = (time.perf_counter() - started) * 1000.0
@@ -861,6 +870,8 @@ def _record_failed_remote_stream(
             escalation_failed=error,
             adapter=adapter,
             estimated_frontier_tokens_saved=0,
+            # The client gets an error event, not an answer: a failed request.
+            failed=error,
         )
     )
 

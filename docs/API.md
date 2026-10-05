@@ -155,6 +155,11 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
 ### Admin (`/v1/hearth/admin/`)
 
 - `GET /admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
+  A request that ended in an error (the local provider failed, or a remote stream died
+  mid-answer) is recorded too: it counts in `requests` and in `failed` / `failure_rate`
+  (added keys; nothing renamed), and — after a failed escalation — in `escalations_failed`,
+  since the remote may already have received the prompt. `backend_mix` and `latency_ms`
+  count only requests that were served an answer.
 - `GET /admin/health` — liveness (unauthenticated): the process is up. Says nothing about
   weights.
 - `GET /admin/ready` — readiness (unauthenticated). `200 {"status": "ready"}` only when the
