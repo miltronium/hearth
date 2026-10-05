@@ -98,33 +98,35 @@ def run_checks(settings: Settings | None = None) -> list[Check]:
     return checks
 
 
-def check_default_model(registry=None) -> Check | None:
-    """WARN when ``HEARTH_DEFAULT_MODEL`` is set but ignored (B-029); ``None`` otherwise.
+def check_default_model(registry=None, *, fatal: bool = True) -> Check | None:
+    """FAIL when ``HEARTH_DEFAULT_MODEL`` is set but unregistered (B-029, B-047); else ``None``.
 
-    The registry applies the variable only when it names a registered model, and falls back
-    to the catalog default otherwise — so a typo or an unregistered id serves a different
-    model than the operator named. Asked of the registry itself (``default_id`` /
-    ``ignored_default_override``), so the model named here is the one that serves.
-    Non-fatal: the fallback is a working, registered model; the problem is the surprise.
+    The commands that serve start through ``Registry.require_default`` and refuse such an
+    override (exit 2), so this asks the registry the same question (``require_default``)
+    and reports the same answer. ``fatal`` is the caller's verdict: plain ``doctor`` asks
+    "will HEARTH run?" — it will not, so fatal; ``doctor --offline`` asks "is it safe
+    offline?" — a refusal to start is not a path off the machine, so it passes
+    ``fatal=False`` and the row is shown (WARN) without changing the safety verdict.
     """
+    from .registry import UnregisteredDefaultModelError
+
     if registry is None:
         from .registry import load_registry
 
         try:
             registry = load_registry()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is reported, not raised
-            return Check("default_model", False, f"WARN: model registry unreadable: {exc}")
-    ignored = registry.ignored_default_override
-    if ignored is None:
-        return None
-    return Check(
-        "default_model",
-        False,
-        f"WARN: HEARTH_DEFAULT_MODEL={ignored!r} is not in the model registry "
-        f"(config/models.yaml) and is IGNORED — {registry.default_id!r} will serve instead. "
-        "Register it, or fix the id.",
-        fatal=False,
-    )
+            return Check("default_model", False, f"model registry unreadable: {exc}")
+    try:
+        registry.require_default()
+    except UnregisteredDefaultModelError as exc:
+        return Check(
+            "default_model",
+            False,
+            f"{exc} `hearth serve`/`run`/`agent`/`mcp` refuse to start until it is fixed.",
+            fatal=fatal,
+        )
+    return None
 
 
 def all_fatal_passed(checks: list[Check]) -> bool:
@@ -395,7 +397,8 @@ def run_offline_checks(
     model_checks, on_disk = _check_models(settings, policy, registry)
     builtin = settings.backend.lower() in _BUILTIN_BACKENDS
     loopback = _is_loopback(settings.host)
-    default_model = check_default_model(registry)
+    # Non-fatal here: a misnamed default stops HEARTH starting; it opens no egress path.
+    default_model = check_default_model(registry, fatal=False)
     return [
         routing,
         *([default_model] if default_model is not None else []),

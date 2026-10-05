@@ -34,10 +34,12 @@ class ModelEntry:
 class Registry:
     """An in-memory view of the model catalog loaded from a YAML file."""
 
-    def __init__(self, entries: list[ModelEntry], default: str) -> None:
+    def __init__(self, entries: list[ModelEntry], default: str, source: Path | None = None) -> None:
         self._entries = entries
         self._by_id = {e.id: e for e in entries}
         self._default = default
+        #: The catalog file this registry was loaded from (``None`` when built in code).
+        self.source = source
         self._warned_overrides: set[str] = set()
 
     def list(self) -> list[ModelEntry]:
@@ -70,8 +72,9 @@ class Registry:
         variable produced a result from a different model than the one named, with nothing
         reporting the substitution; B-042). ``scripts/hearth_status.py`` lists it among the
         names read outside Settings. An override that names
-        an unregistered model is ignored rather than obeyed, because a typo must not take the
-        catalog's default away; `resolve()` would raise later, far from the cause.
+        an unregistered model is ignored here rather than obeyed, so code that only needs an
+        id keeps working; but the commands that serve (``serve``/``run``/``agent``/``mcp``)
+        start through :meth:`require_default`, which refuses such an override (B-047).
         """
         override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
         if override and override in self._by_id:
@@ -81,8 +84,9 @@ class Registry:
             # request that names no model (B-029). `hearth doctor` reports it too.
             self._warned_overrides.add(override)
             logger.warning(
-                "HEARTH_DEFAULT_MODEL=%r is not in the model registry and is IGNORED; "
-                "serving the catalog default %r instead",
+                "HEARTH_DEFAULT_MODEL=%r is not in the model registry: `hearth serve`/`run`/"
+                "`agent`/`mcp` refuse to start on it; anything asking only for an id gets "
+                "the catalog default %r",
                 override,
                 self._default,
             )
@@ -97,6 +101,41 @@ class Registry:
         """
         override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
         return override if override and override not in self._by_id else None
+
+    def require_default(self) -> str:
+        """The default model id, or :class:`UnregisteredDefaultModelError` (B-047).
+
+        The strict form of :attr:`default_id`, for the places a command *starts*
+        (``serve``, ``run``, ``agent``, ``mcp``). An explicitly set ``HEARTH_DEFAULT_MODEL``
+        that names no registered model is an error here, not a fallback: falling back left
+        ``/ready`` reporting the named model as failed while ``model=auto`` was answered by
+        the catalog default — two parts of one server disagreeing about what serves. Unset
+        (or empty) still means the catalog default. :attr:`default_id` keeps its lenient
+        behaviour for code that only needs an id to display or compare.
+        """
+        ignored = self.ignored_default_override
+        if ignored is not None:
+            raise UnregisteredDefaultModelError(
+                ignored, [e.id for e in self._entries], source=self.source
+            )
+        return self.default_id
+
+
+class UnregisteredDefaultModelError(ValueError):
+    """``HEARTH_DEFAULT_MODEL`` is set to an id the model registry does not hold."""
+
+    def __init__(
+        self, model_id: str, registered: list[str], source: Path | None = None
+    ) -> None:
+        self.model_id = model_id
+        self.registered = list(registered)
+        super().__init__(
+            f"HEARTH_DEFAULT_MODEL={model_id!r} is not in the model registry "
+            f"({source or 'config/models.yaml'}). Registered ids: "
+            f"{', '.join(self.registered) or '(none)'}. "
+            "Fix the id, register the model, or unset HEARTH_DEFAULT_MODEL to use the "
+            "catalog default."
+        )
 
 
 def default_registry_path() -> Path:
@@ -125,7 +164,7 @@ def load_registry(path: Path | None = None) -> Registry:
         for m in data.get("models", [])
     ]
     default = data.get("default") or (entries[0].id if entries else "")
-    return Registry(entries, default)
+    return Registry(entries, default, source=path)
 
 
 @lru_cache(maxsize=1)
@@ -144,6 +183,7 @@ from .adapters import (  # noqa: E402  (re-export after the model-registry core 
 __all__ = [
     "ModelEntry",
     "Registry",
+    "UnregisteredDefaultModelError",
     "load_registry",
     "get_registry",
     "default_registry_path",

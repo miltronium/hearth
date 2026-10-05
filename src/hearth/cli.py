@@ -251,6 +251,7 @@ def serve(
 
     settings = get_settings()
     ensure_home(settings)
+    _require_registered_default()
     get_or_create_token(settings)  # ensure a token exists for bearer auth
     _log_hearth_to_stderr()
     provider = select_provider(settings)
@@ -301,6 +302,7 @@ def run(
     ),
 ) -> None:
     """Run a one-shot local completion and print the result."""
+    _require_registered_default()
     if file is not None:
         text = file.read_text()
     elif prompt is not None:
@@ -351,6 +353,24 @@ def _require_known_model(provider, model: str) -> None:
         check_model(provider, get_registry(), model)
     except UnknownModelError as exc:
         console.print(f"[red]Unknown model:[/red] {exc}", markup=True, highlight=False)
+        raise typer.Exit(code=2) from None
+
+
+def _require_registered_default() -> None:
+    """Exit 2 when ``HEARTH_DEFAULT_MODEL`` is set to an id the registry does not hold.
+
+    Asked of the registry the serving code uses (``get_registry``), via the same
+    ``require_default`` that ``hearth doctor`` reports, so the refusal and the report
+    cannot disagree. Unset still means the catalog default (B-047).
+    """
+    from rich.markup import escape
+
+    from .registry import UnregisteredDefaultModelError
+
+    try:
+        get_registry().require_default()
+    except UnregisteredDefaultModelError as exc:
+        console.print(f"[red]Refusing to start:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from None
 
 
@@ -456,6 +476,7 @@ def agent(
     from .config import Settings
     from .mcp.files import allowed_roots
 
+    _require_registered_default()
     text = task if task is not None else sys.stdin.read()
     if not text.strip():
         console.print("[red]No task provided.[/red]")
@@ -597,6 +618,7 @@ def mcp() -> None:
     spends the agent's frontier budget (ADR-010, docs/INTEGRATION.md). Requires the ``mcp``
     extra; the tool logic itself lives in :mod:`hearth.mcp.tools` and needs no extras.
     """
+    _require_registered_default()
     try:
         from .mcp import server
 
@@ -871,6 +893,8 @@ def rag_query(
     """Retrieve the top-k chunks for a query; optionally answer locally (ARCHITECTURE §6)."""
     from .memory import RagIndex
 
+    if answer:  # --answer generates with the default model; retrieval alone does not
+        _require_registered_default()
     provider = select_provider(get_settings())
     with _routing_profile_required():
         index = RagIndex(router=Router(local_provider=provider))

@@ -263,18 +263,36 @@ def test_cli_exits_nonzero_when_unsafe_and_zero_when_safe(machine, monkeypatch, 
 UNREGISTERED = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
 
 
-def test_an_unregistered_default_model_override_is_a_warning_naming_both_ids(
+def test_an_unregistered_default_model_override_is_shown_but_does_not_change_the_verdict(
     machine, monkeypatch
 ):
-    """B-029: the registry ignores an unregistered HEARTH_DEFAULT_MODEL; doctor says so."""
+    """B-029/B-047: an unregistered HEARTH_DEFAULT_MODEL makes serve/run/agent/mcp refuse to
+    start. --offline shows it as a failed, NON-fatal row: a refusal to start is not a path
+    off the machine, so the safety verdict is unchanged (plain `doctor` makes it fatal)."""
     monkeypatch.setenv("HEARTH_DEFAULT_MODEL", UNREGISTERED)
     checks, safe = machine.run()
-    warn = checks["default_model"]
-    assert not warn.ok and not warn.fatal
-    assert warn.detail.startswith("WARN")
-    assert UNREGISTERED in warn.detail and DEFAULT in warn.detail  # ignored id + what serves
-    assert machine.registry.default_id == DEFAULT
-    assert safe  # a surprise, not an offline-safety failure: the verdict is unchanged
+    row = checks["default_model"]
+    assert not row.ok and not row.fatal
+    assert UNREGISTERED in row.detail and DEFAULT in row.detail  # bad id + registered ids
+    assert "refuse to start" in row.detail
+    assert safe
+
+
+def test_offline_cli_renders_the_unregistered_default_as_warn(machine, monkeypatch):
+    """B-031's acceptance test, end to end: the `default_model` row's status cell is WARN."""
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+
+    settings = Settings(home=machine.home, backend="echo")
+    monkeypatch.setattr(doctor_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(mlx_mod, "get_settings", lambda: settings)
+    monkeypatch.setenv("HEARTH_ROUTING_YAML", str(machine.profile))
+    monkeypatch.setenv("HEARTH_DEFAULT_MODEL", UNREGISTERED)
+    result = CliRunner().invoke(app, ["doctor", "--offline"], env={"COLUMNS": "400"})
+    assert result.exit_code == 0, result.output
+    assert _status_column(result.output, "default_model") == "WARN", result.output
+    assert "SAFE offline" in result.output
 
 
 def test_a_registered_default_model_override_raises_no_warning(machine, monkeypatch):
