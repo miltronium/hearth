@@ -669,11 +669,13 @@ def test_ready_reports_failure_when_the_default_is_not_on_disk(fake, tmp_path, l
 def test_ready_reports_a_default_model_override_nobody_can_serve(
     fake, tmp_path, local_policy, monkeypatch
 ):
+    """B-047: the app refuses to be BUILT, so no part of it can serve 'auto' from the
+    catalog default while another part reports the named default as failed."""
+    from hearth.registry import UnregisteredDefaultModelError
+
     monkeypatch.setenv("HEARTH_DEFAULT_MODEL", "nope/typo-model")
-    app, _, _ = _app(tmp_path, local_policy, warmup=True)
-    resp = _wait_ready(TestClient(app), "failed")
-    assert resp.status_code == 503
-    assert "HEARTH_DEFAULT_MODEL" in resp.json()["reason"]
+    with pytest.raises(UnregisteredDefaultModelError, match="nope/typo-model"):
+        _app(tmp_path, local_policy, warmup=True)
     assert fake.loads == []  # the catalog default was NOT quietly loaded in its place
 
 

@@ -11,7 +11,6 @@ liveness probe ``/v1/hearth/admin/health``.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 import uuid
@@ -88,6 +87,11 @@ def create_app(
     settings = settings or get_settings()
     provider = provider or select_provider(settings)
     registry = registry or get_registry()
+    # B-047: an explicitly set HEARTH_DEFAULT_MODEL that names no registered model is an
+    # error when the app is BUILT, not a readiness footnote. Before, an app built directly
+    # (not via `hearth serve`, which already refused) reported /ready "failed" while
+    # model=auto was answered 200 by the catalog default — one server, two answers.
+    registry.require_default()
     metrics = metrics or get_metrics()
     router = router or Router(local_provider=provider, metrics=metrics)
     # RAG defaults to the offline embedder + SQLite store (rooted at settings.home/rag so
@@ -479,13 +483,12 @@ def _default_model_problem(provider: ModelProvider, registry: Registry) -> str |
     model and falls back to the catalog default — so the operator asked for one model and
     would be served another with every probe green. Readiness says so instead.
     """
-    override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
-    if override and registry.get(override) is None:
-        return (
-            f"HEARTH_DEFAULT_MODEL={override!r} is not in the model registry "
-            f"(config/models.yaml); refusing to report ready while 'auto' would be served "
-            f"by {registry.default_id!r} instead"
-        )
+    from ..registry import UnregisteredDefaultModelError
+
+    try:  # create_app already refused this; kept so readiness can never disagree with it
+        registry.require_default()
+    except UnregisteredDefaultModelError as exc:
+        return str(exc)
     resolve = getattr(provider, "resolve", None)
     if callable(resolve):
         try:
