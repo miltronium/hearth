@@ -6,6 +6,8 @@ ported to assert the refusal; each was run against 3caecb0 first and promoted th
 
     H2  `git replace` / info/grafts / a forged commit-graph fake "the prereg commit is an
         ancestor of the HEAD recorded at the first measurement" (B-120)
+    H3  the same served weights re-registered under a new id with a junk file beside them
+        were a "fresh, never-measured" adapter (B-121)
 """
 
 from __future__ import annotations
@@ -17,10 +19,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 import test_promotion_evidence as pe
-from hearth.providers.base import GenResult
 from test_promotion_evidence import World
+
+from hearth.providers.base import GenResult
 
 
 class _WeightsProvider:
@@ -186,3 +188,96 @@ def test_H2_ambient_git_environment_cannot_redirect_the_gate(tmp_path, monkeypat
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     status = prereg.verify_committed(w.prereg)
     assert status.committed, status.reason
+
+
+# -- H3: the same served weights under a new id are not fresh, whatever sits beside them ---
+
+
+def test_H3_same_weights_new_id_plus_a_junk_file_is_not_a_fresh_adapter(tmp_path):
+    """Reviewer R1: peek a1 (PASS), then register its weights + a README as a2."""
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.commit("golden.jsonl")
+    _peek(w)
+    _adapter(w, "a2", extra_file="README")  # identical served weights, new id, extra file
+    w.write_prereg()
+    w.commit("prereg.yaml")
+    result = w.eval("a2", "--prereg", str(w.prereg), "--promote")
+    _refused(result, w, "a2")
+
+
+def _safetensors(tensors: dict[str, bytes], metadata: dict | None = None,
+                 reverse: bool = False) -> bytes:
+    import json
+
+    header, offset, blobs = {}, 0, []
+    for name in sorted(tensors, reverse=reverse):
+        data = tensors[name]
+        header[name] = {"dtype": "U8", "shape": [len(data)],
+                        "data_offsets": [offset, offset + len(data)]}
+        offset += len(data)
+        blobs.append(data)
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    raw = json.dumps(header).encode()
+    return struct.pack("<Q", len(raw)) + raw + b"".join(blobs)
+
+
+def _served_dir(root: Path, name: str, *, st: bytes, cfg: str | None) -> Path:
+    path = root / name
+    path.mkdir()
+    (path / "adapters.safetensors").write_bytes(st)
+    if cfg is not None:
+        (path / "adapter_config.json").write_text(cfg)
+    return path
+
+
+def test_H3_served_digest_ignores_what_mlx_lm_does_not_load(tmp_path):
+    from hearth.registry.adapters import adapter_served_sha, adapter_weights_sha
+
+    tensors = {"layers.0.lora_a": b"\x01\x02", "layers.0.lora_b": b"\x03\x04"}
+    cfg = '{"fine_tune_type": "lora", "num_layers": 8, "lora_parameters": {"rank": 8}}'
+    a = _served_dir(tmp_path, "a", st=_safetensors(tensors, {"format": "mlx"}), cfg=cfg)
+    b = _served_dir(tmp_path, "b", st=_safetensors(tensors, {"note": "x"}, reverse=True),
+                    cfg='{"num_layers": 8, "lora_parameters": {"rank": 8}, "seed": 7,\n'
+                        ' "data": "/elsewhere"}')
+    (b / "README.md").write_text("same adapter")
+    (b / "0000100_adapters.safetensors").write_bytes(b"a checkpoint mlx_lm never opens")
+    assert adapter_weights_sha(a) != adapter_weights_sha(b)  # different bytes on disk...
+    assert adapter_served_sha(a) == adapter_served_sha(b) != ""  # ...same adapter served
+
+
+@pytest.mark.parametrize(
+    ("tensors", "cfg"),
+    [
+        ({"layers.0.lora_a": b"\x01\x02", "layers.0.lora_b": b"\x03\x05"}, None),  # a weight
+        ({"layers.0.lora_a": b"\x01\x02", "layers.0.lora_c": b"\x03\x04"}, None),  # a name
+        ({"layers.0.lora_a": b"\x01\x02", "layers.0.lora_b": b"\x03\x04"},
+         '{"num_layers": 16, "lora_parameters": {"rank": 8}}'),  # the config mlx_lm reads
+        ({"layers.0.lora_a": b"\x01\x02", "layers.0.lora_b": b"\x03\x04"},
+         '{"fine_tune_type": "dora", "num_layers": 8, "lora_parameters": {"rank": 8}}'),
+    ],
+)
+def test_H3_served_digest_changes_with_anything_mlx_lm_loads(tmp_path, tensors, cfg):
+    from hearth.registry.adapters import adapter_served_sha
+
+    base_cfg = '{"num_layers": 8, "lora_parameters": {"rank": 8}}'
+    base = _served_dir(tmp_path, "base", cfg=base_cfg,
+                       st=_safetensors({"layers.0.lora_a": b"\x01\x02",
+                                        "layers.0.lora_b": b"\x03\x04"}))
+    other = _served_dir(tmp_path, "other", st=_safetensors(tensors), cfg=cfg or base_cfg)
+    assert adapter_served_sha(base) != adapter_served_sha(other)
+
+
+def test_H3_a_missing_config_is_not_the_same_as_a_present_one(tmp_path):
+    from hearth.registry.adapters import adapter_served_sha
+
+    st = _safetensors({"t": b"\x01"})
+    with_cfg = _served_dir(tmp_path, "c", st=st, cfg='{"num_layers": 8}')
+    without = _served_dir(tmp_path, "n", st=st, cfg=None)
+    assert adapter_served_sha(with_cfg) != adapter_served_sha(without) != ""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("nothing mlx_lm loads")
+    assert adapter_served_sha(empty) == ""
+    assert adapter_served_sha(tmp_path / "missing") == ""

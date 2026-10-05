@@ -124,16 +124,23 @@ def find(records: list[dict], mac: object) -> dict | None:
     return next((r for r in records if _mac(r) == mac), None)
 
 
-def first_measurement(records: list[dict], *, adapter_id: str, weights_sha: str) -> dict | None:
-    """The earliest record of this adapter — matched by id OR by weights digest.
+def first_measurement(
+    records: list[dict], *, adapter_id: str, weights_sha: str, served_sha: str = ""
+) -> dict | None:
+    """The earliest record of this adapter — matched by id, weights digest OR served digest.
 
     Matching the weights too means registering the same weights under a fresh id does not
-    produce a fresh, "never measured" adapter.
+    produce a fresh, "never measured" adapter. ``weights_sha`` hashes every file in the
+    adapter directory, names included, so the same weights plus a README were "new" (B-121);
+    ``served_sha`` (:func:`hearth.registry.adapters.adapter_served_sha`) covers only what
+    mlx_lm loads, so a junk file, a renamed checkpoint or reformatted config metadata does
+    not reset the first measurement.
     """
     return next(
         (r for r in records
          if r.get("adapter_id") == adapter_id
-         or (weights_sha and r.get("weights_sha") == weights_sha)),
+         or (weights_sha and r.get("weights_sha") == weights_sha)
+         or (served_sha and r.get("served_sha") == served_sha)),
         None,
     )
 

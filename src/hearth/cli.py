@@ -1508,7 +1508,7 @@ def eval_adapter(
 
     from .config import Settings
     from .registry import AdapterError
-    from .registry.adapters import adapter_weights_sha
+    from .registry.adapters import adapter_served_sha, adapter_weights_sha
     from .serving.pool import AUTO_MODEL_IDS
     from .training.attest import AttestationError, load_key, sign
     from .training.eval import (
@@ -1570,6 +1570,9 @@ def eval_adapter(
             "scored as the base model."
         )
         raise typer.Exit(code=1) from None
+    # What serving loads (B-121): the identity that matches the same weights re-registered
+    # under a new id with extra files beside them.
+    candidate_served = adapter_served_sha(candidate_path)
 
     # Read the golden set ONCE: these bytes are what is scored AND what is compared with the
     # committed blob (B-078), so a file swapped between the git check and the scoring
@@ -1626,6 +1629,7 @@ def eval_adapter(
         measurement = ledger_append(home, {
             "adapter_id": adapter_id,
             "weights_sha": candidate_weights,
+            "served_sha": candidate_served,
             "task": entry.task,
             "base_model": base_model,
             "golden_sha": golden_set.sha,
@@ -1647,7 +1651,8 @@ def eval_adapter(
 
     def _first_measurement() -> dict:
         records = ledger_read(home, key)  # LedgerError: a broken chain refuses
-        first = first_measurement(records, adapter_id=adapter_id, weights_sha=candidate_weights)
+        first = first_measurement(records, adapter_id=adapter_id, weights_sha=candidate_weights,
+                                  served_sha=candidate_served)
         return first if first is not None else measurement
 
     def _generate_with(adapter_path: str | None, model: str | None = None):
@@ -2304,7 +2309,8 @@ def adapters_promote(
         console.print("[red]Promotion refused:[/red] " + "; ".join(problems))
         raise typer.Exit(code=1)
     first = first_measurement(records, adapter_id=adapter_id,
-                              weights_sha=str(payload.get("candidate_weights_sha") or ""))
+                              weights_sha=str(payload.get("candidate_weights_sha") or ""),
+                              served_sha=str(this.get("served_sha") or ""))
     try:
         status = check_provenance(
             registration,
