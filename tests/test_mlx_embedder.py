@@ -97,6 +97,36 @@ def test_a_missing_embedding_model_is_refused_without_loading(fake_mlx):
     assert loads == []  # mlx_lm.load — the call that downloads a bare id — never ran
 
 
+def test_the_load_error_reads_cleanly_and_names_the_real_fix(fake_mlx):
+    """It used to render "...HEARTH_ALLOW_DOWNLOADS=1.. Pre-pull it from an unrestricted
+    terminal (network is blocked here)." — a doubled period and sandbox advice that does not
+    apply on the operator's machine."""
+    with pytest.raises(EmbeddingUnavailableError) as excinfo:
+        MLXEmbedder(REPO).embed(["hello"])
+    message = str(excinfo.value)
+    assert ".." not in message
+    assert "unrestricted terminal" not in message and "network is blocked" not in message
+    assert "hearth models pull" in message
+    assert "B-011" in message and "HEARTH_EMBEDDER=hash" in message
+
+
+def test_a_non_disk_load_failure_says_weights_must_be_on_disk(fake_mlx, monkeypatch):
+    """mlx-lm itself refusing (B-011: "Model type bert not supported.") gets the on-disk
+    requirement and the B-011 note, with one period."""
+    loads, _, tmp_path = fake_mlx
+    _plant(tmp_path / "hub")
+
+    def bert_refused(path):
+        raise ValueError("Model type bert not supported.")
+
+    monkeypatch.setattr(sys.modules["mlx_lm"], "load", bert_refused)
+    with pytest.raises(EmbeddingUnavailableError) as excinfo:
+        MLXEmbedder(REPO).embed(["hello"])
+    message = str(excinfo.value)
+    assert "Model type bert not supported." in message and ".." not in message
+    assert "`hearth models pull <registry id>`" in message and "B-011" in message
+
+
 def test_a_cached_embedding_model_loads_from_its_path(fake_mlx):
     loads, _, tmp_path = fake_mlx
     snapshot = _plant(tmp_path / "hub")

@@ -146,19 +146,40 @@ class MLXEmbedder:
                 "(install: "
                 "uv sync --extra mlx --extra mcp --extra dev --extra files --extra embeddings)"
             ) from exc
-        try:
-            from ..providers.mlx import resolve_local_model
+        from ..providers.mlx import resolve_local_model
 
+        try:
             # Disk-only resolution, like the chat provider: a bare repo id handed to
             # mlx_lm.load is a network download, and an embed call must never be one.
             self._model, self._tokenizer = load(resolve_local_model(self.model_id))
-        except Exception as exc:  # pragma: no cover - needs a pre-pulled model
-            raise EmbeddingUnavailableError(
-                f"could not load embedding model {self.model_id!r}: {exc}. "
-                "Pre-pull it from an unrestricted terminal (network is blocked here)."
-            ) from exc
+        except Exception as exc:
+            raise EmbeddingUnavailableError(_load_failure_message(self.model_id, exc)) from exc
         # Infer dim from a probe embedding so downstream stores size their columns right.
         self.dim = len(self.embed(["dim probe"])[0]) if self.dim == 0 else self.dim
+
+
+def _load_failure_message(model_id: str, exc: Exception) -> str:
+    """Why the MLX embedder could not load, and the fix that applies.
+
+    A ``ModelNotOnDiskError`` already names the right fix for its kind of id (pull a
+    registry id, register an unregistered one, or "no such path"), so it is quoted as is;
+    any other failure gets the on-disk requirement spelled out. Either way the operator is
+    told about B-011: mlx-lm has no BERT architecture, so the registered bge embedder fails
+    to load even with its weights on disk.
+    """
+    from ..providers.mlx import ModelNotOnDiskError
+
+    reason = str(exc).strip().rstrip(".")
+    message = f"could not load embedding model {model_id!r}: {reason}."
+    if not isinstance(exc, ModelNotOnDiskError):
+        message += (
+            " Its weights must be on disk: fetch a registered embedder with "
+            "`hearth models pull <registry id>` (hearth models list)."
+        )
+    return message + (
+        " Note: mlx-lm has no BERT architecture, so the registered bge embedder cannot load "
+        "even when it is on disk (docs/BUGS.md B-011); HEARTH_EMBEDDER=hash works offline."
+    )
 
 
 def mlx_embeddings_available() -> bool:
