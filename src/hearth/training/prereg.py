@@ -33,6 +33,7 @@ from .eval import (
     DEFAULT_MIN_N,
     EvalConfig,
     EvalReport,
+    check_bar,
 )
 
 # Baselines a pre-registration requires by default (LEARNING_plan §3.2.4).
@@ -195,15 +196,51 @@ def load_prereg(path: Path | str) -> PreRegistration:
         golden_sha=str(obj["golden_sha"]),
         golden_version=str(obj.get("golden_version", "")),
         metric=str(obj["metric"]),
-        alpha=float(bar.get("alpha", DEFAULT_ALPHA)),
-        min_effect=float(bar.get("min_effect", 0.0)),
-        min_n=int(bar.get("min_n", DEFAULT_MIN_N)),
-        test=str(bar.get("test", "auto")),
         must_beat_baselines=tuple(str(b) for b in baselines),
         generation=config,
         hypothesis=str(obj.get("hypothesis", "")).strip(),
         raw=obj,
+        **_checked_bar(bar),
     )
+
+
+def _checked_bar(bar: dict) -> dict[str, object]:
+    """Range-check the registered bar; raise :class:`PreRegError` on anything looser (B-062).
+
+    YAML happily yields ``.nan``, ``1.0`` and ``-1`` here, and each used to load: NaN made
+    every gate comparison False (so nothing refused), a negative ``min_effect`` made the
+    baseline clause vacuous, ``alpha: 1.0`` / ``min_n: 1`` switched off significance and the
+    size floor — a 0.033 candidate passed against a 1.0 incumbent. A pre-registration
+    records the operator's bar; it may make the gate STRICTER than CLAUDE.md §7, never
+    looser:
+
+    * ``alpha`` in (0, 0.05] — §7's floors are derived at 0.05 (see ``eval.MAX_ALPHA``);
+    * ``min_effect`` finite and >= 0;
+    * ``min_n`` an integer >= ``DEFAULT_MIN_N`` (30). The gate's default IS the power
+      floor; a prereg that could lower it would turn the floor into a per-experiment opt-out
+      — and the operator writes the prereg after seeing how big the golden set is. Raise it,
+      never lower it (the mathematical n>=5 floor stays available to library callers of
+      ``evaluate_gate``, which cannot reach a promotion without a prereg);
+    * ``test`` one of ``auto`` / ``mcnemar`` / ``bootstrap``.
+
+    No coercion: ``float("nan")`` and ``int(30.5)`` are exactly how a bad value used to slip
+    through, so the YAML value must already be the right kind of number.
+    """
+    alpha = bar.get("alpha", DEFAULT_ALPHA)
+    min_effect = bar.get("min_effect", 0.0)
+    min_n = bar.get("min_n", DEFAULT_MIN_N)
+    test = bar.get("test", "auto")
+    try:
+        check_bar(alpha=alpha, margin=min_effect, min_n=min_n, test=test,
+                  min_n_floor=DEFAULT_MIN_N)
+    except ValueError as exc:
+        raise PreRegError(f"pre-registered bar refused: {exc}") from None
+    return {
+        "alpha": float(alpha),
+        "min_effect": float(min_effect),
+        "min_n": int(min_n),
+        "test": str(test),
+    }
 
 
 def verify_committed(path: Path | str) -> GitStatus:

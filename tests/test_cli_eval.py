@@ -180,8 +180,9 @@ def test_eval_promote_refused_when_the_prereg_is_not_committed(tmp_path, real_li
     _seed_adapter(tmp_path)
     golden = _golden(tmp_path, ROWS)
     path = _committed_prereg(tmp_path, ROWS)
+    # Any edit after the commit — even a stricter, valid bar — is not the registered one.
     (tmp_path / "prereg.yaml").write_text(
-        (tmp_path / "prereg.yaml").read_text().replace("min_n: 30", "min_n: 1")
+        (tmp_path / "prereg.yaml").read_text().replace("min_n: 30", "min_n: 31")
     )
     result = runner.invoke(
         app,
@@ -235,6 +236,66 @@ def test_eval_promotes_a_real_significant_lift_under_a_committed_prereg(tmp_path
     assert len(proof["prereg_sha"]) == 64
     assert proof["golden_sha"] == _golden_sha(ROWS)
     assert proof["baselines"]["majority_label"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "bar",
+    [{"alpha": 1.0, "min_effect": -1.0, "min_n": 1}, {"alpha": float("nan")},
+     {"min_effect": float("nan")}],
+)
+def test_eval_promote_refuses_a_committed_prereg_whose_bar_disables_the_gate(
+    tmp_path, monkeypatch, bar
+):
+    """B-062 through the CLI: the candidate is WORSE than base, the bar is committed."""
+    _seed_adapter(tmp_path)
+    golden = _golden(tmp_path, ROWS)
+    path = _committed_prereg(tmp_path, ROWS, **bar)
+    # The adapter answers wrongly everywhere; the base parrots "A" (0.5).
+    worse = {r["prompt"]: "WRONG" for r in ROWS}
+    monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _FakeProvider(worse))
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24",
+         "--prereg", path, "--promote"],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "bar refused" in result.stdout
+    from hearth.registry import AdapterStore
+
+    assert AdapterStore(path=tmp_path / ".hearth" / "adapters.json").get(
+        "extract-1"
+    ).status == "candidate"
+
+
+@pytest.mark.parametrize(
+    "flags", [["--alpha", "1.0"], ["--margin", "-1"], ["--min-n", "1"], ["--alpha", "nan"]]
+)
+def test_eval_refuses_to_measure_under_a_bar_that_disables_a_clause(tmp_path, real_lift, flags):
+    _seed_adapter(tmp_path)
+    golden = _golden(tmp_path, ROWS)
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24",
+         *flags],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "PASS" not in result.stdout
+
+
+def test_prereg_init_refuses_to_scaffold_a_bar_it_would_later_refuse(tmp_path):
+    golden = _golden(tmp_path, ROWS)
+    out = tmp_path / "p.yaml"
+    result = runner.invoke(
+        app,
+        ["prereg", "init", "--task", "extract", "--golden", golden, "--out", str(out),
+         "--alpha", "0.5"],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 1
+    assert "alpha" in result.stdout
+    assert not out.exists()
 
 
 def test_eval_report_json_carries_the_vectors_and_provenance(tmp_path, real_lift):

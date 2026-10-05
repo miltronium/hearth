@@ -1758,9 +1758,18 @@ def prereg_init(
       hearth prereg init --task classify --golden golden.jsonl \\
         --out prereg/classify.yaml
 
-    Exit: 0 written (or printed); 1 the golden set is unreadable or empty.
+    Exit: 0 written (or printed); 1 the golden set is unreadable or empty, or the bar is
+    looser than the gate allows (alpha above 0.05, negative min-effect, min-n below 30).
     """
+    from .training.eval import DEFAULT_MIN_N, check_bar
     from .training.prereg import template
+
+    try:
+        check_bar(alpha=alpha, margin=min_effect, min_n=min_n, test="auto",
+                  min_n_floor=DEFAULT_MIN_N)
+    except ValueError as exc:
+        console.print(f"[red]Refusing to scaffold this bar:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
     try:
         golden_set = _load_golden_set(golden, task=task)

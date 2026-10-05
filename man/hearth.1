@@ -752,7 +752,7 @@ hearth prereg init \-\-task classify \-\-golden golden.jsonl \e
 .fi
 .RE
 .PP
-Exit: 0 written (or printed); 1 the golden set is unreadable or empty.
+Exit: 0 written (or printed); 1 the golden set is unreadable or empty, or the bar is looser than the gate allows (alpha above 0.05, negative min\-effect, min\-n below 30).
 .PP
 Arguments and options:
 .RS 4

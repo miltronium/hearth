@@ -229,3 +229,78 @@ def test_require_prereg_refuses_a_run_that_drifted_from_the_plan(tmp_path):
     _git(tmp_path, "commit", "-qm", "prereg")
     with pytest.raises(PreRegError, match="does not match"):
         require_prereg(path, _candidate_report())
+
+
+# -- B-062: the bar is range-checked at load --------------------------------------------
+#
+# Every comparison in the gate is False under NaN, a negative margin makes the baseline
+# clause vacuous, and alpha=1 / min_n=1 switch off significance and the size floor. A
+# prereg is the operator's bar, so it may only make the gate STRICTER than CLAUDE.md §7:
+# alpha in (0, 0.05], min_effect >= 0, min_n >= 30, a known test, every number finite.
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("alpha", float("nan"), "alpha"),
+        ("alpha", float("inf"), "alpha"),
+        ("alpha", 1.0, "alpha"),
+        ("alpha", 0.051, "alpha"),
+        ("alpha", 0.0, "alpha"),
+        ("alpha", -0.01, "alpha"),
+        ("alpha", "loose", "alpha"),
+        ("alpha", True, "alpha"),
+        ("min_effect", float("nan"), "min_effect"),
+        ("min_effect", float("inf"), "min_effect"),
+        ("min_effect", -1.0, "min_effect"),
+        ("min_effect", -1e-9, "min_effect"),
+        ("min_n", 1, "min_n"),
+        ("min_n", 5, "min_n"),
+        ("min_n", 29, "min_n"),
+        ("min_n", 30.5, "min_n"),
+        ("min_n", float("nan"), "min_n"),
+        ("min_n", "thirty", "min_n"),
+        ("test", "t-test", "test"),
+        ("test", "", "test"),
+    ],
+)
+def test_a_prereg_bar_that_would_loosen_the_gate_is_refused(tmp_path, field, value, match):
+    body = _prereg_body()
+    body["bar"] = {**body["bar"], field: value}
+    with pytest.raises(PreRegError, match=match):
+        load_prereg(_write(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("alpha", 0.05),
+        ("alpha", 0.01),
+        ("min_effect", 0.0),
+        ("min_effect", 0.1),
+        ("min_n", 30),
+        ("min_n", 200),
+        ("test", "auto"),
+        ("test", "mcnemar"),
+        ("test", "bootstrap"),
+    ],
+)
+def test_a_prereg_may_tighten_the_bar(tmp_path, field, value):
+    body = _prereg_body()
+    body["bar"] = {**body["bar"], field: value}
+    prereg = load_prereg(_write(tmp_path, body))
+    assert getattr(prereg, field) == value
+
+
+def test_the_reviewer_nan_and_loose_bars_no_longer_load(tmp_path):
+    """The B-062 reproducer verbatim: both bars used to load and PASS a 0.033 vs 1.0 run."""
+    for bar in ("{alpha: .nan, min_effect: .nan, min_n: 30}",
+                "{alpha: 1.0, min_effect: -1.0, min_n: 1}"):
+        path = tmp_path / "p.yaml"
+        path.write_text(
+            f"task: t\ngolden_sha: {'cd' * 32}\nmetric: exact\nhypothesis: h\n"
+            f"stopping_rule: s\nkill_condition: k\nbar: {bar}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(PreRegError):
+            load_prereg(path)

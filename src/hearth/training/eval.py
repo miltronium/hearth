@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,7 @@ from .stats import (
     discordant_pairs,
     is_binary,
     mcnemar_exact_p,
+    min_n_for_alpha,
     paired_bootstrap,
 )
 
@@ -51,6 +53,16 @@ DEFAULT_ALPHA = 0.05
 # when the incumbent misses every single item the candidate hits; 30 is the plan's working
 # bar for a set that can license a promotion against a competent incumbent.
 DEFAULT_MIN_N = 30
+
+# The loosest significance level any promotion may use (CLAUDE.md §7). The documented
+# floors are *derived at* alpha = 0.05: "n >= 5 is the mathematical floor at alpha=0.05"
+# because 0.5**5 < 0.05 <= 0.5**4, and min_n=30 is a power floor above that. Let alpha
+# rise to 0.10 and a 4-item set becomes promotable (min_n_for_alpha(0.1) == 4); at
+# alpha = 1 significance stops being a clause at all. A bar may be stricter, never looser.
+MAX_ALPHA = DEFAULT_ALPHA
+
+# The paired tests the gate knows. Anything else is refused rather than defaulted.
+GATE_TESTS = ("auto", "mcnemar", "bootstrap")
 
 # Degenerate baselines every candidate must beat (LEARNING_plan §3.2.4).
 BASELINE_EMPTY = "empty"
@@ -430,6 +442,84 @@ def _assert_comparable(candidate: EvalReport, incumbent: EvalReport) -> None:
         )
 
 
+def _is_number(value: object) -> bool:
+    """A real int/float (``bool`` is an ``int`` subclass and is NOT a number here)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def check_bar(
+    *, alpha: object, margin: object, min_n: object, test: object, min_n_floor: int | None = None
+) -> None:
+    """Raise :class:`ValueError` unless the bar leaves every gate clause able to refuse (B-062).
+
+    Every comparison the gate makes is False under NaN, so a NaN alpha or margin used to
+    switch off significance, the lift check and the baseline check at once; a negative
+    margin made "beats the baseline" vacuous; ``alpha=1`` / ``min_n=1`` disabled
+    significance and the size floor. The rules:
+
+    * every number is finite (and ``min_n`` an integer);
+    * ``0 < alpha <= MAX_ALPHA`` (0.05 — see :data:`MAX_ALPHA`);
+    * ``margin >= 0`` — a lift *below* the incumbent is not a lift;
+    * ``min_n >= min_n_floor``; by default the mathematical floor for ``alpha``
+      (:func:`~hearth.training.stats.min_n_for_alpha`, 5 at 0.05), below which no outcome
+      can clear alpha and the size clause would be dead weight. A pre-registration passes
+      the stricter :data:`DEFAULT_MIN_N` power floor;
+    * ``test`` is one of :data:`GATE_TESTS`.
+    """
+    if not _is_number(alpha) or not math.isfinite(alpha):  # type: ignore[arg-type]
+        raise ValueError(f"alpha must be a finite number, got {alpha!r}")
+    if not 0.0 < alpha <= MAX_ALPHA:  # type: ignore[operator]
+        raise ValueError(
+            f"alpha must be in (0, {MAX_ALPHA:g}], got {alpha!r}: the n>=5 floor and the "
+            f"min_n={DEFAULT_MIN_N} power floor are derived at alpha={MAX_ALPHA:g} "
+            "(CLAUDE.md §7) — a bar may be stricter, never looser"
+        )
+    if not _is_number(margin) or not math.isfinite(margin):  # type: ignore[arg-type]
+        raise ValueError(f"min_effect/margin must be a finite number, got {margin!r}")
+    if margin < 0.0:  # type: ignore[operator]
+        raise ValueError(
+            f"min_effect/margin must be >= 0, got {margin!r}: a negative margin lets a "
+            "candidate that scores BELOW the incumbent and the baselines pass"
+        )
+    if not _is_number(min_n) or not math.isfinite(min_n) or min_n != int(min_n):  # type: ignore[arg-type]
+        raise ValueError(f"min_n must be an integer, got {min_n!r}")
+    floor = min_n_for_alpha(float(alpha)) if min_n_floor is None else min_n_floor  # type: ignore[arg-type]
+    if min_n < floor:  # type: ignore[operator]
+        raise ValueError(
+            f"min_n must be >= {floor}, got {min_n!r}: below that no golden set can license "
+            "a promotion at this alpha"
+        )
+    if test not in GATE_TESTS:
+        raise ValueError(f"unknown test: {test!r} (use 'auto', 'mcnemar', or 'bootstrap')")
+
+
+def _check_report_values(report: EvalReport, label: str) -> None:
+    """Raise :class:`GateProvenanceError` unless ``report``'s numbers are a real measurement.
+
+    Every per-example score is a finite number in [0, 1], and the recorded mean is the mean
+    of that vector. The gate decides on the vectors; a ``score`` that disagrees with its own
+    vector (or a NaN anywhere) is not a measurement the harness produced.
+    """
+    values = report.per_example
+    bad = [v for v in values if not _is_number(v) or not math.isfinite(v) or not 0.0 <= v <= 1.0]
+    if bad:
+        raise GateProvenanceError(
+            f"{label} report has per-example scores that are not finite numbers in [0, 1] "
+            f"(e.g. {bad[0]!r}) — not a measurement"
+        )
+    if not _is_number(report.score) or not math.isfinite(report.score):
+        raise GateProvenanceError(f"{label} report score is not finite: {report.score!r}")
+    if values and abs(report.score - sum(values) / len(values)) > 1e-9:
+        raise GateProvenanceError(
+            f"{label} report score {report.score!r} is not the mean of its per-example vector "
+            f"({sum(values) / len(values)!r}) — the report was edited"
+        )
+    if values and report.n and report.n != len(values):
+        raise GateProvenanceError(
+            f"{label} report says n={report.n} but carries {len(values)} per-example scores"
+        )
+
+
 def evaluate_gate(
     candidate: EvalReport,
     incumbent: EvalReport | None,
@@ -465,7 +555,15 @@ def evaluate_gate(
 
     Returns a :class:`GateResult` carrying the verdict and all of its reasoning; it never
     returns a bare bool, so a promotion proof can be audited rather than believed.
+
+    It fails closed (B-062): a bar that would disable a clause (non-finite, ``alpha``
+    outside (0, 0.05], negative ``margin``, ``min_n`` below the mathematical floor, unknown
+    ``test``) raises ``ValueError`` (:func:`check_bar`); a report with a non-finite or
+    out-of-range score, or a ``score`` that is not the mean of its vector, raises
+    :class:`GateProvenanceError`; and every comparison is written so that a NaN that slips
+    past those checks *adds* a refusal instead of silently satisfying it.
     """
+    check_bar(alpha=alpha, margin=margin, min_n=min_n, test=test)
     reasons: list[str] = []
     baselines = baselines or {}
     baseline_scores = {name: rep.score for name, rep in baselines.items()}
@@ -499,6 +597,14 @@ def evaluate_gate(
             "candidate report carries no per-example vector; the gate is paired and "
             "cannot run on a mean alone"
         )
+    _check_report_values(candidate, "candidate")
+    _check_report_values(incumbent, incumbent_role)
+    for name, report in sorted(baselines.items()):
+        _check_report_values(report, f"baseline {name!r}")
+        try:
+            _assert_comparable(candidate, report)
+        except GateProvenanceError as exc:
+            raise GateProvenanceError(f"baseline {name!r} is not comparable: {exc}") from None
     if not candidate.has_provenance:
         reasons.append(
             "candidate report has no provenance (golden_sha/config) — unverifiable"
@@ -510,7 +616,8 @@ def evaluate_gate(
             f"golden set too small: n={n} < min_n={min_n} "
             "(see stats.min_n_for_alpha for what a set this size can license)"
         )
-    if candidate.score <= incumbent.score + margin:
+    # Written positively: under NaN `not (a > b)` is True, so a NaN adds a refusal.
+    if not candidate.score > incumbent.score + margin:
         reasons.append(
             f"no lift: candidate {candidate.score:.4f} does not exceed "
             f"{incumbent_role} {incumbent.score:.4f} + margin {margin:g}"
@@ -546,7 +653,7 @@ def evaluate_gate(
         p_value = boot.p_value
         ci_low, ci_high = boot.ci_low, boot.ci_high
 
-    if p_value > alpha:
+    if p_value is None or not math.isfinite(p_value) or not p_value <= alpha:
         detail = f"b={b}, c={c}" if chosen == "mcnemar_exact" else f"ci_low={ci_low:.4f}"
         reasons.append(
             f"not significant: {chosen} p={p_value:.4f} > alpha={alpha:g} ({detail})"
@@ -554,7 +661,7 @@ def evaluate_gate(
 
     # -- degenerate baselines ------------------------------------------------------------
     for name, report in sorted(baselines.items()):
-        if candidate.score <= report.score + margin:
+        if not candidate.score > report.score + margin:
             reasons.append(
                 f"fails degenerate baseline {name!r}: candidate {candidate.score:.4f} "
                 f"does not exceed {report.score:.4f} + margin {margin:g}"
@@ -644,6 +751,8 @@ __all__ = [
     "BASELINE_MAJORITY",
     "DEFAULT_ALPHA",
     "DEFAULT_MIN_N",
+    "GATE_TESTS",
+    "MAX_ALPHA",
     "EvalConfig",
     "EvalReport",
     "GateProvenanceError",
@@ -655,6 +764,7 @@ __all__ = [
     "as_golden_set",
     "baseline_reports",
     "beats_incumbent",
+    "check_bar",
     "check_determinism",
     "default_judge",
     "evaluate_gate",
