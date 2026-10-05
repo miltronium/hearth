@@ -108,17 +108,20 @@ must fail when the fix is reverted.
 - ~~[B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)~~ — fixed in `13038c5`
 - ~~[B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)~~ — fixed in `a731e8c`
 - [B-063](#b-063) `hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerles… (P0)
-- [B-064](#b-064) `/ready` judges only the registry default; under a routing ladder the default may never se… (P1)
-- [B-065](#b-065) Routing validation gaps: `defaults.local_model` is never validated; a class rung may name … (P1)
-- [B-066](#b-066) Failure accounting gaps: an unservable ladder rung (404 / stream error event) writes no Re… (P1)
+- ~~[B-064](#b-064) `/ready` judges only the registry default; under a routing ladder the default may never se… (P1)~~ — fixed in `9645883`
+- ~~[B-065](#b-065) Routing validation gaps: `defaults.local_model` is never validated; a class rung may name … (P1)~~ — fixed in `ed923e1`
+- ~~[B-066](#b-066) Failure accounting gaps: an unservable ladder rung (404 / stream error event) writes no Re… (P1)~~ — fixed in `03f79b9`
 - [B-067](#b-067) `doctor --offline` says SAFE with a plugin embedder or vector store, which receive every R… (P1)
-- [B-068](#b-068) The auto→echo fallback stub labels its echo with the requested real model and credits toke… (P2)
-- [B-069](#b-069) LoRA adapter variants are full base reloads the ModelManager never counts (P2)
-- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2) — eval half fixed in `58890fa`; serving side open
-- [B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)
-- [B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)
-- [B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)
+- ~~[B-068](#b-068) The auto→echo fallback stub labels its echo with the requested real model and credits toke… (P2)~~ — fixed in `d5a7055`
+- ~~[B-069](#b-069) LoRA adapter variants are full base reloads the ModelManager never counts (P2)~~ — fixed in `e8fcb8a`
+- ~~[B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2)~~ — eval half fixed in `58890fa`, serving side in `36157af`
+- ~~[B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)~~ — fixed in `1a872a2`
+- ~~[B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)~~ — fixed in `7c9e510`
+- ~~[B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)~~ — fixed in `d4eb825` (2 of 3) and `dd4b774` (adapter field)
 - ~~[B-074](#b-074) `hearth_map_draft.py` printed a preamble as column names, drafted skip_rows 0, printed file names and a total~~ — fixed in `052d3af` (P0)
+- [B-075](#b-075) `routing.finance.yaml` does not pin the `embed` class: `intent: embed` reaches the registry default 7B (P3)
+- [B-076](#b-076) CLI prints "Routing profile not found:" for a profile that exists but names an unservable rung (P3)
+- [B-077](#b-077) Status/doctor report "policy loader unavailable" for a profile with a bad model rung, hiding the reason (P3)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1141,19 +1144,42 @@ must fail when the fix is reverted.
 ### B-064
 **`/ready` judges only the registry default; under a routing ladder the default may never serve**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Priority:** P1 · **Status:** **FIXED** in `9645883` · **Effort:** S–M
+- **Fix:** `/ready` judges every model `router.route.policy_rungs` says an `auto` request can
+  reach (each class rung, else `defaults.local_model`, else the registry default only if some
+  class falls through), with the existing outcome rules; the body carries per-model `models`
+  (`status`, `loaded`, `serves`, `reason`/`detail`). Warmup loads the most-used rung first, then
+  each further rung that fits under the ceiling without evicting. Measured [in-process, fake
+  weights]: finance profile with the 14B absent → `503 failed` naming the 14B, `models[3B]`
+  ready, and the auto chat really 503s. Finding filed as B-075 (unpinned `embed` class).
 - **Evidence:** app.py readiness (~185-249) vs Router._local_model (route.py ~439-462). Finance profile with the 14B absent: /ready 200 while model=auto → 503 not on disk; warmup loads a 7B the profile never serves. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-065
 **Routing validation gaps: `defaults.local_model` is never validated; a class rung may name an embed model or echo**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Priority:** P1 · **Status:** **FIXED** in `ed923e1` · **Effort:** S–M
+- **Fix:** `defaults.local_model` and every class rung must be a registered chat model
+  (`load_policy`) servable by the active backend (`check_policy_servable`, run by `Router()`
+  for a file-loaded policy and by `create_app` always). A violation raises
+  `RoutingPolicyError` (a `RoutingProfileNotFoundError` subclass, so the CLI exits 2) and is
+  NOT degraded to the safe defaults — the fallback silently replaced the profile's ladder. A
+  structurally broken file still falls back per ADR-005 (see "Remains").
+- **Remains:** an unparseable or structurally invalid *selected* profile still degrades to the
+  safe defaults with only a log line — the same shape as B-008 (no egress, but a different
+  ladder than the operator selected). Left as ADR-005 behaviour; deciding it touches doctor
+  and status, which read the fallback. CLI wording is B-076; status wording is B-077.
 - **Evidence:** policy.py (~210-213, ~234). Typo'd defaults.local_model → policy loads, /ready 200, model=auto → 404; embed/echo rung → 404 at request time. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-066
 **Failure accounting gaps: an unservable ladder rung (404 / stream error event) writes no RequestRecord; that stream branch's [DONE] is untested; BudgetExhausted is never recorded**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Priority:** P1 · **Status:** **FIXED** in `03f79b9` · **Effort:** S–M
+- **Fix:** `Router.route` records an UnknownModelError from the local rung, and from a failed
+  escalation's local fallback (with `escalation_failed`), before re-raising;
+  `Router.provider_for` (shared with the stream) records a denied escalation (`failed`,
+  `served_by: remote`, `escalated: false`) before raising BudgetExhaustedError; the stream's
+  `model_not_found` branch records. Tests assert that branch's own error event then `[DONE]`;
+  deleting that `[DONE]` now fails 2 tests.
 - **Evidence:** route.py ~415-418 re-raises UnknownModelError around record_failure; app.py ~871-884 no record; mutations deleting [DONE] in that branch fail 0 tests. A remote failure then local UnknownModelError leaves the escalation unrecorded (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-067
@@ -1168,48 +1194,74 @@ must fail when the fix is reverted.
 ### B-068
 **The auto→echo fallback stub labels its echo with the requested real model and credits token savings**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** **FIXED** in `d5a7055` · **Effort:** S–M
+- **Fix:** the echo stub reports `model: "echo"` (result and stream terminal delta) whatever
+  was requested, and `is_stub_backend` zeroes `estimated_frontier_tokens_saved` on the plain
+  and stream paths. Same for an explicit `HEARTH_BACKEND=echo`.
 - **Evidence:** echo.py ~40, ~59 report req.model. /ready is 503 (correct) but POST model=Qwen-14B → 200 `model: ...14B`, text "[echo] hi", metrics credit estimated_frontier_tokens_saved. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-069
 **LoRA adapter variants are full base reloads the ModelManager never counts**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** **FIXED** in `e8fcb8a` · **Effort:** S–M
+- **Fix:** each (model, adapter) variant is its own ModelManager resident
+  (`<id>@adapter:<path>`), sized at the model's full `ram_gb`, LRU-evicted and refused like any
+  model; `/admin/models` shows each resident's `adapter`. Measured: base + 3 adapters → 4 loads
+  and `resident_ram_gb` 36.0 (was 9.0). Base weights are deliberately not shared: mlx_lm
+  0.29.1's `remove_lora_layers` restores only plain `LoRALinear` (not DoRA / embedding /
+  switch layers) and a `full` adapter overwrites base weights, so an in-place swap could leave
+  the previous adapter applied.
 - **Evidence:** MLXProvider._load_variant (mlx.py ~335-361) loads base+adapter per variant into _cache; 14B + 3 adapters ≈ 36 GB real vs resident_ram_gb 9.0 — above the 24 GB ceiling and the 30.15 GB working set. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-070
 **B-047 enforced at CLI call sites, not where the model is chosen**
 
-- **Priority:** P2 · **Status:** open (serving side); eval half **FIXED** in `58890fa` · **Effort:** S–M
+- **Priority:** P2 · **Status:** **FIXED** — eval half in `58890fa`, serving side in `36157af` · **Effort:** S–M
 - **Evidence:** mlx_pool().resolve("") with a bogus HEARTH_DEFAULT_MODEL → catalog default (warning only). Not gated: `hearth eval`, example scripts, direct API users; a mutation deleting eval's `_require_known_model` fails 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 - **Eval half (fixed):** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL
   (`require_default`), on an empty/`auto` base model, and on a base the registry cannot
   serve for any provider (not only a ModelPool); mutations deleting each check now fail
   tests (`tests/test_cli_eval.py`).
-- **Remains:** the enforcement is still at a CLI call site. `mlx_pool().resolve("")` (and so
-  direct API users and `examples/` scripts) still falls back to the catalog default with a
-  warning when HEARTH_DEFAULT_MODEL is unregistered; moving `require_default` into the pool
-  / `select_provider` is the serving-side fix.
+- **Serving side (fixed, `36157af`):** `serving.pool.resolve_model_id` (so `ModelPool.resolve`
+  of `""`/`"auto"`/`None`) and `Router._local_model`'s fall-through both use
+  `require_default()`, so the code that chooses the model raises
+  `UnregisteredDefaultModelError` for every entry point (examples, direct API users), with no
+  load performed.
 
 ### B-071
 **An abandoned agent run keeps the single MLX thread busy for up to its budget**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** **FIXED** in `1a872a2` · **Effort:** S–M
+- **Fix:** the agent body is wrapped in `_close_on_disconnect(on_close=cancel.set)`; the run
+  executes under `providers.base.cancel_scope`, which the MLX thread inherits (jobs run in a
+  copy of the caller's contextvars) and checks per token; the loop checks the flag before every
+  step (new stop reason `cancelled`); the router neither retries nor 503s a cancellation and
+  records it failed. A `: keepalive` SSE comment every second is what lets Starlette notice the
+  disconnect mid-step (in both ASGI modes it learns only between chunks). Tested through
+  Starlette's own `StreamingResponse.__call__` with held generators.
 - **Evidence:** agent_route.py wraps with _guarantee_done but not _close_on_disconnect, and closing would not stop work(); chat queues behind it (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-072
 **ModelManager evicts residents before knowing the new load will succeed**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S–M
+- **Priority:** P3 · **Status:** **FIXED** in `7c9e510` · **Effort:** S–M
+- **Fix:** `_admit` runs the provider's `preflight` (MLX: weights — and, since `e8fcb8a`, the
+  adapter path — resolve on disk, nothing loaded) after the ceiling check and before evicting;
+  a missing model leaves every resident loaded.
+- **Remains (by decision):** a load that passes preflight and then fails (corrupt checkpoint)
+  has already freed its victims; restoring them would overshoot the ceiling on every load or
+  cost a second reload. They stay `loaded_once` with weights on disk and reload on demand.
 - **Evidence:** manager.py _admit (~145-149): a request for a registered-but-not-pulled model evicts working residents, then fails (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-073
 **Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; config embed_model default is the 404 id; failed record `adapter` field differs by path**
 
-- **Priority:** P3 · **Status:** **FIXED (2 of 3)** in `d4eb825` — the example resolves
+- **Priority:** P3 · **Status:** **FIXED** — 2 of 3 in `d4eb825` (the example resolves
   `HEARTH_ROUTING_YAML` with `resolve_routing_selection` and exits 2 on a missing named
-  profile; `embed_model` defaults to the registered `-bf16` id. **Open:** the failed record's
-  `adapter` field differing between route.py ~266 and app.py ~889 · **Effort:** S–M
+  profile; `embed_model` defaults to the registered `-bf16` id); the failed record's `adapter`
+  field in `dd4b774`: on every failure path it is the adapter SELECTED for the attempt that
+  failed (explicit request, else the promoted default), documented on `RequestRecord.adapter`
+  · **Effort:** S–M
 - **Evidence:** run_finance_ladder.py ~400-402 (B-008 bypass); config.py ~46; route.py ~266 vs app.py ~889. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-074
@@ -1247,6 +1299,37 @@ must fail when the fix is reverted.
   Number,...`) would be taken as the header. Privacy holds (only vocabulary prints) and the
   trial parse refuses the draft, but the operator then writes that mapping by hand. A header
   with fewer than two vocabulary names (e.g. a non-English export) is refused, not drafted.
+
+### B-075
+**`config/routing.finance.yaml` does not pin the `embed` class: a chat with `intent: embed` reaches the registry default 7B**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `TASK_CLASSES` includes `embed` (router/classify.py:14-24) and an explicit
+  intent of `embed` is accepted; the finance profile pins the other 8 classes only, so
+  `Router.decide(..., intent="embed")` → `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`
+  (asserted in tests/test_ready_routing_ladder.py). Since B-064's fix readiness therefore
+  judges, and warmup loads, the 7B too — honest, but probably not the ladder's intent.
+- **Fix outline:** pin `embed` to a ladder rung in the profile (config owner), or have the
+  chat router refuse `embed` (embeddings go through /v1/embeddings).
+
+### B-076
+**The CLI says "Routing profile not found:" for a profile that exists but names an unservable rung**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** B-065's `RoutingPolicyError` subclasses `RoutingProfileNotFoundError` so
+  `cli._routing_profile_required` (src/hearth/cli.py ~614-629) catches it and exits 2 — but
+  prints the fixed prefix "Routing profile not found:" before the (correct) message.
+- **Fix outline:** catch `RoutingPolicyError` first with a "Routing profile unusable:" prefix.
+
+### B-077
+**Status / `doctor` report "policy loader unavailable" for a profile with a bad model rung**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `status/probes.py:_policy_outcome` (~333-337) catches any exception from
+  `load_policy` as `{"error": "policy loader unavailable"}`; since B-065 a bad rung raises
+  `RoutingPolicyError`, so the routing row FAILs (correct outcome) with a reason that hides
+  the real one (which rung, which file).
+- **Fix outline:** report `str(exc)` for a `RoutingProfileNotFoundError`.
 
 ---
 
@@ -1316,3 +1399,12 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `13038c5` | **B-061.** `adapters promote --report` needs an HMAC-signed report from `hearth eval` on this install, about this adapter (id, task, base, weights hash, incumbent), with a prereg committed before the measurement in the golden set's repo. |
 | `58890fa` | **B-070 (eval half).** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL or an empty/`auto`/unservable base; serving side still open. |
 | `052d3af` | **B-074.** `hearth_map_draft.py` finds the real header (shared `hearth.finance.shape` rule with peek), drafts `skip_rows`, prints only vocabulary column names / file ids / fixed reasons; `--show-total` refused; property-tested, 19 mutants killed. |
+| `ed923e1` | **B-065.** A routing rung (`defaults.local_model` or a class `local_model`) that is unregistered, not chat, or not servable by the active backend raises `RoutingPolicyError` at load / router build / `create_app` instead of falling back. |
+| `9645883` | **B-064.** `/ready` judges every model the routing profile can route `auto` to, reports per-model `models`; warmup loads the most-used rung first and never evicts what it warmed. |
+| `03f79b9` | **B-066.** Unservable-rung 404s, denied escalations (429) and a failed escalation's local 404 are recorded (plain and stream); the stream branch's `[DONE]` is tested. |
+| `dd4b774` | **B-073 (adapter field).** A failed record's `adapter` is the adapter selected for the failed attempt on every path. |
+| `d5a7055` | **B-068.** The echo stub reports `model: "echo"` and never credits frontier-token savings. |
+| `7c9e510` | **B-072.** ModelManager runs the provider's `preflight` (weights on disk) before evicting anything. |
+| `e8fcb8a` | **B-069.** Each LoRA adapter variant is its own counted, LRU-evicted resident at the model's full `ram_gb`. |
+| `36157af` | **B-070 (serving side).** `ModelPool.resolve("")`/`("auto")` and the router's default fall-through raise `UnregisteredDefaultModelError`. |
+| `1a872a2` | **B-071.** An abandoned `/v1/hearth/agent` stream cancels the run between steps and mid-generation (keepalive + `_close_on_disconnect` + `cancel_scope`). |
