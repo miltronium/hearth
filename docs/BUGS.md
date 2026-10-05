@@ -141,7 +141,7 @@ must fail when the fix is reverted.
 - ~~[B-109](#b-109) `defaults: {local_model: null}` refused as "'None' is not in the model registry" (P3)~~ — fixed in `d1a627a`
 - ~~[B-110](#b-110) Warmup race: a request load between the fit check and the load made warmup evict its own rung (P3)~~ — fixed in `d0f80b8`
 - ~~[B-111](#b-111) Untested: `policy_rungs` honouring `defaults.local_model`; the agent route's `on_close=cancel.set` (P3)~~ — fixed in `e1102b9`
-- [B-112](#b-112) An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does (P3)
+- ~~[B-112](#b-112) An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does (P3)~~ — fixed in `132fe0e`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1560,7 +1560,7 @@ must fail when the fix is reverted.
 ### B-112
 **An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `132fe0e` · **Effort:** S
 - **Evidence:** `gateway/app.py` `chat_completions` returns `_model_not_found` from its
   up-front `check_model` without a record (and `gateway/agent_route.py` likewise); since B-106
   an adapter 404 on the same route is recorded. A routed rung's 404 inside `route()` is
@@ -1662,3 +1662,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `d1a627a` | **B-109.** `defaults.local_model: null` means unset. |
 | `d0f80b8` | **B-110.** Warmup's fit check and load are atomic under the manager's load lock. |
 | `e1102b9` | **B-111.** Tests kill the surviving `policy_rungs`-defaults and agent `on_close` mutants. |
+| `132fe0e` | **B-112.** Unknown-model 404s (chat, stream, agent route) are recorded as failed requests. |
