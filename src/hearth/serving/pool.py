@@ -29,6 +29,8 @@ instance that generated.
 
 from __future__ import annotations
 
+import errno
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -50,7 +52,7 @@ from ..providers.mlx import (
     run_on_mlx_thread,
     variant_key,
 )
-from .manager import ModelManager
+from .manager import ModelManager, ModelTooLargeError
 
 AUTO_MODEL_IDS = ("", "auto")
 
@@ -80,26 +82,56 @@ class AdapterLoadFailedError(RuntimeError):
 
 
 def adapter_fingerprint(path: str) -> tuple | None:
-    """What identifies the adapter at ``path`` on disk: (relpath, mtime_ns, size) per entry.
+    """What identifies the adapter at ``path`` on disk: (relpath, mtime, ctime, inode, size).
 
     ``None`` when the path does not exist. Any rewrite of the adapter (a retrain, a fixed
     file, a file added or removed) changes it; a failed load is remembered only for the
-    fingerprint it failed with.
+    fingerprint it failed with. ``mtime`` and ``size`` alone missed a same-size overwrite
+    that put the old mtime back (``cp -p``, ``rsync -t``, ``os.utime``): the fixed adapter
+    stayed refused until restart (B-127). ``ctime`` cannot be set back from user space and
+    changes on every write or ``utime``; the inode changes when a file is replaced by
+    rename (an atomic save).
     """
     root = Path(path).expanduser()
     try:
         st = root.stat()
     except OSError:
         return None
-    entries = [("", st.st_mtime_ns, st.st_size)]
+    entries = [("", *_stamp(st))]
     if root.is_dir():
         for child in sorted(root.rglob("*")):
             try:
                 cst = child.stat()
             except OSError:
                 continue
-            entries.append((str(child.relative_to(root)), cst.st_mtime_ns, cst.st_size))
+            entries.append((str(child.relative_to(root)), *_stamp(cst)))
     return tuple(entries)
+
+
+def _stamp(st) -> tuple[int, int, int, int]:
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_size)
+
+
+# Load failures that say nothing about the adapter's files (B-127): the machine was out of
+# memory, or the GPU refused an allocation, at that moment. Remembering one would refuse a
+# good adapter until its files changed or the server restarted. MLX reports Metal failures
+# as RuntimeError text ("[metal::malloc] ...", "[METAL] Command buffer execution failed:
+# Insufficient Memory"), so they are recognised by message.
+_TRANSIENT_MESSAGE = re.compile(
+    r"\[metal|out of memory|insufficient memory|failed to allocate|cannot allocate memory"
+    r"|resource exhausted|allocation failed",
+    re.IGNORECASE,
+)
+_TRANSIENT_ERRNOS = frozenset({errno.ENOMEM, errno.EAGAIN, errno.EMFILE, errno.ENFILE})
+
+
+def is_transient_load_error(exc: BaseException) -> bool:
+    """Is ``exc`` a load failure of the moment (memory, GPU) rather than of the adapter?"""
+    if isinstance(exc, (MemoryError, ModelTooLargeError)):
+        return True
+    if isinstance(exc, OSError) and exc.errno in _TRANSIENT_ERRNOS:
+        return True
+    return bool(_TRANSIENT_MESSAGE.search(str(exc)))
 
 
 def servable_ids(registry, backend: str | None) -> list[str]:
@@ -267,7 +299,8 @@ class ModelPool:
         load is now remembered against the adapter's on-disk fingerprint and refused with
         :class:`AdapterLoadFailedError` (nothing evicted, nothing loaded) until the adapter
         changes. A base that is not on disk is not the adapter's fault and is not
-        remembered; neither is a cancellation.
+        remembered; neither is a cancellation, nor a transient memory / GPU failure
+        (:func:`is_transient_load_error`, B-127).
         """
         variant = self._variants.get(key)
         if variant is None:
@@ -286,7 +319,13 @@ class ModelPool:
         except (GenerationCancelledError, ModelNotOnDiskError):
             raise
         except Exception as exc:
-            self._failed_variants[key] = (stamp, f"{type(exc).__name__}: {exc}")
+            # A failure of the moment (out of memory, a Metal allocation) is not the
+            # adapter's fault and must not refuse it until restart (B-127); nor is a model
+            # too large for the ceiling (a property of the base, raised before anything is
+            # evicted, so retrying it costs nothing). Only a failure that would recur on the
+            # same adapter files is remembered.
+            if not is_transient_load_error(exc):
+                self._failed_variants[key] = (stamp, f"{type(exc).__name__}: {exc}")
             raise
 
     def provider_for(self, model_id: str | None) -> ModelProvider:
@@ -387,6 +426,7 @@ __all__ = [
     "AUTO_MODEL_IDS",
     "AdapterLoadFailedError",
     "adapter_fingerprint",
+    "is_transient_load_error",
     "ModelPool",
     "check_model",
     "UnknownModelError",
