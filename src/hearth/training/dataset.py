@@ -179,9 +179,12 @@ def write_dataset(ds: Dataset, path: Path | str) -> Path:
 def load_dataset(path: Path | str) -> Dataset:
     """Read and validate a dataset JSONL file back into a :class:`Dataset`.
 
-    Accepts files with or without a header line (a headerless file is treated as a bare
-    list of records with default header fields). Raises :class:`DatasetError` on a
-    schema-version mismatch or any malformed record.
+    The first non-blank line must be the header written by :func:`write_dataset`
+    (``{"kind": "hearth.dataset.header", "task": ...}``). The header is the only place the
+    task is recorded, and a dataset without a task cannot validate, so a **headerless file
+    is refused** with an error naming the missing header (``hearth train --task`` does not
+    supply one). Also raises :class:`DatasetError` on a schema-version mismatch or any
+    malformed record.
     """
     text = Path(path).read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -189,10 +192,16 @@ def load_dataset(path: Path | str) -> Dataset:
         raise DatasetError("dataset file is empty")
 
     first = json.loads(lines[0])
-    if isinstance(first, dict) and first.get("kind") == _HEADER_KIND:
-        header, record_lines = first, lines[1:]
-    else:
-        header, record_lines = {}, lines
+    if not (isinstance(first, dict) and first.get("kind") == _HEADER_KIND):
+        # Keeps the "task must be non-empty" wording (docs/GUIDE.md quotes it) and names
+        # the actual cause: no header, so no task.
+        raise DatasetError(
+            "dataset task must be non-empty: the file has no header line. The first line "
+            f'must be {{"kind": "{_HEADER_KIND}", "schema_version": {SCHEMA_VERSION}, '
+            '"task": "<task>", ...}; write the file with '
+            "hearth.training.dataset.write_dataset"
+        )
+    header, record_lines = first, lines[1:]
 
     schema_version = int(header.get("schema_version", SCHEMA_VERSION))
     if schema_version != SCHEMA_VERSION:

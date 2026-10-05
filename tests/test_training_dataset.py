@@ -75,3 +75,31 @@ def test_load_rejects_schema_version_mismatch(tmp_path):
     path.write_text('{"kind": "hearth.dataset.header", "schema_version": 999, "task": "x"}\n')
     with pytest.raises(DatasetError):
         load_dataset(path)
+
+
+def test_load_refuses_a_headerless_file_and_names_the_missing_header(tmp_path):
+    # B-039: the docstring used to promise headerless files load. They cannot: the header is
+    # the only place the task lives. The refusal must name the cause, not just "no task".
+    path = tmp_path / "headerless.jsonl"
+    path.write_text('{"prompt": "p1", "completion": "c1"}\n{"prompt": "p2", "completion": "c2"}\n')
+    with pytest.raises(DatasetError, match="no header line") as excinfo:
+        load_dataset(path)
+    # docs/GUIDE.md quotes this phrase for a headerless file; keep it.
+    assert "dataset task must be non-empty" in str(excinfo.value)
+    assert "hearth.dataset.header" in str(excinfo.value)
+
+
+def test_load_refuses_a_header_with_an_empty_task(tmp_path):
+    path = tmp_path / "notask.jsonl"
+    path.write_text(
+        '{"kind": "hearth.dataset.header", "schema_version": 1, "task": ""}\n'
+        '{"prompt": "p1", "completion": "c1"}\n'
+    )
+    with pytest.raises(DatasetError, match="task must be non-empty"):
+        load_dataset(path)
+
+
+def test_load_docstring_no_longer_promises_headerless_files():
+    doc = " ".join((load_dataset.__doc__ or "").split())
+    assert "without a header" not in doc
+    assert "headerless file is refused" in doc

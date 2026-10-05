@@ -52,7 +52,9 @@ with `hearth eval --promote` (step 6).
 
 Training reads a JSONL dataset produced by `hearth.training.dataset`. Each record is either
 **instruction** shape (`{"prompt": ..., "completion": ...}`) or **chat** shape
-(`{"messages": [...]}`); the file may carry a header line (see `dataset.py`). Build one
+(`{"messages": [...]}`). The file **must** start with the header line that `write_dataset`
+writes (`{"kind": "hearth.dataset.header", "task": ...}`); a headerless file is refused,
+because the header is the only place the task is recorded (see `dataset.py`). Build one
 programmatically:
 
 ```python
