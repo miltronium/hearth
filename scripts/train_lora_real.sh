@@ -92,13 +92,19 @@ echo "    HF_HUB_OFFLINE=${HF_HUB_OFFLINE} TRANSFORMERS_OFFLINE=${TRANSFORMERS_O
 [ -n "${DATA}" ] || { echo "error: --data is required" >&2; usage >&2; exit 2; }
 [ -f "${DATA}" ] || die "dataset not found: ${DATA}"
 
+# Every `uv run` names the project explicitly: without it uv picks the project from the
+# CALLER's working directory, so a run started outside the repo (with no VIRTUAL_ENV, as in a
+# fresh terminal) used the wrong interpreter and reported mlx-lm "not installed" (B-032).
+# --project rather than `cd`, so relative --data / --out paths keep meaning the caller's cwd.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # --- prereq: uv + hearth CLI ---------------------------------------------------------
 command -v uv >/dev/null 2>&1 || die "uv not found on PATH. Install uv, then: uv sync --extra mlx --extra mcp --extra dev --extra files"
 
 # --- prereq: mlx extra installed (the real training backend) -------------------------
 # hearth.training.lora._mlx_lm_runner requires mlx_lm; check it is importable up front so
 # we fail with the fix hint before spending GPU time laying out the run dir.
-if ! uv run --no-sync python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('mlx_lm') else 1)"; then
+if ! uv run --no-sync --project "$REPO_ROOT" python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('mlx_lm') else 1)"; then
   die "mlx-lm is not installed. Install the training backend with: uv sync --extra mlx --extra mcp --extra dev --extra files"
 fi
 
@@ -113,7 +119,7 @@ fi
 # then the huggingface hub cache. Checking the hub cache alone rejected pulled models (B-024).
 echo "==> Verifying base model is on disk (offline)…"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if ! uv run --no-sync python "${SCRIPT_DIR}/check_base_on_disk.py" "$BASE_MODEL"; then
+if ! uv run --no-sync --project "$REPO_ROOT" python "${SCRIPT_DIR}/check_base_on_disk.py" "$BASE_MODEL"; then
   die "base model '${BASE_MODEL}' is not on disk (looked in ~/.hearth/models and the HF cache).
       Fetch it ONCE, deliberately:
           hearth models pull ${BASE_MODEL}
@@ -122,27 +128,27 @@ fi
 
 # --- train (REAL) --------------------------------------------------------------------
 echo "==> Training (this uses the GPU and can take a while)…"
-TRAIN_CMD=(uv run --no-sync hearth train --task "${TASK}" --base "${BASE_MODEL}" --data "${DATA}" --iters "${ITERS}")
+TRAIN_CMD=(uv run --no-sync --project "$REPO_ROOT" hearth train --task "${TASK}" --base "${BASE_MODEL}" --data "${DATA}" --iters "${ITERS}")
 [ -n "${OUT}" ] && TRAIN_CMD+=(--out "${OUT}")
 echo "    ${TRAIN_CMD[*]}"
 "${TRAIN_CMD[@]}"
 
 echo "==> Registered candidate adapter(s):"
-uv run --no-sync hearth adapters list --task "${TASK}"
+uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}"
 
 # --- promote (optional, eval-gated) --------------------------------------------------
 if [ "${DO_PROMOTE}" -eq 1 ]; then
   [ -n "${CANDIDATE_SCORE}" ] || die "--promote requires --candidate-score (prove the eval gate passed)"
   # hearth train names the candidate <task>-<run-id>; the newest one is what we just made.
-  ADAPTER_ID="$(uv run --no-sync hearth adapters list --task "${TASK}" --status candidate \
+  ADAPTER_ID="$(uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}" --status candidate \
     | awk 'NR>3 {print $1}' | grep -v '^$' | tail -1 || true)"
   [ -n "${ADAPTER_ID}" ] || die "could not find a candidate adapter to promote for task '${TASK}'"
   echo "==> Promoting ${ADAPTER_ID} (candidate=${CANDIDATE_SCORE} incumbent=${INCUMBENT_SCORE:-none})…"
-  PROMOTE_CMD=(uv run --no-sync hearth adapters promote "${ADAPTER_ID}" --candidate-score "${CANDIDATE_SCORE}")
+  PROMOTE_CMD=(uv run --no-sync --project "$REPO_ROOT" hearth adapters promote "${ADAPTER_ID}" --candidate-score "${CANDIDATE_SCORE}")
   [ -n "${INCUMBENT_SCORE}" ] && PROMOTE_CMD+=(--incumbent-score "${INCUMBENT_SCORE}")
   "${PROMOTE_CMD[@]}"
   echo "==> Final adapter state:"
-  uv run --no-sync hearth adapters list --task "${TASK}"
+  uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}"
 fi
 
 echo "==> Done. See docs/RUNBOOK_training.md for how to serve the promoted adapter."
