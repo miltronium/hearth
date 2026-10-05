@@ -136,3 +136,87 @@ def test_top_level_help_points_at_man_page_guide_and_offline_check():
     assert "docs/GUIDE.md" in rendered
     assert "hearth doctor --offline" in rendered
     assert "uv run --no-sync" in rendered
+
+
+# --- Help reflows to the terminal (an 80-column terminal used to show ragged prose) ---------
+
+NARROW_COLS = 80
+NARROW = {"COLUMNS": str(NARROW_COLS), "TERMINAL_WIDTH": str(NARROW_COLS), "NO_COLOR": "1"}
+ALL_PAGES = [([], None), *COMMANDS]
+ALL_PAGE_IDS = ["hearth", *IDS]
+
+
+@pytest.fixture
+def narrow(monkeypatch):
+    """Render at 80 columns. Typer reads TERMINAL_WIDTH once, when ``typer.rich_utils`` is
+    first imported, so whichever test rendered first would otherwise fix the width for all of
+    them (the wide tests above run first: the narrow checks then passed at 300 columns)."""
+    import typer.rich_utils
+
+    monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", NARROW_COLS)
+
+
+def _narrow_body(path: list[str]) -> list[str]:
+    """The rendered description lines of ``hearth PATH --help`` at 80 columns.
+
+    Everything above the first panel box, minus the Usage line; trailing padding stripped.
+    """
+    result = runner.invoke(app, [*path, "--help"], env=NARROW)
+    assert result.exit_code == 0, result.output
+    widest = max(len(ln) for ln in result.output.split("\n"))
+    assert widest <= NARROW_COLS, f"rendered {widest} columns wide, not {NARROW_COLS}"
+    body: list[str] = []
+    for line in result.output.split("\n"):
+        if line.lstrip().startswith("╭"):
+            break
+        body.append(line.rstrip())
+    return [ln for ln in body if not ln.strip().startswith("Usage:")]
+
+
+def _is_block(line: str) -> bool:
+    # rich pads the help by one column; a docstring's indented block line has two more.
+    return line.startswith("   ")
+
+
+@pytest.mark.parametrize(("path", "cmd"), ALL_PAGES, ids=ALL_PAGE_IDS)
+def test_prose_breaks_only_where_the_next_word_does_not_fit(path, cmd, narrow):
+    """Greedy-wrap invariant: inside a prose paragraph a line ends only because the next
+    word would not fit. A hard newline kept from the docstring breaks it: at 80 columns the
+    source line wraps and its last word or two strand on a short line ("with a" / "chat
+    page"), and the next line's first word would have fitted after them.
+    """
+    body = _narrow_body(path)
+    assert sum(1 for ln in body if ln.strip()) >= 1, "nothing rendered: the check is vacuous"
+    usable = NARROW_COLS - 1  # rich keeps the last column free
+    for here, nxt in zip(body, body[1:], strict=False):
+        if not here.strip() or not nxt.strip() or _is_block(here) or _is_block(nxt):
+            continue
+        first_word = nxt.split()[0]
+        assert len(here) + 1 + len(first_word) > usable, (
+            f"hearth {' '.join(path)} --help breaks prose early at 80 columns:\n"
+            f"  {here!r}\n  {nxt!r}\n({first_word!r} fits on the first line)"
+        )
+
+
+@pytest.mark.parametrize(("path", "cmd"), ALL_PAGES, ids=ALL_PAGE_IDS)
+def test_example_and_command_lines_each_keep_their_own_line(path, cmd, narrow):
+    """Every indented block line in the docstring (examples, the learn-in-order list) is
+    rendered as exactly one terminal line at 80 columns: not joined, not wrapped."""
+    raw = (typer.main.get_command(app).help if cmd is None else cmd.help) or ""
+    block = [ln.strip() for ln in inspect.cleandoc(raw).split("\n") if ln[:1].isspace()]
+    rendered = [ln.strip() for ln in _narrow_body(path)]
+    for want in block:
+        assert want in rendered, (
+            f"hearth {' '.join(path)} --help: block line not on its own line at 80 columns: "
+            f"{want!r}"
+        )
+
+
+def test_reflow_joins_prose_and_keeps_blocks():
+    from hearth.cli import reflow_help
+
+    raw = "Summary.\n\nalpha beta gamma\ndelta epsilon\n\nExamples:\n  hearth x\n  hearth y"
+    out = reflow_help(raw)
+    assert "alpha beta gamma delta epsilon" in out
+    assert "Examples:\n  hearth x\n  hearth y" in out
+    assert reflow_help(out) == out

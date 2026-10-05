@@ -59,6 +59,8 @@ Token savings for this process (zeros in a fresh shell).
 .PP
 Print the HEARTH version.
 .PP
+The same version appears in the serve banner and in GET /v1/hearth/admin/health.
+.PP
 Examples:
 .RS 4
 .nf
@@ -118,7 +120,8 @@ Examples:
 .RS 4
 .nf
 hearth models list
-HEARTH_DEFAULT_MODEL=mlx\-community/Qwen2.5\-3B\-Instruct\-4bit hearth models list
+HEARTH_DEFAULT_MODEL=mlx\-community/Qwen2.5\-3B\-Instruct\-4bit \e
+  hearth models list
 .fi
 .RE
 .PP
@@ -134,7 +137,8 @@ Examples:
 .RS 4
 .nf
 hearth models pull mlx\-community/Qwen2.5\-3B\-Instruct\-4bit
-HF_ENDPOINT=https://mirror.example hearth models pull mlx\-community/Qwen2.5\-14B\-Instruct\-4bit
+HF_ENDPOINT=https://mirror.example \e
+  hearth models pull mlx\-community/Qwen2.5\-14B\-Instruct\-4bit
 .fi
 .RE
 .PP
@@ -182,8 +186,10 @@ Needs the mlx extra and the source on disk (hearth models pull, or a local path)
 Examples:
 .RS 4
 .nf
-hearth models convert \-\-source ./my\-checkpoint \-\-out ~/.hearth/models/mine\-q8 \-\-q\-bits 8
-hearth models convert \-\-source ./my\-checkpoint \-\-out ./my\-checkpoint\-mlx \-\-no\-quantize
+hearth models convert \-\-source ./my\-checkpoint \e
+  \-\-out ~/.hearth/models/mine\-q8 \-\-q\-bits 8
+hearth models convert \-\-source ./my\-checkpoint \e
+  \-\-out ./my\-checkpoint\-mlx \-\-no\-quantize
 .fi
 .RE
 .PP
@@ -219,8 +225,10 @@ The .mlpackage is loaded by the Swift CoreMLProvider (swift/OFFLINE.md) for full
 Examples:
 .RS 4
 .nf
-hearth models export\-coreml \-\-source ./my\-checkpoint \-\-out ~/.hearth/coreml/mine
-hearth models export\-coreml \-\-source ./ckpt \-\-out ./ckpt.mlpackage \-\-compute\-units cpuOnly
+hearth models export\-coreml \-\-source ./my\-checkpoint \e
+  \-\-out ~/.hearth/coreml/mine
+hearth models export\-coreml \-\-source ./ckpt \-\-out ./ckpt.mlpackage \e
+  \-\-compute\-units cpuOnly
 .fi
 .RE
 .PP
@@ -341,7 +349,7 @@ Examples:
 .nf
 HEARTH_FILE_ROOTS=~/statements hearth agent "how many CSV files are there?"
 hearth agent \-\-collection notes "when should I descale the kettle?"
-HEARTH_FILE_ROOTS=~/notes hearth agent \-\-json "list the markdown files" > run.json
+HEARTH_FILE_ROOTS=~/notes hearth agent \-\-json "list the md files" > run.json
 .fi
 .RE
 .PP
@@ -415,7 +423,8 @@ Examples:
 .nf
 hearth stats
 hearth stats \-\-since 24h
-curl \-s \-H "Authorization: Bearer $(cat ~/.hearth/token)" http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h
+curl \-s \-H "Authorization: Bearer $(cat ~/.hearth/token)" \e
+  "http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h"
 .fi
 .RE
 .PP
@@ -515,7 +524,8 @@ Needs the mlx extra and the base model on disk (hearth models pull). It never do
 Examples:
 .RS 4
 .nf
-hearth train \-\-task classify \-\-base mlx\-community/Qwen2.5\-3B\-Instruct\-4bit \-\-data data.jsonl
+hearth train \-\-task classify \-\-base mlx\-community/Qwen2.5\-3B\-Instruct\-4bit \e
+  \-\-data data.jsonl
 hearth train \-\-task classify \-\-base mlx\-community/Qwen2.5\-3B\-Instruct\-4bit \e
   \-\-data data.jsonl \-\-iters 50 \-\-no\-register
 .fi
@@ -557,8 +567,10 @@ Examples:
 .RS 4
 .nf
 hearth eval ADAPTER_ID \-\-golden golden.jsonl
-hearth eval ADAPTER_ID \-\-golden golden.jsonl \-\-prereg prereg/c.yaml \-\-report\-json r.json
-hearth eval ADAPTER_ID \-\-golden golden.jsonl \-\-prereg prereg/c.yaml \-\-promote
+hearth eval ADAPTER_ID \-\-golden golden.jsonl \-\-prereg prereg/c.yaml \e
+  \-\-report\-json r.json
+hearth eval ADAPTER_ID \-\-golden golden.jsonl \-\-prereg prereg/c.yaml \e
+  \-\-promote
 .fi
 .RE
 .PP
@@ -664,7 +676,8 @@ The gate is recomputed here from the report's per\-example vectors under the bar
 Examples:
 .RS 4
 .nf
-hearth adapters promote ADAPTER_ID \-\-report r.json \-\-prereg prereg/classify.yaml
+hearth adapters promote ADAPTER_ID \-\-report r.json \e
+  \-\-prereg prereg/classify.yaml
 .fi
 .RE
 .PP
@@ -716,7 +729,8 @@ hearth eval \-\-promote refuses unless a committed, unmodified pre\-registration
 Examples:
 .RS 4
 .nf
-hearth prereg init \-\-task classify \-\-golden golden.jsonl \-\-out prereg/classify.yaml
+hearth prereg init \-\-task classify \-\-golden golden.jsonl \e
+  \-\-out prereg/classify.yaml
 hearth prereg check prereg/classify.yaml \-\-golden golden.jsonl
 .fi
 .RE
@@ -731,7 +745,8 @@ Examples:
 .RS 4
 .nf
 hearth prereg init \-\-task classify \-\-golden golden.jsonl
-hearth prereg init \-\-task classify \-\-golden golden.jsonl \-\-out prereg/classify.yaml
+hearth prereg init \-\-task classify \-\-golden golden.jsonl \e
+  \-\-out prereg/classify.yaml
 .fi
 .RE
 .PP

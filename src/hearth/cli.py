@@ -41,8 +41,63 @@ PANEL_USE = "Use"
 PANEL_TRAIN = "Train and evaluate"
 PANEL_EXTEND = "Extend"
 
+
+def reflow_help(text: str | None) -> str | None:
+    """Join a docstring's hard-wrapped prose lines so the terminal can wrap them itself.
+
+    The docstrings are wrapped at ~90 columns in the source. Typer/rich keeps every single
+    newline after the summary paragraph, so at an 80-column terminal each source line was
+    wrapped again and left a one-word orphan ("with a" / "chat page"). The convention (the
+    same one ``scripts/gen_manpage.py`` reads) is: paragraphs are separated by blank lines;
+    a line that starts with whitespace (an example or command block) or a list marker stays
+    on its own line, verbatim; an unindented line continues the prose line before it.
+    Idempotent, and it never touches text after a ``\\f``.
+    """
+    if not text:
+        return text
+    import inspect
+
+    body, sep, tail = inspect.cleandoc(text).partition("\f")
+    paragraphs = []
+    for para in body.split("\n\n"):
+        out: list[str] = []
+        prose_open = False  # is the last output line prose that the next one may continue?
+        for line in para.split("\n"):
+            verbatim = line[:1].isspace() or line.lstrip().startswith(("- ", "* ", "• "))
+            if verbatim or not line.strip():
+                out.append(line)
+                prose_open = False
+            elif prose_open:
+                out[-1] = f"{out[-1]} {line.strip()}"
+            else:
+                out.append(line.strip())
+                prose_open = True
+        paragraphs.append("\n".join(out))
+    return "\n\n".join(paragraphs) + sep + tail
+
+
+class ReflowGroup(typer.core.TyperGroup):
+    """The root group: reflows every command's and group's help once, when the CLI is built.
+
+    Typer constructs subgroups first and hands them to the root in ``commands``, so walking
+    the tree here covers every ``--help`` page and the man page generator, which reads the
+    same click objects.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+        def walk(cmd: Any) -> None:
+            cmd.help = reflow_help(cmd.help)
+            for sub in getattr(cmd, "commands", {}).values():
+                walk(sub)
+
+        walk(self)
+
+
 app = typer.Typer(
     name="hearth",
+    cls=ReflowGroup,
     help=(
         "HEARTH: a local-first, no-egress LLM gateway for Apple Silicon.\n\n"
         "Runs local MLX models behind an OpenAI-compatible API on 127.0.0.1:8080, with a\n"
@@ -51,7 +106,7 @@ app = typer.Typer(
         "profile defines no remote models, and loading a model never downloads it.\n\n"
         "Learn it in this order:\n"
         "  hearth doctor --offline        is it safe to use offline right now?\n"
-        "  hearth models list             which models exist; (default) marks what serves\n"
+        "  hearth models list             which models exist; (default) is what serves\n"
         '  hearth run "hello"             one local completion\n'
         "  hearth serve                   API + chat page at http://127.0.0.1:8080/chat\n"
         '  hearth agent "..."             a bounded agent over files you allow\n'
@@ -106,7 +161,8 @@ prereg_app = typer.Typer(
         "hearth eval --promote refuses unless a committed, unmodified pre-registration\n"
         "declares the bar the run is judged against.\n\n"
         "Examples:\n"
-        "  hearth prereg init --task classify --golden golden.jsonl --out prereg/classify.yaml\n"
+        "  hearth prereg init --task classify --golden golden.jsonl \\\n"
+        "    --out prereg/classify.yaml\n"
         "  hearth prereg check prereg/classify.yaml --golden golden.jsonl"
     ),
 )
@@ -248,6 +304,8 @@ def _agent_snippet(text: str, limit: int) -> str:
 @app.command(rich_help_panel=PANEL_START)
 def version() -> None:
     """Print the HEARTH version.
+
+    The same version appears in the serve banner and in GET /v1/hearth/admin/health.
 
     Examples:
       hearth version
@@ -625,7 +683,7 @@ def agent(
     Examples:
       HEARTH_FILE_ROOTS=~/statements hearth agent "how many CSV files are there?"
       hearth agent --collection notes "when should I descale the kettle?"
-      HEARTH_FILE_ROOTS=~/notes hearth agent --json "list the markdown files" > run.json
+      HEARTH_FILE_ROOTS=~/notes hearth agent --json "list the md files" > run.json
 
     Env: HEARTH_FILE_ROOTS (colon-separated readable directories; unset = none),
     HEARTH_FILE_MAX_BYTES, HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_ROUTING_YAML,
@@ -833,7 +891,8 @@ def stats(
     Examples:
       hearth stats
       hearth stats --since 24h
-      curl -s -H "Authorization: Bearer $(cat ~/.hearth/token)" http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h
+      curl -s -H "Authorization: Bearer $(cat ~/.hearth/token)" \\
+        "http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h"
     """
     from .gateway.app import _parse_since
     from .observability import get_metrics
@@ -867,7 +926,8 @@ def models_list() -> None:
 
     Examples:
       hearth models list
-      HEARTH_DEFAULT_MODEL=mlx-community/Qwen2.5-3B-Instruct-4bit hearth models list
+      HEARTH_DEFAULT_MODEL=mlx-community/Qwen2.5-3B-Instruct-4bit \\
+        hearth models list
 
     Env: HEARTH_MODELS_YAML, HEARTH_DEFAULT_MODEL.
     """
@@ -904,7 +964,8 @@ def models_pull(model_id: str = typer.Argument(..., help="Registry model id to d
 
     Examples:
       hearth models pull mlx-community/Qwen2.5-3B-Instruct-4bit
-      HF_ENDPOINT=https://mirror.example hearth models pull mlx-community/Qwen2.5-14B-Instruct-4bit
+      HF_ENDPOINT=https://mirror.example \\
+        hearth models pull mlx-community/Qwen2.5-14B-Instruct-4bit
 
     Env: HEARTH_HOME, HEARTH_MODELS_YAML, HF_ENDPOINT, HF_HUB_OFFLINE.
 
@@ -981,8 +1042,10 @@ def models_convert(
     config/models.yaml (the registry is data).
 
     Examples:
-      hearth models convert --source ./my-checkpoint --out ~/.hearth/models/mine-q8 --q-bits 8
-      hearth models convert --source ./my-checkpoint --out ./my-checkpoint-mlx --no-quantize
+      hearth models convert --source ./my-checkpoint \\
+        --out ~/.hearth/models/mine-q8 --q-bits 8
+      hearth models convert --source ./my-checkpoint \\
+        --out ./my-checkpoint-mlx --no-quantize
 
     Env: HEARTH_HOME, HEARTH_ALLOW_DOWNLOADS, HF_HUB_CACHE, HF_HOME.
 
@@ -1044,8 +1107,10 @@ def models_export_coreml(
     HEARTH_ALLOW_DOWNLOADS=1.
 
     Examples:
-      hearth models export-coreml --source ./my-checkpoint --out ~/.hearth/coreml/mine
-      hearth models export-coreml --source ./ckpt --out ./ckpt.mlpackage --compute-units cpuOnly
+      hearth models export-coreml --source ./my-checkpoint \\
+        --out ~/.hearth/coreml/mine
+      hearth models export-coreml --source ./ckpt --out ./ckpt.mlpackage \\
+        --compute-units cpuOnly
 
     Env: HEARTH_HOME, HEARTH_ALLOW_DOWNLOADS, HF_HUB_CACHE, HF_HOME.
 
@@ -1202,7 +1267,8 @@ def train(
     hearth prereg init, commit the file, then hearth eval ADAPTER --prereg FILE --promote.
 
     Examples:
-      hearth train --task classify --base mlx-community/Qwen2.5-3B-Instruct-4bit --data data.jsonl
+      hearth train --task classify --base mlx-community/Qwen2.5-3B-Instruct-4bit \\
+        --data data.jsonl
       hearth train --task classify --base mlx-community/Qwen2.5-3B-Instruct-4bit \\
         --data data.jsonl --iters 50 --no-register
 
@@ -1342,8 +1408,10 @@ def eval_adapter(
 
     Examples:
       hearth eval ADAPTER_ID --golden golden.jsonl
-      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml --report-json r.json
-      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml --promote
+      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml \\
+        --report-json r.json
+      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml \\
+        --promote
 
     Env: HEARTH_BACKEND, HEARTH_HOME, HEARTH_MODELS_YAML.
 
@@ -1609,7 +1677,8 @@ def prereg_init(
 
     Examples:
       hearth prereg init --task classify --golden golden.jsonl
-      hearth prereg init --task classify --golden golden.jsonl --out prereg/classify.yaml
+      hearth prereg init --task classify --golden golden.jsonl \\
+        --out prereg/classify.yaml
 
     Exit: 0 written (or printed); 1 the golden set is unreadable or empty.
     """
@@ -1781,7 +1850,8 @@ def adapters_promote(
     model, so it is not evidence.
 
     Examples:
-      hearth adapters promote ADAPTER_ID --report r.json --prereg prereg/classify.yaml
+      hearth adapters promote ADAPTER_ID --report r.json \\
+        --prereg prereg/classify.yaml
 
     Env: HEARTH_HOME.
 
