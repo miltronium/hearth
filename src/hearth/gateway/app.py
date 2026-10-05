@@ -35,6 +35,7 @@ from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
+from ..router.route import AdapterChoice, UnknownAdapterError
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
@@ -140,48 +141,108 @@ def create_app(
 
     @app.get("/v1/hearth/admin/health")
     def health() -> dict:
-        return {
+        body = {
             "status": "ok",
             "version": __version__,
             "backend": provider.name,
             "model": registry.default_id,
         }
+        # Liveness stays "ok" (the process is up), but an auto->echo fallback is named here
+        # too, so no probe can read a stub as real inference (B-006).
+        stub_reason = getattr(provider, "fallback_reason", None)
+        if stub_reason:
+            body["backend_fallback"] = stub_reason
+        return body
 
     @app.get("/v1/hearth/admin/ready")
     def ready():
         """Readiness probe (distinct from liveness /health).
 
-        Returns 200 only once the default model's weights are actually in memory: resident
-        in the manager requests are served from AND, for a provider that can say so
-        (``is_loaded``), holding weights. It used to check residency alone, and residency
-        was granted without loading anything — so /ready said 200 with zero weights loaded.
-        503 otherwise, with ``status`` ``loading`` (not loaded yet) or ``failed`` plus the
-        ``reason`` (the load raised, or ``HEARTH_DEFAULT_MODEL`` names no servable model).
-        The echo backend is always ready (nothing to load).
+        **Ready means the default model can serve a request now**, judged on outcomes:
+
+        * its last load attempt did not fail, and a load of it has completed with weights in
+          memory at least once (warmup, or any request) — residency granted without a load
+          never counts (B-005); **and**
+        * its weights still resolve on disk (for a backend that can check without loading),
+          so an evicted default reloads on demand (B-048).
+
+        With ``HEARTH_WARMUP=false`` nothing loads until the first request, so a default
+        whose weights resolve on disk is ready before that request (B-035) — reported with
+        ``loaded: false`` and a ``detail``. A backend that cannot check the disk stays 503
+        ``loading`` until its first load instead of being taken at its word.
+
+        Residency is reported separately: ``loaded`` (the default holds weights right now)
+        and ``resident`` (ids in memory). 503 ``loading`` while the first load runs; 503
+        ``failed`` with the ``reason`` when the load failed, the weights are gone, or
+        ``HEARTH_DEFAULT_MODEL`` names no servable model. The echo backend is ready when
+        chosen explicitly (nothing to load) and 503 ``stub`` when ``HEARTH_BACKEND=auto``
+        fell back to it because mlx_lm is not importable.
         """
         default_id = registry.default_id
+        loaded = _weights_loaded(manager, default_id)
         payload: dict = {
             "backend": provider.name,
             "model": default_id,
+            "loaded": loaded,
             "resident": manager.resident_ids(),
         }
+
+        def respond(code: int, status: str, reason: str | None = None,
+                    detail: str | None = None) -> JSONResponse:
+            body = {**payload, "status": status}
+            if reason is not None:
+                body["reason"] = reason
+            if detail is not None:
+                body["detail"] = detail
+            return JSONResponse(status_code=code, content=body)
+
         if provider.name == "echo":
-            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
+            # An echo that `auto` fell back to (mlx_lm not importable) is not inference: a
+            # pruned venv must not come up green answering every request with an echo
+            # labelled as a real model (B-006). An explicit HEARTH_BACKEND=echo is ready.
+            stub_reason = getattr(provider, "fallback_reason", None)
+            if stub_reason:
+                return respond(503, "stub", stub_reason)
+            return respond(200, "ready")
         problem = _default_model_problem(provider, registry)
-        if problem is None and _weights_loaded(manager, default_id):
-            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
-        reason = problem or warmup_state.error
-        status = "failed" if reason else "loading"
-        if not reason:
-            reason = (
-                "warmup in progress"
-                if warmup_state.running
-                else f"weights for {default_id!r} are not loaded"
-                + ("" if settings.warmup else " (HEARTH_WARMUP is off)")
+        if problem is not None:
+            return respond(503, "failed", problem)
+        can_locate = bool(getattr(provider, "can_locate", False))
+        if can_locate:
+            missing = provider.weights_problem(default_id)
+            if missing is not None:
+                return respond(
+                    503, "failed", f"weights for {default_id!r} do not resolve on disk: "
+                    f"{missing}",
+                )
+        last_error = getattr(manager, "last_load_error", lambda _m: None)(default_id)
+        if last_error is not None:
+            return respond(503, "failed", f"last load of {default_id!r} failed: {last_error}")
+        if loaded:
+            return respond(200, "ready")
+        if getattr(manager, "loaded_once", lambda _m: False)(default_id):
+            return respond(
+                200, "ready",
+                detail=f"{default_id!r} loaded before and is not resident now (evicted to "
+                "make room); it reloads on demand",
             )
-        return JSONResponse(
-            status_code=503, content={**payload, "status": status, "reason": reason}
-        )
+        if warmup_state.running:
+            return respond(503, "loading", "warmup in progress")
+        if warmup_state.error:
+            return respond(503, "failed", warmup_state.error)
+        if not settings.warmup:
+            if can_locate:
+                return respond(
+                    200, "ready",
+                    detail=f"warmup disabled (HEARTH_WARMUP=false); {default_id!r} is on "
+                    "disk and loads on the first request",
+                )
+            return respond(
+                503, "loading",
+                f"weights for {default_id!r} are not loaded (HEARTH_WARMUP is off) and "
+                f"the {provider.name!r} backend cannot verify them without loading",
+            )
+        return respond(503, "loading", f"weights for {default_id!r} are not loaded yet")
 
     @app.get("/v1/hearth/admin/models", dependencies=[auth])
     def admin_models() -> dict:
@@ -263,6 +324,12 @@ def create_app(
             check_model(router.local, registry, req.model)
         except UnknownModelError as exc:
             return _model_not_found(exc)
+        # Same for an explicitly requested adapter: refused up front, never silently
+        # answered by base weights under the adapter's name (B-034).
+        try:
+            router.check_adapter(adapter)
+        except UnknownAdapterError as exc:
+            return _adapter_not_found(exc)
         messages = (
             json_instruction(req.messages)
             if response_format == "json_object"
@@ -277,8 +344,11 @@ def create_app(
         if req.stream:
             return StreamingResponse(
                 _close_on_disconnect(
-                    _stream_sse(
-                        router, gen_req, intent, allow_escalation, adapter, response_format
+                    _guarantee_done(
+                        _stream_sse(
+                            router, gen_req, intent, allow_escalation, adapter,
+                            response_format,
+                        )
                     )
                 ),
                 media_type="text/event-stream",
@@ -292,6 +362,8 @@ def create_app(
             return _budget_error(str(exc))
         except UnknownModelError as exc:
             return _model_not_found(exc)
+        except UnknownAdapterError as exc:
+            return _adapter_not_found(exc)
         except ProviderError as exc:
             return _provider_error(str(exc))
 
@@ -324,7 +396,7 @@ def create_app(
                 served_by=rec.served_by,
                 backend=result.backend,
                 model=result.model,
-                adapter=adapter,
+                adapter=rec.adapter,  # what served (None = base weights), not the request
                 escalated=rec.escalated,
                 estimated_frontier_tokens_saved=rec.estimated_frontier_tokens_saved,
             ),
@@ -481,6 +553,21 @@ def _model_not_found(exc: UnknownModelError) -> JSONResponse:
     )
 
 
+def _adapter_not_found(exc: UnknownAdapterError) -> JSONResponse:
+    """404 for an explicitly requested adapter this server cannot serve (docs/API.md)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "hearth.adapter",
+                "code": "adapter_not_found",
+            }
+        },
+    )
+
+
 def _budget_error(message: str) -> JSONResponse:
     """OpenAI-style error envelope for the budget-exhausted case (docs/API.md)."""
     return JSONResponse(
@@ -593,6 +680,32 @@ def _close_when_idle(stream: Iterator[str]) -> None:
             time.sleep(0.02)
 
 
+def _guarantee_done(stream: Iterator[str]) -> Iterator[str]:
+    """Relay an SSE generator so it ends with ``[DONE]`` however it ends.
+
+    :func:`_stream_sse` handles every failure it knows about; this is the backstop for the
+    ones it does not (an adapter store that raises before the first chunk, a bug in a
+    chunk build). An exception becomes a ``hearth.stream.internal_error`` event and
+    ``[DONE]`` instead of a dropped connection. ``yield from`` forwards ``close()`` to the
+    inner generator, so an abandoned stream still cancels generation (``GeneratorExit`` is
+    not an ``Exception`` and passes straight through).
+    """
+    try:
+        yield from stream
+    except Exception as exc:  # noqa: BLE001 — every stream ends with [DONE]
+        logger.exception("stream aborted by an unexpected error")
+        yield _sse(
+            {
+                "error": {
+                    "message": f"stream aborted: {type(exc).__name__}: {exc}",
+                    "type": "internal_error",
+                    "code": "hearth.stream.internal_error",
+                }
+            }
+        )
+        yield _sse("[DONE]")
+
+
 def _stream_sse(
     router: Router,
     gen_req: GenRequest,
@@ -607,7 +720,8 @@ def _stream_sse(
     The final chunk carries real ``served_by``/``escalated``/savings telemetry plus the
     provider's own ``finish_reason``, so a stream cut off at ``max_tokens`` reports
     ``"length"`` exactly as the non-streaming path does. A :class:`RequestRecord` is
-    written to the metrics store when the stream completes.
+    written to the metrics store when the stream completes — and when it fails (with
+    ``failed`` set), so an error is never invisible to ``hearth stats``.
 
     Under ``response_format="json_object"`` deltas still stream as they arrive (a client
     asked to stream), and the accumulated text is validated once at the end: an
@@ -639,17 +753,17 @@ def _stream_sse(
 
     # Adapters layer over the local backend only; resolve the requested id (or the task's
     # promoted default) to a concrete path so streaming hot-swaps like non-streaming does.
-    adapter_path = (
-        None
+    choice = (
+        AdapterChoice()
         if decision.would_escalate
-        else router._resolve_adapter(adapter, decision.task_class, decision.model)
+        else router.select_adapter(adapter, decision.task_class, decision.model)
     )
     stream_req = GenRequest(
         messages=gen_req.messages,
         model=decision.model,
         max_tokens=gen_req.max_tokens,
         temperature=gen_req.temperature,
-        adapter=adapter_path,
+        adapter=choice.path,
     )
 
     # First chunk announces the assistant role (OpenAI convention).
@@ -670,6 +784,8 @@ def _stream_sse(
     # (the terminal StreamDelta). Never the request's or the decision's model: those name
     # what was asked for, which is exactly what used to be reported when another model ran.
     served_model: str | None = None
+    # The adapter path the answer was actually generated with (None after a base retry).
+    used_path: str | None = None
 
     def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
         nonlocal finish_reason, served_model
@@ -694,12 +810,15 @@ def _stream_sse(
         # Mirrors Router._generate: an adapter that fails before any text is retried once on
         # base weights, so a broken promoted adapter cannot fail /chat while the
         # non-streaming path quietly succeeds.
+        nonlocal used_path
+        used_path = stream_req.adapter
         try:
             yield from relay(router.local, stream_req, stream_req.model)
         except Exception as exc:  # noqa: BLE001
             if stream_req.adapter is None or parts:
                 raise
             logger.warning("stream failed with adapter; retrying on base weights: %s", exc)
+            used_path = None
             yield from relay(
                 router.local,
                 GenRequest(
@@ -724,7 +843,7 @@ def _stream_sse(
                     # is spend and an escalation that failed, so it is billed and recorded —
                     # not left to a log line — and nothing local is spliced onto its answer.
                     _record_failed_remote_stream(
-                        router, gen_req, decision, provider, "".join(parts), adapter,
+                        router, gen_req, decision, provider, "".join(parts), None,
                         f"provider {provider.name!r} failed mid-stream: {exc}",
                         (time.perf_counter() - started) * 1000.0,
                     )
@@ -735,14 +854,13 @@ def _stream_sse(
                 escalation_failed = f"provider {provider.name!r} failed: {exc}"
                 decision = router.degrade_to_local(gen_req, decision, exc)
                 provider = router.local
+                choice = router.select_adapter(adapter, decision.task_class, decision.model)
                 stream_req = GenRequest(
                     messages=gen_req.messages,
                     model=decision.model,
                     max_tokens=gen_req.max_tokens,
                     temperature=gen_req.temperature,
-                    adapter=router._resolve_adapter(
-                        adapter, decision.task_class, decision.model
-                    ),
+                    adapter=choice.path,
                 )
                 yield from relay_local(stream_req)
     except UnknownModelError as exc:
@@ -760,6 +878,14 @@ def _stream_sse(
         yield _sse("[DONE]")
         return
     except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
+        # Recorded before the error event goes out: a failed request (and, after a failed
+        # escalation, a prompt the remote may already hold) must reach the metrics.
+        router.record_failure(
+            gen_req, decision, provider, exc, started=started, adapter=choice.id,
+            escalation_failed=escalation_failed,
+            completion_tokens=_estimate_stream_tokens(gen_req, "".join(parts))[1]
+            if parts else 0,
+        )
         yield from _stream_failure(provider, exc)
         return
     latency_ms = (time.perf_counter() - started) * 1000.0
@@ -767,31 +893,42 @@ def _stream_sse(
     # A provider that cannot say which model ran (third-party, plain stream()) falls back to
     # its bound model id if it has one, and only then to the decision.
     model_served = served_model or getattr(provider, "model_id", None) or decision.model
+    # The adapter that actually served — not the one requested (B-034).
+    served_adapter = router.served_adapter(provider, choice, used_path)
 
     prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
-    if served_by == "remote":
-        router.budget.spend(prompt_tokens + completion_tokens)
-        saved = 0
-    else:
-        saved = estimated_tokens_saved(decision.task_class, prompt_tokens, completion_tokens)
-
-    router.metrics.record(
-        RequestRecord(
-            task_class=decision.task_class,
-            backend=provider.name,
-            model=model_served,
-            served_by=served_by,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_ms=latency_ms,
-            escalated=decision.would_escalate,
-            escalation_reason=decision.reason if decision.would_escalate else None,
-            escalation_failed=escalation_failed,
-            adapter=adapter,
-            estimated_frontier_tokens_saved=saved,
-        )
+    saved = (
+        0
+        if served_by == "remote"
+        else estimated_tokens_saved(decision.task_class, prompt_tokens, completion_tokens)
     )
+    # The answer has already been streamed. Accounting that fails now (a full disk under the
+    # metrics store, an injected store that raises) must not drop the stream with no [DONE]:
+    # the client still gets the final chunk, then a named error event, then [DONE].
+    accounting_error: str | None = None
+    try:
+        if served_by == "remote":
+            router.budget.spend(prompt_tokens + completion_tokens)
+        router.metrics.record(
+            RequestRecord(
+                task_class=decision.task_class,
+                backend=provider.name,
+                model=model_served,
+                served_by=served_by,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                escalated=decision.would_escalate,
+                escalation_reason=decision.reason if decision.would_escalate else None,
+                escalation_failed=escalation_failed,
+                adapter=served_adapter,
+                estimated_frontier_tokens_saved=saved,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — accounting must not kill a delivered answer
+        accounting_error = f"{type(exc).__name__}: {exc}"
+        logger.error("stream served but accounting failed: %s", accounting_error)
 
     yield _sse(
         ChatCompletionChunk(
@@ -803,12 +940,23 @@ def _stream_sse(
                 served_by=served_by,
                 backend=provider.name,
                 model=model_served,
-                adapter=adapter,
+                adapter=served_adapter,
                 escalated=decision.would_escalate,
                 estimated_frontier_tokens_saved=saved,
             ),
         )
     )
+    if accounting_error is not None:
+        yield _sse(
+            {
+                "error": {
+                    "message": f"the answer was served but could not be recorded: "
+                    f"{accounting_error}",
+                    "type": "metrics_unavailable",
+                    "code": "hearth.metrics.unavailable",
+                }
+            }
+        )
     # Post-hoc validation for JSON mode: the deltas are already out, so the honest move is
     # to tell the client the object they just assembled is not usable, not to stay quiet.
     if response_format == "json_object":
@@ -861,6 +1009,8 @@ def _record_failed_remote_stream(
             escalation_failed=error,
             adapter=adapter,
             estimated_frontier_tokens_saved=0,
+            # The client gets an error event, not an answer: a failed request.
+            failed=error,
         )
     )
 

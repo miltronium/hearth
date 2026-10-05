@@ -81,6 +81,20 @@ not a 404: the load fails and the request gets `503` `provider_unavailable` whos
 names the `hearth models pull <id>` to run (HEARTH never downloads on load). The CLI applies
 the same check: `hearth run --model <unknown>` / `hearth agent --model <unknown>` exit 2.
 
+**`hearth.adapter` reports what served.** The response's `hearth.adapter` is the adapter
+whose weights actually generated the answer: the requested id, or — when none was
+requested — the task class's promoted adapter (the default path, unchanged). It is `null`
+when base weights answered: no adapter selected, the request escalated to a remote, the
+adapter failed to load and the request was retried on base weights, or the backend ignores
+adapters (`echo`). An explicitly requested adapter that is not registered (or is retired) is
+refused before anything runs, exactly like an unknown model:
+
+```jsonc
+// HTTP 404
+{ "error": { "message": "adapter 'no-such-adapter' cannot be served: unknown adapter: 'no-such-adapter'",
+             "type": "invalid_request_error", "param": "hearth.adapter", "code": "adapter_not_found" } }
+```
+
 ### `POST /v1/embeddings`
 
 Standard OpenAI embeddings shape. `model: "auto"` selects the configured local embedder.
@@ -155,23 +169,45 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
 ### Admin (`/v1/hearth/admin/`)
 
 - `GET /admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
+  A request that ended in an error (the local provider failed, or a remote stream died
+  mid-answer) is recorded too: it counts in `requests` and in `failed` / `failure_rate`
+  (added keys; nothing renamed), and — after a failed escalation — in `escalations_failed`,
+  since the remote may already have received the prompt. `backend_mix` and `latency_ms`
+  count only requests that were served an answer.
 - `GET /admin/health` — liveness (unauthenticated): the process is up. Says nothing about
   weights.
-- `GET /admin/ready` — readiness (unauthenticated). `200 {"status": "ready"}` only when the
-  default model is resident in the manager requests are served from **and** its provider
-  reports weights in memory. Otherwise `503` with a `status` and a `reason`:
+- `GET /admin/ready` — readiness (unauthenticated). **Ready means the default model can
+  serve a request now**: a load of it has completed with weights in memory at least once
+  (warmup or any request; residency granted without a load never counts), its most recent
+  load did not fail, and — for a backend that can check without loading (`mlx`) — its
+  weights still resolve on disk. Residency is reported separately, so a default that was
+  LRU-evicted to make room for another model stays `200` (it reloads on demand). With
+  `HEARTH_WARMUP=false` nothing loads until the first request, so a default whose weights
+  resolve on disk is `200` before that request; a backend that cannot check the disk stays
+  `503 loading` until its first load.
 
-  | `status` | `reason` (examples) | meaning |
-  |---|---|---|
-  | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
-  | `loading` | `weights for '<id>' are not loaded` (+ ` (HEARTH_WARMUP is off)`) | nothing is loading them: warmup off, or the default was evicted to make room for another model |
-  | `failed` | `warmup of '<id>' failed: ModelNotOnDiskError: …` | the load raised (weights not on disk, corrupt checkpoint, mlx missing) |
-  | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
-  | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
+  | code | `status` | `reason` / `detail` (examples) | meaning |
+  |---|---|---|---|
+  | 200 | `ready` | — | the default holds weights now (`loaded: true`) |
+  | 200 | `ready` | detail `'<id>' loaded before and is not resident now (evicted to make room); it reloads on demand` | `loaded: false`, weights on disk |
+  | 200 | `ready` | detail `warmup disabled (HEARTH_WARMUP=false); '<id>' is on disk and loads on the first request` | `loaded: false`, never loaded yet |
+  | 503 | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
+  | 503 | `loading` | `weights for '<id>' are not loaded (HEARTH_WARMUP is off) and the '<backend>' backend cannot verify them without loading` | a plugin/test backend without a disk probe, before its first load |
+  | 503 | `failed` | `weights for '<id>' do not resolve on disk: ModelNotOnDiskError: …` | never pulled, or deleted after loading |
+  | 503 | `failed` | `last load of '<id>' failed: …` / `warmup of '<id>' failed: …` | the load raised (corrupt checkpoint, mlx missing, over the RAM ceiling) |
+  | 503 | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
+  | 503 | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
 
-  Every body also carries `backend`, `model` (the default id) and `resident` (ids in memory).
-  The `echo` backend is always ready. Measured on 2026-10-05 with real weights: `503 loading`
-  at 0.05 s after start, `200 ready` at ~1.05 s (7B from page cache).
+  Every body also carries `backend`, `model` (the default id), `loaded` (the default holds
+  weights right now) and `resident` (ids in memory). The `echo` backend is ready when chosen
+  explicitly (`HEARTH_BACKEND=echo`). When `HEARTH_BACKEND=auto` (the default) falls back to
+  echo because `mlx_lm` is not importable — usually a venv pruned by a bare `uv run` — `/ready`
+  is `503` with `status: "stub"`, `backend: "echo"` and a `reason` naming the repair command,
+  `/health` adds a `backend_fallback` field with the same text, and a WARNING is logged at
+  startup. The server still starts (admin/metrics and non-inference CLI paths keep working);
+  it just cannot be mistaken for real inference.
+  Measured on 2026-10-05 with real weights (warmup on): `503 loading` at 0.05 s after start,
+  `200 ready` at ~1.05 s (7B from page cache).
 - `GET /admin/models` — what is resident right now, read off the provider instances
   themselves (auth required):
 
@@ -249,3 +285,9 @@ retryable-with-escalation only if their policy allows it.
 
 SSE, OpenAI-compatible (`data: {...}\n\n`, terminating `data: [DONE]`). The final data event
 before `[DONE]` carries the `hearth` telemetry block.
+
+Every stream ends with `[DONE]`, on every path. A failure is an in-band `error` event just
+before it: `hearth.provider.unavailable` (the provider failed), `model_not_found`,
+`hearth.budget.exhausted`, `hearth.response_format.invalid_json`,
+`hearth.metrics.unavailable` (the answer and its final telemetry chunk were delivered, but
+the request could not be recorded), or `hearth.stream.internal_error` (anything else).

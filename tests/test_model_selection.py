@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from hearth import providers as providers_pkg
 from hearth.config import Settings
 from hearth.gateway import create_app
 from hearth.observability.budget import BudgetAccountant
@@ -127,6 +128,9 @@ def fake(monkeypatch) -> FakeMLX:
     module.__spec__ = importlib.machinery.ModuleSpec("mlx_lm", loader=None)
     monkeypatch.setitem(sys.modules, "mlx_lm", module)
     monkeypatch.setattr(mlx_mod, "resolve_local_model", fake.resolve)
+    # The readiness disk probe: the fake's paths are not real directories, so its "on disk"
+    # is the fake resolver's answer (the real probe's exists-check is tested on its own).
+    monkeypatch.setattr(providers_pkg, "_locate_on_disk", fake.resolve)
     monkeypatch.delenv("HEARTH_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("HEARTH_ROUTING_YAML", raising=False)
     return fake
@@ -548,22 +552,109 @@ def test_ready_is_503_until_the_weights_are_loaded(fake, tmp_path, local_policy)
     assert fake.loaded_paths() == [weights(CODER7)]  # the default's weights, really read
 
 
-def test_ready_is_503_without_warmup_and_200_after_a_real_load(fake, tmp_path, local_policy):
-    app, pool, _ = _app(tmp_path, local_policy, warmup=False)
+def test_without_warmup_ready_means_on_disk_and_the_first_request_loads_it(
+    fake, tmp_path, local_policy
+):
+    """B-035: with HEARTH_WARMUP=false nothing loads until a request, and an orchestrator
+    gating on /ready never sends one — so 503-until-loaded was 503 forever. Ready is now
+    "the default's weights resolve on disk"; residency is reported separately."""
+    app, _, _ = _app(tmp_path, local_policy, warmup=False)
     client = TestClient(app)
     resp = client.get("/v1/hearth/admin/ready")
-    assert resp.status_code == 503 and resp.json()["status"] == "loading"
-    pool.warm()
-    assert client.get("/v1/hearth/admin/ready").status_code == 200
-    assert fake.loaded_paths() == [weights(CODER7)]
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "ready"
+    assert resp.json()["loaded"] is False
+    assert "first request" in resp.json()["detail"]
+    assert fake.loads == []  # the probe itself loaded nothing
+    assert _chat(client, "auto").json()["choices"][0]["message"]["content"] == tag(CODER7)
+    resp = client.get("/v1/hearth/admin/ready")
+    assert resp.status_code == 200 and resp.json()["loaded"] is True
+    assert "detail" not in resp.json()
 
 
-def test_ready_is_503_when_resident_weights_were_dropped(fake, tmp_path, local_policy):
+def test_without_warmup_a_default_not_on_disk_is_failed(fake, tmp_path, local_policy):
+    fake.missing.add(CODER7)
+    app, _, _ = _app(tmp_path, local_policy, warmup=False)
+    resp = TestClient(app).get("/v1/hearth/admin/ready")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "failed"
+    assert "not on disk" in resp.json()["reason"]
+
+
+def test_without_warmup_a_failed_first_load_is_failed(fake, tmp_path, local_policy):
+    def broken_load(path, **kwargs):
+        raise RuntimeError("corrupt checkpoint")
+
+    sys.modules["mlx_lm"].load = broken_load
+    app, _, _ = _app(tmp_path, local_policy, warmup=False)
+    client = TestClient(app)
+    assert _chat(client, "auto").status_code == 503
+    resp = client.get("/v1/hearth/admin/ready")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "failed"
+    assert "corrupt checkpoint" in resp.json()["reason"]
+
+
+def test_an_evicted_default_stays_ready_and_deleted_weights_do_not(fake, tmp_path, local_policy):
+    """B-048: LRU eviction of the default made a healthy server report not-ready."""
+    app, pool, _ = _app(tmp_path, local_policy, warmup=True, ram_ceiling_gb=6.0)
+    client = TestClient(app)
+    assert _wait_ready(client, "ready").json()["loaded"] is True
+    assert _chat(client, SMALL).status_code == 200  # 2.0 + 4.5 > 6.0: evicts the default
+    assert pool.manager.resident_ids() == [SMALL]
+    resp = client.get("/v1/hearth/admin/ready")
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["loaded"] is False
+    assert resp.json()["resident"] == [SMALL]
+    assert "reloads on demand" in resp.json()["detail"]
+    # ...and it really does reload on demand.
+    assert _chat(client, "auto").json()["choices"][0]["message"]["content"] == tag(CODER7)
+    assert fake.loaded_paths() == [weights(CODER7), weights(SMALL), weights(CODER7)]
+    # Weights deleted from disk: no longer loadable, so no longer ready.
+    _chat(client, SMALL)  # evict it again
+    fake.missing.add(CODER7)
+    resp = client.get("/v1/hearth/admin/ready")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "failed"
+    assert "not on disk" in resp.json()["reason"]
+
+
+def test_dropped_weights_are_reported_not_resident_and_reload(fake, tmp_path, local_policy):
     app, pool, _ = _app(tmp_path, local_policy)
     client = TestClient(app)
     pool.warm().unload()  # resident in the manager, but holding no weights
     resp = client.get("/v1/hearth/admin/ready")
+    assert resp.status_code == 200
+    assert resp.json()["loaded"] is False
+    assert _chat(client, "auto").json()["choices"][0]["message"]["content"] == tag(CODER7)
+    assert client.get("/v1/hearth/admin/ready").json()["loaded"] is True
+
+
+def test_residency_without_weights_never_counts_as_loaded(fake, tmp_path, local_policy):
+    """B-005 stays fixed: a provider admitted without weights in memory is not ready."""
+
+    class NoWeights:
+        name = "mlx"
+        is_loaded = False
+
+        def __init__(self, model_id, ram_gb):
+            self.model_id = model_id
+
+        def load(self, model_id=None):
+            pass  # "loads" without holding anything
+
+        def footprint(self, model_id):
+            from hearth.providers.base import ResourceEstimate
+
+            return ResourceEstimate(ram_gb=1.0)
+
+    settings = _settings(tmp_path, warmup=True)
+    pool = ModelPool(NoWeights, backend="mlx", ram_ceiling_gb=24.0, locate=fake.resolve)
+    app = create_app(provider=pool, settings=settings, router=_router(pool, local_policy))
+    resp = _wait_ready(TestClient(app), "failed")
     assert resp.status_code == 503
+    assert "holds no weights" in resp.json()["reason"]
+    assert pool.manager.loaded_once(CODER7) is False
 
 
 def test_ready_reports_failure_when_the_default_is_not_on_disk(fake, tmp_path, local_policy):
@@ -584,6 +675,57 @@ def test_ready_reports_a_default_model_override_nobody_can_serve(
     assert resp.status_code == 503
     assert "HEARTH_DEFAULT_MODEL" in resp.json()["reason"]
     assert fake.loads == []  # the catalog default was NOT quietly loaded in its place
+
+
+def test_the_disk_probe_needs_a_real_path_and_never_downloads(tmp_path, monkeypatch):
+    seen: list[object] = []
+
+    def resolver(model_id, allow_downloads=None):
+        seen.append(allow_downloads)
+        return str(tmp_path) if model_id == "here" else f"/nonexistent/{model_id}"
+
+    monkeypatch.setattr(mlx_mod, "resolve_local_model", resolver)
+    assert providers_pkg._locate_on_disk("here") == str(tmp_path)
+    # A bare id handed back (no huggingface_hub) is not evidence of weights on disk.
+    with pytest.raises(ModelNotOnDiskError):
+        providers_pkg._locate_on_disk("gone")
+    assert seen == [False, False]  # a readiness probe is never a download
+
+
+def test_manager_records_load_outcomes_across_eviction():
+    class P:
+        def __init__(self, fail=False):
+            self.fail = fail
+            self.is_loaded = False
+
+        def footprint(self, model_id):
+            from hearth.providers.base import ResourceEstimate
+
+            return ResourceEstimate(ram_gb=4.0)
+
+        def load(self, model_id):
+            if self.fail:
+                raise RuntimeError("boom")
+            self.is_loaded = True
+
+        def unload(self, model_id):
+            self.is_loaded = False
+
+    failing = {"bad"}
+    from hearth.serving import ModelManager
+
+    manager = ModelManager(lambda m: P(fail=m in failing), ram_ceiling_gb=5.0)
+    manager.get("a")
+    manager.get("b")  # evicts a
+    assert manager.resident_ids() == ["b"]
+    assert manager.loaded_once("a") and manager.last_load_error("a") is None
+    with pytest.raises(RuntimeError):
+        manager.get("bad")
+    assert manager.last_load_error("bad") == "RuntimeError: boom"
+    assert not manager.loaded_once("bad")
+    failing.clear()
+    manager.get("bad")
+    assert manager.last_load_error("bad") is None and manager.loaded_once("bad")
 
 
 def test_admin_models_reads_residency_off_the_providers(fake, tmp_path, local_policy):

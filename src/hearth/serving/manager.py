@@ -77,6 +77,12 @@ class ModelManager:
         self._resident: OrderedDict[str, Resident] = OrderedDict()
         self._lock = threading.RLock()  # resident-map state; held briefly
         self._load_lock = threading.RLock()  # serializes construct/evict/load/admit
+        # Load OUTCOMES per model id, for readiness: ids whose load completed with weights in
+        # memory at least once, and the error of the most recent failed load attempt
+        # (cleared by the next successful one). Eviction does not erase either: a model that
+        # loaded and was evicted to make room is still known-loadable.
+        self._loaded_once: set[str] = set()
+        self._load_errors: dict[str, str] = {}
 
     def get(self, model_id: str) -> ModelProvider:
         """Return a ready provider for ``model_id``, loading + evicting LRU as needed.
@@ -115,6 +121,21 @@ class ModelManager:
 
     def _load(self, model_id: str) -> ModelProvider:
         """Construct, load, and admit ``model_id`` (caller holds the load lock)."""
+        try:
+            provider = self._admit(model_id)
+        except Exception as exc:
+            with self._lock:
+                self._load_errors[model_id] = f"{type(exc).__name__}: {exc}"
+            raise
+        with self._lock:
+            self._load_errors.pop(model_id, None)
+            # Only a load that left weights in memory counts. A provider that cannot say
+            # (no ``is_loaded``) is taken at its word, as the residency view does.
+            if getattr(provider, "is_loaded", True) is not False:
+                self._loaded_once.add(model_id)
+        return provider
+
+    def _admit(self, model_id: str) -> ModelProvider:
         provider = self._factory(model_id)
         ram_gb = max(0.0, provider.footprint(model_id).ram_gb)
         if ram_gb > self.ram_ceiling_gb:
@@ -177,6 +198,16 @@ class ModelManager:
         """Return whether ``model_id`` is currently loaded."""
         with self._lock:
             return model_id in self._resident
+
+    def loaded_once(self, model_id: str) -> bool:
+        """Whether a load of ``model_id`` has ever completed with weights in memory."""
+        with self._lock:
+            return model_id in self._loaded_once
+
+    def last_load_error(self, model_id: str) -> str | None:
+        """The error of the most recent load attempt of ``model_id``, if that attempt failed."""
+        with self._lock:
+            return self._load_errors.get(model_id)
 
     def resident_ids(self) -> list[str]:
         """Resident model ids in LRU→MRU order (oldest first)."""

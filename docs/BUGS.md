@@ -27,13 +27,13 @@ must fail when the fix is reverted.
 **P0: offline-safety / privacy**
 - ~~[B-001](#b-001) `hearth train` / `models convert` / `models export-coreml` can download~~ — fixed in `13105ef`
 - [B-002](#b-002) cmux C7: a sealed workspace does not contain its panes' children
-- [B-003](#b-003) Escalation fails, then local fails: no record that the prompt may have left
+- ~~[B-003](#b-003) Escalation fails, then local fails: no record that the prompt may have left~~ — fixed in `48982b0`
 
 **P1: correctness**
 - ~~[B-004](#b-004) MLXProvider ignores `GenRequest.model`; the model ladder silently serves the default (in progress)~~ — fixed in `2d186dd`
 - ~~[B-005](#b-005) `/ready` returns 200 with no weights loaded (in progress)~~ — fixed in `2d186dd`
-- [B-006](#b-006) `HEARTH_BACKEND=auto` silently becomes the echo stub, and the stub reports ready
-- [B-007](#b-007) An exception after the stream relay ends the SSE stream with no `[DONE]`
+- ~~[B-006](#b-006) `HEARTH_BACKEND=auto` silently becomes the echo stub, and the stub reports ready~~ — fixed in `12d5366`
+- ~~[B-007](#b-007) An exception after the stream relay ends the SSE stream with no `[DONE]`~~ — fixed in `b6303c6`
 - ~~[B-008](#b-008) A relative `HEARTH_ROUTING_YAML` resolves from the current working directory~~ — fixed in `2550766`
 - [B-009](#b-009) Router confidence is a prompt-length stub; short messages escalate under `routing.remote.yaml`
 - [B-010](#b-010) A promoted adapter with no significance proof is served by default; golden sets are below `min_n`
@@ -70,8 +70,8 @@ must fail when the fix is reverted.
 
 **Added 2026-10-05 (found by the docs agent and the B-008 merge check)**
 - ~~[B-033](#b-033) `hearth serve` with a missing named routing profile prints a full traceback (P2)~~ — fixed in `51b9a30`
-- [B-034](#b-034) Unknown adapter: the response claims the adapter it did not use (P1)
-- [B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)
+- ~~[B-034](#b-034) Unknown adapter: the response claims the adapter it did not use (P1)~~ — fixed in `25aae9f`
+- ~~[B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)~~ — fixed in `927b686`
 - ~~[B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)~~ — fixed in `41bf026`
 - [B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)
 - ~~[B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)~~ — fixed in `48634a5`
@@ -88,7 +88,7 @@ must fail when the fix is reverted.
 
 **Added 2026-10-05 (after the model-selection merge)**
 - ~~[B-047](#b-047) bogus `HEARTH_DEFAULT_MODEL`: `/ready` failed but `auto` served by the default (P1)~~ — fixed in `45dc5e1` (CLI refuses to start; see the item for what `create_app` still does)
-- [B-048](#b-048) `/ready` 503 when the default is evicted (P2)
+- ~~[B-048](#b-048) `/ready` 503 when the default is evicted (P2)~~ — fixed in `927b686`
 - ~~[B-049](#b-049) finance example computes money with float (P1)~~ — fixed in `9d9177e`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
@@ -149,7 +149,7 @@ must fail when the fix is reverted.
 ### B-003
 **When an escalation fails and the local fallback then fails, no RequestRecord is written**
 
-- **Priority:** P0 (unrecorded possible egress) · **Status:** open · **Effort:** S
+- **Priority:** P0 (unrecorded possible egress) · **Status:** **FIXED** in `48982b0` (`RequestRecord.failed`; rollup `failed` / `failure_rate`) · **Effort:** S
 - **Evidence:** Non-streaming, `src/hearth/router/route.py:225-236`: the degrade path calls
   `self._generate(self.local, ...)` at `:236` outside any handler, so a `ProviderError` there
   propagates past `self.metrics.record` at `:262`. Streaming,
@@ -253,7 +253,7 @@ must fail when the fix is reverted.
 ### B-006
 **`HEARTH_BACKEND=auto` (the default) silently falls back to the echo stub, which reports ready**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Priority:** P1 · **Status:** **FIXED** in `12d5366` (WARNING at startup; `/ready` 503 `stub`; `/health` `backend_fallback`; `auto` still falls back) · **Effort:** S
 - **Evidence:** `config.py:28` `backend: str = "auto"`. `providers/__init__.py:30-31`:
   `return MLXProvider(default_model) if mlx_available() else EchoProvider()`, with no log
   and no warning. `mlx_available()` is just `find_spec("mlx_lm")` (`mlx.py:110-114`). Then
@@ -274,7 +274,7 @@ must fail when the fix is reverted.
 ### B-007
 **An exception after the stream relay ends the SSE stream with no `[DONE]`**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Priority:** P1 · **Status:** **FIXED** in `b6303c6` (final chunk + `hearth.metrics.unavailable` + `[DONE]`; `_guarantee_done` backstop) · **Effort:** S
 - **Evidence:** In `_stream_sse` the `try/except` that guarantees a terminal event closes at
   `app.py:594`. The accounting after it, `router.budget.spend` (`:601`),
   `router.metrics.record` (`:606`) and the final chunk build, is unguarded, and so is
@@ -758,7 +758,7 @@ must fail when the fix is reverted.
 ### B-034
 **Unknown adapter: the response claims the adapter it did not use**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Priority:** P1 · **Status:** **FIXED** in `25aae9f` (explicit unknown adapter → 404 `adapter_not_found`; `hearth.adapter` = what served, else null) · **Effort:** S
 - **Evidence:** Measured in-process: `hearth.adapter="no-such-adapter"` → server logs "adapter 'no-such-adapter' unresolved; serving base weights", response says `hearth.adapter: "no-such-adapter"`, 200. Telemetry echoes the request (`gateway/app.py` ~251 non-stream, ~633 stream) instead of the adapter that loaded.
 - **Impact:** A client (or the eval/A-B flow) believes an adapter served that never did — the CLAUDE.md §3 bug class.
 - **Fix outline:** Report the resolved adapter path/id (or null) from the generation, and decide whether an explicitly requested unknown adapter should be a 404 rather than a silent base-weights fallback.
@@ -767,7 +767,7 @@ must fail when the fix is reverted.
 ### B-035
 **`HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `927b686` (warmup off: 200 when the default's weights resolve on disk, `loaded: false`) · **Effort:** S
 - **Evidence:** Reported by the docs agent, measured in-process on the pre-B-005 code (`gateway/app.py` ~117, ~142); the B-005 work (item 2) rewrites readiness — re-verify after it merges.
 - **Impact:** Orchestrators that gate on `/ready` never route traffic to a server that is serving fine.
 - **Fix outline:** With warmup off, `/ready` should report "not warmed (warmup disabled)" distinctly, or load lazily-on-first-request and then go ready.
@@ -905,7 +905,7 @@ must fail when the fix is reverted.
 ### B-048
 **`/ready` turns 503 when the default model is evicted to make room for another**
 
-- **Priority:** P2 · **Status:** open (from code + an existing unit test; not observed live) · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `927b686` (ready = loaded once + on disk; residency reported as `loaded` / `resident`) · **Effort:** S
 - **Evidence:** `src/hearth/gateway/app.py` `_weights_loaded` (~426) requires the default to be
   resident; LRU eviction under `ram_ceiling_gb` (observed live under a 12 GB ceiling) unloads it.
 - **Impact:** A healthy server reports not-ready; orchestrators gating on `/ready` pull it.
@@ -973,3 +973,8 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `21b30d6` | **B-046.** `hearth train`'s post-train message names `eval ... --prereg ... --promote` or `--report-json` + `adapters promote --report --prereg` (runtime message; docstring left to the help pass). |
 | `45dc5e1` | **B-047.** An explicitly set, unregistered `HEARTH_DEFAULT_MODEL` makes `serve`/`run`/`agent`/`mcp`/`rag query --answer` refuse to start (exit 2, bad id + registered ids); `doctor` FAIL, `doctor --offline` WARN. `Registry.default_id` stays lenient; `require_default()` is the strict form. |
 | `9d9177e` | **B-049.** `examples/finance/run_finance_ladder.py` parses with `hearth.finance.parse_money` and keeps every amount Decimal; tests assert exact totals where float sums drift, plus an AST no-`float(` guard. |
+| `48982b0` | **B-003.** A failed request writes a `RequestRecord` with `failed` set (plain local failure, escalation-then-local failure, a remote stream dying mid-answer), on both the plain and streaming paths. Rollup adds `failed` / `failure_rate`; `backend_mix` and latency count served answers only. Client behaviour unchanged. |
+| `b6303c6` | **B-007.** Every SSE stream ends with `[DONE]`: post-relay accounting failures still send the final chunk, then `hearth.metrics.unavailable`; any other exception becomes `hearth.stream.internal_error` + `[DONE]`. A metrics failure no longer 500s a served non-streaming answer. |
+| `25aae9f` | **B-034.** An explicitly requested unknown/retired adapter is a 404 `adapter_not_found` before anything runs; `hearth.adapter` and the record name the adapter that actually generated (null for base weights, a base retry, a remote, or a backend that ignores adapters). Promoted default unchanged. |
+| `927b686` | **B-035, B-048.** `/ready` = the default loaded with weights at least once, its last load did not fail, and its weights resolve on disk; `loaded` reports residency. Warmup off is ready when on disk; an evicted default stays ready; deleted weights are 503 `failed`. |
+| `12d5366` | **B-006.** `auto` → echo fallback logs a WARNING and `/ready` is 503 `stub` (with `/health` `backend_fallback`); explicit `HEARTH_BACKEND=echo` stays ready. |

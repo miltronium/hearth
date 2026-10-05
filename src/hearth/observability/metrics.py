@@ -48,23 +48,31 @@ def estimated_tokens_saved(task_class: str, prompt_tokens: int, completion_token
 
 @dataclass(frozen=True)
 class RequestRecord:
-    """One served request's telemetry (ARCHITECTURE §8)."""
+    """One request's telemetry (ARCHITECTURE §8) — served, or failed (``failed`` set)."""
 
     task_class: str
     backend: str
     model: str
-    served_by: str  # "local" | "remote"
+    # "local" | "remote": the tier that served — or, when ``failed`` is set, the tier that
+    # was tried last and failed (nothing was served).
+    served_by: str
     prompt_tokens: int
     completion_tokens: int
     latency_ms: float
     escalated: bool = False
     escalation_reason: str | None = None
     # Set when the request TRIED to escalate and the remote failed, so it was served local
-    # (router/route.py:degrade_to_local). Holds the remote's error. Without it a frontier
+    # (router/route.py:degrade_to_local) — or, when ``failed`` is also set, the local
+    # fallback failed too and nothing was served. Holds the remote's error. Without it a frontier
     # outage would read in the metrics as a policy that simply never escalated.
     escalation_failed: str | None = None
     adapter: str | None = None
     estimated_frontier_tokens_saved: int = 0
+    # Set when the client got an ERROR instead of an answer (the local provider failed, or a
+    # remote stream died mid-answer). Holds the error. A failed request used to write no
+    # record at all, so an outage plus a broken local model read as zero traffic — and a
+    # remote that had already received the prompt left no trace (docs/BUGS.md B-003).
+    failed: str | None = None
     ts: float = field(default_factory=time.time)
 
 
@@ -95,6 +103,8 @@ class MetricsStore:
                 "escalations": 0,
                 "escalation_rate": 0.0,
                 "escalations_failed": 0,
+                "failed": 0,
+                "failure_rate": 0.0,
                 "backend_mix": {},
                 "class_mix": {},
                 "latency_ms": {"p50": 0.0, "p95": 0.0},
@@ -103,18 +113,24 @@ class MetricsStore:
         saved = sum(r.estimated_frontier_tokens_saved for r in records)
         escalations = sum(1 for r in records if r.escalated)
         escalations_failed = sum(1 for r in records if r.escalation_failed)
+        failed = sum(1 for r in records if r.failed)
         backend_mix: dict[str, int] = {}
         class_mix: dict[str, int] = {}
         for r in records:
-            backend_mix[r.served_by] = backend_mix.get(r.served_by, 0) + 1
+            # backend_mix is what SERVED answers; a failed request served nothing, so it is
+            # counted under ``failed`` instead of inflating the tier it failed on.
+            if not r.failed:
+                backend_mix[r.served_by] = backend_mix.get(r.served_by, 0) + 1
             class_mix[r.task_class] = class_mix.get(r.task_class, 0) + 1
-        latencies = sorted(r.latency_ms for r in records)
+        latencies = sorted(r.latency_ms for r in records if not r.failed)
         return {
             "requests": total,
             "estimated_frontier_tokens_saved": saved,
             "escalations": escalations,
             "escalation_rate": round(escalations / total, 4),
             "escalations_failed": escalations_failed,
+            "failed": failed,
+            "failure_rate": round(failed / total, 4),
             "backend_mix": backend_mix,
             "class_mix": class_mix,
             "latency_ms": {

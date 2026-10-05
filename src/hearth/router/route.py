@@ -61,6 +61,34 @@ class ProviderError(RuntimeError):
     """
 
 
+class UnknownAdapterError(LookupError):
+    """An explicitly requested adapter id cannot be served (maps to a 404).
+
+    Not registered, retired, or there is no adapter store at all. An explicit
+    ``hearth.adapter`` used to fall back to base weights silently while the response named
+    the adapter as served — the A/B flow then compared base weights against themselves.
+    """
+
+    def __init__(self, adapter_id: str, message: str) -> None:
+        super().__init__(message)
+        self.adapter_id = adapter_id
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+@dataclass(frozen=True)
+class AdapterChoice:
+    """The adapter selected for a local request: its registry ``id`` and on-disk ``path``.
+
+    Both ``None`` means base weights. This is what was *selected*; whether it actually
+    served is decided by the generation (an adapter that fails is retried on base).
+    """
+
+    id: str | None = None
+    path: str | None = None
+
+
 @dataclass(frozen=True)
 class RouteDecision:
     """What the router decided (before execution). Surfaced by ``POST /v1/hearth/route``."""
@@ -194,7 +222,14 @@ class Router:
         allow_escalation: bool = True,
         adapter: str | None = None,
     ) -> RouteResult:
-        """Decide, execute via the chosen provider, and record telemetry (non-streaming)."""
+        """Decide, execute via the chosen provider, and record telemetry (non-streaming).
+
+        Raises :class:`UnknownAdapterError` before anything runs when ``adapter`` names an
+        adapter that cannot be served. The record's ``adapter`` is the adapter that actually
+        served (``None`` for base weights, a remote, or an adapter that failed and was
+        retried on base) — never merely the one requested.
+        """
+        self.check_adapter(adapter)
         decision = self.decide(req, intent=intent, allow_escalation=allow_escalation)
         if decision.would_escalate and decision.backend == "remote":
             remote_cfg = self.policy.remote_for()
@@ -216,16 +251,20 @@ class Router:
 
         # Adapters only layer over the LOCAL backend; resolve the id -> path here so the
         # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
-        adapter_path = None
+        choice = AdapterChoice()
         if not decision.would_escalate:
-            adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
+            choice = self.select_adapter(adapter, decision.task_class, decision.model)
 
         started = time.perf_counter()
         escalation_failed: str | None = None
         try:
-            result = self._generate(provider, decision, req, adapter_path)
+            result, used_path = self._generate(provider, decision, req, choice.path)
         except ProviderError as exc:
             if not decision.would_escalate:
+                # A plain local failure: the client gets a 503, and the record says so.
+                self.record_failure(
+                    req, decision, provider, exc, started=started, adapter=adapter
+                )
                 raise
             # The remote failed (unreachable, offline, SDK missing, rejected the call).
             # Serve the request locally rather than turning a frontier outage into an
@@ -233,9 +272,21 @@ class Router:
             # AND that an escalation was attempted and failed (``escalation_failed``).
             escalation_failed = str(exc)
             decision = self.degrade_to_local(req, decision, exc)
-            adapter_path = self._resolve_adapter(adapter, decision.task_class, decision.model)
-            result = self._generate(self.local, decision, req, adapter_path)
+            choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            provider = self.local
+            try:
+                result, used_path = self._generate(self.local, decision, req, choice.path)
+            except ProviderError as local_exc:
+                # Both failed. The remote was CALLED and may already hold the prompt
+                # (docs/PRIVACY.md), so this is exactly the request the audit trail must
+                # not lose: record the failed escalation and the failed fallback, re-raise.
+                self.record_failure(
+                    req, decision, self.local, local_exc, started=started,
+                    adapter=adapter, escalation_failed=escalation_failed,
+                )
+                raise
         latency_ms = (time.perf_counter() - started) * 1000.0
+        served_adapter = self.served_adapter(provider, choice, used_path)
 
         served_by = "remote" if decision.would_escalate else "local"
         if served_by == "remote":
@@ -257,13 +308,58 @@ class Router:
             escalated=decision.would_escalate,
             escalation_reason=decision.reason if decision.would_escalate else None,
             escalation_failed=escalation_failed,
-            adapter=adapter,
+            adapter=served_adapter,
             estimated_frontier_tokens_saved=saved,
         )
-        self.metrics.record(record)
+        try:
+            self.metrics.record(record)
+        except Exception as exc:  # noqa: BLE001 — the answer exists; accounting can't 500 it
+            logger.error("request served but could not be recorded: %s", exc)
         return RouteResult(result=result, decision=decision, record=record)
 
     # -- helpers ----------------------------------------------------------------------
+
+    def record_failure(
+        self,
+        req: GenRequest,
+        decision: RouteDecision,
+        provider: ModelProvider,
+        exc: Exception,
+        *,
+        started: float,
+        adapter: str | None = None,
+        escalation_failed: str | None = None,
+        completion_tokens: int = 0,
+    ) -> RequestRecord | None:
+        """Record a request that ended in an error instead of an answer (``failed`` set).
+
+        Shared by :meth:`route` and the gateway's streaming path. ``served_by`` names the
+        tier that was tried and failed; ``backend_mix`` does not count it (nothing was
+        served). Never raises: a metrics store that fails here must not replace the
+        provider's error the client is about to receive with its own.
+        """
+        prompt_tokens = max(1, sum(len(m.content) for m in req.messages) // 4)
+        record = RequestRecord(
+            task_class=decision.task_class,
+            backend=provider.name,
+            model=decision.model,
+            served_by="remote" if decision.would_escalate else "local",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            escalated=decision.would_escalate,
+            escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
+            adapter=adapter,
+            estimated_frontier_tokens_saved=0,
+            failed=str(exc),
+        )
+        try:
+            self.metrics.record(record)
+        except Exception as rec_exc:  # noqa: BLE001 — the original error must surface
+            logger.error("could not record failed request (%s): %s", exc, rec_exc)
+            return None
+        return record
 
     def degrade_to_local(
         self, req: GenRequest, decision: RouteDecision, exc: Exception
@@ -297,12 +393,15 @@ class Router:
         decision: RouteDecision,
         req: GenRequest,
         adapter_path: str | None,
-    ) -> GenResult:
+    ) -> tuple[GenResult, str | None]:
         """Run ``provider.generate`` with graceful degradation (Phase 7 hardening).
 
         If generation fails *with* an adapter, retry once on base weights — a bad adapter
         must not sink an otherwise-servable request. If it still fails, wrap the error as a
         :class:`ProviderError` so the gateway returns a clean 503 rather than a 500.
+
+        Returns ``(result, adapter_path_used)``: the path is ``None`` when base weights
+        answered, including after a failed adapter was retried on base.
         """
         gen = GenRequest(
             messages=req.messages,
@@ -312,7 +411,7 @@ class Router:
             adapter=adapter_path,
         )
         try:
-            return provider.generate(gen)
+            return provider.generate(gen), adapter_path
         except UnknownModelError:
             # The request named a model nobody serves. That is the caller's error (a 404),
             # not a provider outage to retry or wrap as a 503.
@@ -331,7 +430,7 @@ class Router:
                             temperature=req.temperature,
                             adapter=None,
                         )
-                    )
+                    ), None
                 except Exception as retry_exc:  # noqa: BLE001
                     exc = retry_exc
             logger.error("provider %s failed to generate: %s", provider.name, exc)
@@ -366,17 +465,41 @@ class Router:
         cfg = self.policy.remote_for()
         return cfg.model if cfg else self.policy.defaults.remote
 
-    def _resolve_adapter(
+    def check_adapter(self, requested: str | None) -> None:
+        """Refuse an explicitly requested adapter that cannot be served.
+
+        Raises :class:`UnknownAdapterError` (a 404 at the gateway, like an unknown model)
+        when ``requested`` is set and is not a servable registered adapter. Called before
+        anything is generated or a stream is opened.
+        """
+        if not requested:
+            return
+        store = self._adapter_store()
+        if store is None:
+            raise UnknownAdapterError(
+                requested,
+                f"adapter {requested!r} was requested but no adapter registry is available",
+            )
+        try:
+            store.resolve_path(requested, allow_candidate=True)
+        except Exception as exc:  # noqa: BLE001 — AdapterError and friends: not servable
+            raise UnknownAdapterError(
+                requested, f"adapter {requested!r} cannot be served: {exc}"
+            ) from exc
+
+    def select_adapter(
         self, requested: str | None, task_class: str, model: str | None = None
-    ) -> str | None:
-        """Resolve the adapter to actually load for a local request → an on-disk path.
+    ) -> AdapterChoice:
+        """Select the adapter to load for a local request → its id and on-disk path.
 
         Resolution:
           * an explicit ``requested`` id (``hearth.adapter``) wins — served behind the A/B
-            flag even if it's still a candidate (ARCHITECTURE §5);
+            flag even if it's still a candidate (ARCHITECTURE §5). One that cannot be
+            served raises :class:`UnknownAdapterError`: an explicit request is never
+            quietly answered by base weights;
           * otherwise the promoted adapter for the task class serves by default, **if it was
             trained on the model actually being served**;
-          * else ``None`` (base weights).
+          * else base weights (an empty :class:`AdapterChoice`).
 
         The base-model check matters once a class pins its own ``local_model``: a ladder can
         route a class to a different base than its promoted adapter was tuned on (e.g. a
@@ -387,19 +510,22 @@ class Router:
         deliberate operator choice. ``model=None`` means "caller didn't say what is serving",
         which skips the check and preserves the pre-ladder behaviour.
 
-        Returns ``None`` (and never raises) when there's no adapter store or the requested
-        id can't be resolved — routing must not fail because an adapter is missing; it
-        degrades to the base model.
+        The promoted-default path never raises: a missing store or an unresolvable promoted
+        entry degrades to base weights (and the response then reports no adapter).
         """
+        if requested:
+            self.check_adapter(requested)
+            store = self._adapter_store()
+            return AdapterChoice(
+                id=requested, path=store.resolve_path(requested, allow_candidate=True)
+            )
         store = self._adapter_store()
         if store is None:
-            return None
+            return AdapterChoice()
         try:
-            if requested:
-                return store.resolve_path(requested, allow_candidate=True)
             promoted = store.promoted_for(task_class)
             if promoted is None:
-                return None
+                return AdapterChoice()
             if model is not None and promoted.base_model and promoted.base_model != model:
                 logger.debug(
                     "adapter %s was trained on %s but %s is served by %s; serving base weights",
@@ -408,11 +534,38 @@ class Router:
                     task_class,
                     model,
                 )
-                return None
-            return store.resolve_path(promoted.id)
+                return AdapterChoice()
+            return AdapterChoice(id=promoted.id, path=store.resolve_path(promoted.id))
         except Exception:  # noqa: BLE001 — degrade to base weights; never fail the request
-            logger.warning("adapter %r unresolved; serving base weights", requested)
+            logger.warning(
+                "promoted adapter for %r unresolved; serving base weights", task_class
+            )
+            return AdapterChoice()
+
+    def _resolve_adapter(
+        self, requested: str | None, task_class: str, model: str | None = None
+    ) -> str | None:
+        """The on-disk path of :meth:`select_adapter`'s choice (``None`` = base weights)."""
+        return self.select_adapter(requested, task_class, model).path
+
+    @staticmethod
+    def served_adapter(
+        provider: ModelProvider, choice: AdapterChoice, used_path: str | None
+    ) -> str | None:
+        """The adapter id that actually served, for telemetry — or ``None``.
+
+        ``None`` unless the generation really ran with the chosen adapter's path (not
+        retried on base) on a provider that applies adapters at all: a provider whose
+        capabilities say ``adapters=False`` ignores ``GenRequest.adapter`` (the echo stub),
+        so naming an adapter for its answer would be the false claim B-034 was about.
+        """
+        if choice.id is None or used_path is None or used_path != choice.path:
             return None
+        try:
+            applies = bool(provider.capabilities().adapters)
+        except Exception:  # noqa: BLE001 — a provider that can't say has not shown it applies
+            applies = False
+        return choice.id if applies else None
 
     def _adapter_store(self):
         """The adapter store (injected, or lazily the default). ``None`` if unavailable."""
@@ -448,4 +601,12 @@ def _estimate_remote_cost(req: GenRequest) -> int:
     return max(1, prompt_chars // 4) + req.max_tokens
 
 
-__all__ = ["Router", "RouteDecision", "RouteResult", "BudgetExhaustedError", "ProviderError"]
+__all__ = [
+    "AdapterChoice",
+    "BudgetExhaustedError",
+    "ProviderError",
+    "RouteDecision",
+    "RouteResult",
+    "Router",
+    "UnknownAdapterError",
+]

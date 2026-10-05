@@ -3,6 +3,8 @@ passes it to the provider; MLXProvider caches per-adapter loads. All with fakes;
 
 from __future__ import annotations
 
+import pytest
+
 from hearth.observability.budget import BudgetAccountant
 from hearth.observability.metrics import MetricsStore
 from hearth.providers.base import Capabilities, GenRequest, GenResult, Message
@@ -10,6 +12,7 @@ from hearth.registry import AdapterStore, get_registry
 from hearth.router import Router, RoutingPolicy
 from hearth.router.classify import TASK_CLASSES
 from hearth.router.policy import ClassRule, Defaults
+from hearth.router.route import UnknownAdapterError
 
 
 class RecordingProvider:
@@ -142,13 +145,46 @@ def test_no_adapter_serves_base_weights(tmp_path):
     assert provider.seen_adapters == [None]
 
 
-def test_unresolvable_adapter_degrades_to_base(tmp_path):
+def test_unresolvable_explicit_adapter_is_refused_not_served_as_base(tmp_path):
+    """B-034: an explicit unknown adapter used to be answered by base weights while the
+    response named the adapter. It is now refused before anything is generated."""
     store = AdapterStore(path=tmp_path / "adapters.json")
     provider = RecordingProvider()
     router = _router(provider, store)
-    # Requesting an unknown id must not fail the request — it serves base weights.
-    router.route(_req(), intent="extract", adapter="does-not-exist")
-    assert provider.seen_adapters == [None]
+    with pytest.raises(UnknownAdapterError, match="does-not-exist"):
+        router.route(_req(), intent="extract", adapter="does-not-exist")
+    assert provider.seen_adapters == []  # nothing ran
+    assert router.metrics.rollup()["requests"] == 0
+
+
+def test_record_names_the_adapter_that_served(tmp_path):
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register(
+        "extract-1", base_model="b", task="extract", train_run_id="r", adapter_path="/a/extract-1"
+    )
+    provider = RecordingProvider()
+    routed = _router(provider, store).route(_req(), intent="extract", adapter="extract-1")
+    assert provider.seen_adapters == ["/a/extract-1"]
+    assert routed.record.adapter == "extract-1"
+
+
+def test_record_names_no_adapter_when_it_failed_and_base_served(tmp_path):
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register(
+        "extract-1", base_model="b", task="extract", train_run_id="r", adapter_path="/a/extract-1"
+    )
+
+    class BrokenAdapterProvider(RecordingProvider):
+        def generate(self, req):
+            self.seen_adapters.append(req.adapter)
+            if req.adapter:
+                raise RuntimeError("bad adapter shape")
+            return GenResult(text="base", model=req.model, backend=self.name)
+
+    provider = BrokenAdapterProvider()
+    routed = _router(provider, store).route(_req(), intent="extract", adapter="extract-1")
+    assert provider.seen_adapters == ["/a/extract-1", None]  # retried on base weights
+    assert routed.record.adapter is None
 
 
 def test_mlx_provider_caches_per_adapter_loads(monkeypatch):
