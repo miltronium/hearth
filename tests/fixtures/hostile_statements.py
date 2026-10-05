@@ -11,6 +11,8 @@ so the bytes each test relies on are visible here rather than hidden in a binary
   index that does not exist (openpyxl warns). All three reach stderr through
   ``warnings.warn`` in openpyxl 3.1, in read-only mode too (B-090).
 * :data:`BOM_CSV`, :data:`BOM_JSON` - UTF-8 files that start with a byte-order mark (B-094).
+* :data:`VOCAB_PREAMBLE_CSV` - a two-cell preamble made of vocabulary words
+  (``Account Type,Credit Card``) above the real header (B-093).
 """
 
 from __future__ import annotations
@@ -109,3 +111,12 @@ BOM_JSON = (
     BOM + '[{"Date":"2024-01-02","Description":"SECRETBOMJSON","Amount":"-1.00"},'
     '{"Date":"2024-01-03","Description":"SECRETBOMJSONTWO","Amount":"2.00"}]'
 ).encode("utf-8")
+
+#: A two-cell preamble whose cells are vocabulary words used as VALUES (B-093): the old rule
+#: (first row with 2+ vocabulary names) took it as the header and printed "Credit Card".
+VOCAB_PREAMBLE_CSV = (
+    b"Account Type,Credit Card\n"
+    b"Date,Description,Amount\n"
+    b"2024-01-02,COFFEE SHOP,-4.50\n"
+    b"2024-01-03,PAYROLL,1000.00\n"
+)

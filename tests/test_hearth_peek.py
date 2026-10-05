@@ -308,6 +308,50 @@ def test_the_allowlist_predicate(cell, known):
     assert _load_peek().is_known_column_name(cell) is known
 
 
+# -- B-093: vocabulary words used as VALUES above the header ------------------------------
+
+
+def test_a_vocabulary_preamble_is_not_taken_as_the_header(tmp_path, monkeypatch, capsys):
+    """``Account Type,Credit Card`` has two vocabulary names; it is a preamble of values."""
+    (tmp_path / "s.csv").write_bytes(hostile.VOCAB_PREAMBLE_CSV)
+    code, out = _run_on(tmp_path, monkeypatch, capsys)
+    assert code == 0
+    assert "Credit Card" not in out and "Account Type" not in out, out
+    assert "header is row 2; skip_rows: 1" in out
+    for name in ("Date", "Description", "Amount"):
+        assert re.search(rf"^ +\d  {name} ", out, re.M), out
+
+
+def _rows(text: str) -> list[list[str]]:
+    return [line.split(",") for line in text.strip().splitlines()]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # the reviewer's case: a narrower vocabulary preamble, then the header, then data
+        ("Account Type,Credit Card\nDate,Description,Amount\n2024-01-02,X,-1.00", 1),
+        # a full-width vocabulary preamble directly above the header: no data below it
+        ("Account Type,Credit Card,Status\nDate,Description,Amount\n2024-01-02,X,1.00", 1),
+        # a data row whose text is vocabulary is never the header
+        ("2024-01-02,Debit,Check,-4.50\n2024-01-03,Credit,Fee,1.00", None),
+        # a vocabulary row narrower than the data, directly above it, is not a header
+        ("Account Type,Credit Card\n2024-01-02,X,-1.00,7.00", None),
+        # header with a trailing column that is mostly empty in the data still qualifies
+        ("Date,Description,Amount,Check Number\n2024-01-02,X,-1.00,\n2024-01-03,Y,2.00,",
+         0),
+        # a header that holds a value itself is not one
+        ("Date,Amount,2024\n2024-01-02,1.00,3", None),
+        # nothing below the vocabulary row
+        ("Date,Description,Amount", None),
+    ],
+)
+def test_find_header_takes_only_a_header_shaped_row_directly_above_data(text, expected):
+    from hearth.finance.shape import find_header
+
+    assert find_header(_rows(text)) == expected
+
+
 # -- property: random synthetic tables ---------------------------------------------------
 
 KNOWN_HEADERS = [
@@ -369,11 +413,21 @@ def _random_table(rng: random.Random, token) -> tuple[list[list[str]], list[str]
             else:
                 header.append(_random_cell(rng, token, secrets))
         rows.append(header)
-        if sum(1 for c in header if c in KNOWN_HEADERS) < 2:
+        # The header rule (shape.find_header): 2+ vocabulary names, no value of its own (no
+        # numeric-date or bare-number cell), and a data row directly below. Re-stated here
+        # independently rather than by calling the implementation under test.
+        holds_value = any(_VALUE.match(c) for c in header)
+        if sum(1 for c in header if c in KNOWN_HEADERS) < 2 or holds_value:
             shown = []  # not identifiable as a header; nothing need be shown
-    for _ in range(rng.randint(1, 20)):
-        rows.append([_random_cell(rng, token, secrets) for _ in range(width)])
+    for r in range(rng.randint(1, 20)):
+        row = [_random_cell(rng, token, secrets) for _ in range(width)]
+        if r == 0:  # a statement's first transaction carries a date
+            row[rng.randrange(width)] = f"20{rng.randint(10, 29)}-01-{rng.randint(1, 28):02d}"
+        rows.append(row)
     return rows, secrets, shown
+
+
+_VALUE = re.compile(r"^(-?\d+(\.\d+)?|\d{4}-\d{2}-\d{2})$")
 
 
 def _csv(rows: list[list[str]]) -> str:

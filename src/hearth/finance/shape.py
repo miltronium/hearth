@@ -11,8 +11,10 @@ replaced that, so the two scripts cannot drift apart:
   column words) plus spacing and punctuation, with no digit anywhere. Anything else is
   :data:`WITHHELD`, whatever it looks like. No heuristic decides whether text "looks like a
   label"; no heuristic can tell a merchant name from a column name.
-* **The header row is the first row (within :data:`HEADER_SCAN`) holding at least
-  :data:`MIN_KNOWN` vocabulary names**; for keyed data (a JSON array of objects) it is the key
+* **The header row is the first row (within :data:`HEADER_SCAN`) shaped like a header
+  directly above data**: at least :data:`MIN_KNOWN` vocabulary names, no value of its own,
+  a data row right below it, and at least as wide as the data (:func:`find_header`). For
+  keyed data (a JSON array of objects) it is the key
   row. Rows above it are preamble: they become ``skip_rows`` and are never printed. A wrong
   pick costs nothing in privacy, because whichever row is picked only its vocabulary cells can
   print.
@@ -57,6 +59,11 @@ _HEADER_CHARS = re.compile(r"^[A-Za-z .,_/()#&:$*'-]+$")
 HEADER_SCAN = 30  # how far down a file the real header may sit below a preamble
 MIN_KNOWN = 2  # known column names a row needs before it is taken as the header
 
+#: A cell that is a VALUE by its shape: a numeric date, or a bare (signed, currency-marked,
+#: parenthesized, trailing-minus) number. Used only to tell data rows from header rows.
+_DATE_SHAPE = re.compile(r"^\s*\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
+_NUMBER_SHAPE = re.compile(r"^\s*[-+(]?\s*[$€£]?\s*\d[\d,.]*\s*\)?-?\s*[$€£]?\s*$")
+
 WITHHELD = "(withheld)"
 NO_HEADER = "(withheld: no header found)"
 EMPTY_HEADER = "(blank)"
@@ -96,18 +103,56 @@ def is_known_column_name(cell: str) -> bool:
     return 0 < len(words) <= _MAX_HEADER_WORDS and all(w in VOCAB for w in words)
 
 
+def is_data_like(row: Sequence[str]) -> bool:
+    """True if any cell is date-shaped or a bare number: the row holds a VALUE.
+
+    Lexical, like everything here. A header never needs a date or a pure number in it, and a
+    statement's data rows almost always have both.
+    """
+    return any(_DATE_SHAPE.match(c) or _NUMBER_SHAPE.match(c) for c in map(str, row))
+
+
+def _span(row: Sequence[str]) -> int:
+    """Populated width: the position after the last non-blank cell (rows arrive padded)."""
+    return max((i + 1 for i, c in enumerate(row) if str(c).strip()), default=0)
+
+
+def _modal_span(rows: Sequence[Sequence[str]]) -> int:
+    spans = [_span(r) for r in rows if is_data_like(r)]
+    return max(set(spans), key=lambda s: (spans.count(s), s)) if spans else 0
+
+
 def find_header(rows: Sequence[Sequence[str]], *, keyed: bool = False) -> int | None:
     """Return the index of the header row, or None if no row qualifies.
 
     ``keyed`` tables (a JSON array of objects, as ``read_table`` returns it) have their keys
     as row 0 by construction. Otherwise the header is the first row within
-    :data:`HEADER_SCAN` holding at least :data:`MIN_KNOWN` known column names; every row above
-    it is preamble, i.e. ``skip_rows``.
+    :data:`HEADER_SCAN` that is shaped like a header **directly above data**:
+
+    1. it holds at least :data:`MIN_KNOWN` known column names;
+    2. it holds no value itself (:func:`is_data_like` is false);
+    3. the row right below it does (:func:`is_data_like` is true);
+    4. it is at least as wide as the data: its populated span is >= the modal span of the
+       data-like rows below it.
+
+    Every row above it is preamble, i.e. ``skip_rows``. Rule 1 alone (the old rule) took a
+    two-cell preamble of vocabulary VALUES, ``Account Type,Credit Card``, as the header and
+    printed "Credit Card" (B-093); rules 3 and 4 refuse it (a header follows it, not data,
+    and it is narrower than the data). Rule 2 means a data row whose text happens to be
+    vocabulary (``2024-01-02,Debit,Check,-4.50``) is never a header. What still prints is
+    bounded as before: only vocabulary cells of the chosen row, never a digit. When no row
+    passes all four, nothing is named and the file is reported as headerless - a miss costs
+    usefulness, never privacy.
     """
     if keyed:
         return 0 if rows else None
     for i, row in enumerate(rows[:HEADER_SCAN]):
-        if sum(1 for c in row if is_known_column_name(c)) >= MIN_KNOWN:
+        if sum(1 for c in row if is_known_column_name(c)) < MIN_KNOWN or is_data_like(row):
+            continue
+        below = rows[i + 1 :]
+        if not below or not is_data_like(below[0]):
+            continue
+        if _span(row) >= _modal_span(below):
             return i
     return None
 

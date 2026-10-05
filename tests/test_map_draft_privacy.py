@@ -302,6 +302,26 @@ def test_workbook_metadata_is_not_printed_in_process_either(tmp_path, capsys, mo
         assert secret not in out
 
 
+# -- B-093: vocabulary words used as VALUES above the header ---------------------------------
+
+
+def test_a_vocabulary_preamble_is_skipped_not_drafted_as_the_header(
+    tmp_path, capsys, monkeypatch
+):
+    """Before: 'Credit Card' printed as a column name and the draft had skip_rows 0."""
+    root = tmp_path / "in"
+    root.mkdir()
+    (root / "s.csv").write_bytes(hostile.VOCAB_PREAMBLE_CSV)
+    code, out = _run(root, capsys, monkeypatch, "--no-model")
+    assert code == 0, out
+    assert "Credit Card" not in out and "Account Type" not in out, out
+    assert "header is row 2; skip_rows: 1" in out and "verification: verified" in out
+    mapping = ColumnMapping.from_yaml(tmp_path / "in-mappings" / "format-1.yaml")
+    assert mapping.skip_rows == 1
+    parsed = parse_rows(read_table(root / "s.csv", Settings(file_roots=str(root))), mapping)
+    assert [str(t.amount) for t in parsed] == ["-4.50", "1000.00"]
+
+
 # -- the model path: it may SEE what it needs; nothing it returns prints raw -------------------
 
 
@@ -481,7 +501,11 @@ def _table(rng: random.Random, token):
             else:
                 header.append(_cell(rng, token, secrets))
         rows.append(header)
-        identifiable = sum(1 for c in header if is_known_column_name(c)) >= 2
+        # The header rule (shape.find_header), re-stated independently: 2+ vocabulary names
+        # and no value of its own (numeric date or bare number); the first data row below is
+        # made to carry a date, so "a data row directly below" holds.
+        holds_value = any(_VALUE.match(c) for c in header)
+        identifiable = sum(1 for c in header if is_known_column_name(c)) >= 2 and not holds_value
         if identifiable:
             shown = [c for c in header if is_known_column_name(c)]
     typed = rng.random() < 0.7
@@ -512,6 +536,8 @@ def _table(rng: random.Random, token):
                 word = token()
                 secrets.append(word)
                 row.append(f"{word.upper()} {rng.randint(100, 99999)}")
+        if not typed and r == 0:  # a statement's first transaction carries a date
+            row[rng.randrange(len(row))] = f"20{rng.randint(10, 29)}-01-{rng.randint(1, 28):02d}"
         rows.append(row)
     if typed and n_rows > 2 and rng.random() < 0.35:  # a blank date: the trial parse fails
         rows[-1][kinds.index("d")] = ""
@@ -520,6 +546,9 @@ def _table(rng: random.Random, token):
 
 def _csv(rows: list[list[str]]) -> str:
     return "\n".join(",".join(f'"{c}"' if "," in c else c for c in r) for r in rows) + "\n"
+
+
+_VALUE = re.compile(r"^(-?\d+(\.\d+)?|\d{4}-\d{2}-\d{2})$")
 
 
 def _hostile_model(rng: random.Random, token, secrets: list[str]) -> FakeModel:

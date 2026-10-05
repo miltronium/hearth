@@ -116,9 +116,13 @@ What is and is not printed, and why:
   guessed which text "looked like a label" and printed an account holder's name and a
   headerless file's merchant names, B-063.) For a withheld column, open the file locally and
   copy its header text into the mapping yourself.
-- **The header row** is the first row (in the first 30) with at least two vocabulary names; for
-  JSON it is the key row. The rows above it are your `skip_rows` and are counted, never shown.
-  If no row qualifies, the file says `no header row identified` and every name is withheld.
+- **The header row** is the first row (in the first 30) that is shaped like a header directly
+  above data: at least two vocabulary names, no value of its own (no numeric date or bare
+  number), a data row right below it, and at least as wide as the data. For JSON it is the
+  key row. The rows above it are your `skip_rows` and are counted, never shown. A preamble of
+  vocabulary words used as values (`Account Type,Credit Card`) is not a header: a header,
+  not data, follows it (B-093). If no row qualifies, the file says `no header row identified`
+  and every name is withheld.
 - **Files are ids, not names.** File and directory names carry account numbers and holder
   names, so files print as `F1`, `F2`, … with their extension. `--index-out FILE` writes the
   id → path list to a local file (nothing about it is printed); do not paste that file.
@@ -484,7 +488,8 @@ HEARTH_FILE_ROOTS=~/hearth-statements \
 ```
 
 It walks the directory, finds each file's real header row the same way `hearth_peek.py` does
-(the first row in the first 30 with at least two vocabulary column names; the rows above it
+(the first row in the first 30 with at least two vocabulary column names, no value of its own
+and a data row directly below it; the rows above it
 are preamble), groups files by header row and header (one mapping per format, not per file),
 and writes a **draft** YAML per format into `~/hearth-statements/mappings/` — or wherever
 `--out` points. The preamble count goes into the draft as `skip_rows`. A file with no row that

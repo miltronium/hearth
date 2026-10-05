@@ -44,7 +44,8 @@ human is therefore inert until it gets one, rather than being a plausible file t
 
 **The header row is found, not assumed.** Real exports put the account holder, account number
 and statement period above the header. The header is the first row (in the first 30) holding
-at least two names from a fixed column vocabulary, exactly as ``scripts/hearth_peek.py`` finds
+at least two names from a fixed column vocabulary, no value of its own, with a data row
+directly below it and at least the data's width, exactly as ``scripts/hearth_peek.py`` finds
 it (both use :mod:`hearth.finance.shape`); the rows above it are written into the draft as
 ``skip_rows``. Taking ``rows[0]`` made every draft for a file with a preamble wrong and printed
 the preamble as column names (B-074).
@@ -131,7 +132,8 @@ TABLE_EXTS = {".csv", ".xlsx", ".json"}
 
 NO_HEADER_REASON = (
     f"no header row identified (no row in the first {HEADER_SCAN} has {MIN_KNOWN}+ known "
-    "column names); write this mapping by hand"
+    "column names, no value of its own, and a data row directly below it); write this "
+    "mapping by hand"
 )
 
 
@@ -1143,10 +1145,11 @@ def draft_for_profile(
         Provenance("skip_rows", str(profile.skip_rows), SOURCE_MECHANICAL,
                    f"the header is row {profile.skip_rows + 1}: the first row (in the first "
                    f"{HEADER_SCAN}) holding {MIN_KNOWN}+ names from HEARTH's fixed column "
-                   "vocabulary, the same rule scripts/hearth_peek.py uses. The "
+                   "vocabulary, no value of its own, and a data row directly below it, the "
+                   "same rule scripts/hearth_peek.py uses. The "
                    f"{profile.skip_rows} row(s) above it are preamble. If a preamble row "
-                   "happens to hold two such names, this is too early and the trial parse "
-                   "below is what catches it")
+                   "is shaped like a header above data, this is too early and the trial "
+                   "parse below is what catches it")
     )
 
     name = _slug(str(proposal.get("format_name") or "")) or f"format-{rank}"
