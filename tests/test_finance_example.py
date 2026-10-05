@@ -238,3 +238,42 @@ def test_verify_no_egress_fails_closed(policy):
     with pytest.raises(SystemExit) as exc:
         ladder.verify_no_egress(policy, Path("test.yaml"))
     assert exc.value.code == 2
+
+
+# -- which routing profile (B-073) ----------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def test_routing_defaults_to_the_finance_profile():
+    assert ladder.select_routing(None, {}) == _REPO / "config" / "routing.finance.yaml"
+
+
+def test_routing_env_is_resolved_against_the_repo_root_not_the_cwd(tmp_path, monkeypatch):
+    # A decoy under the cwd must not be what a relative HEARTH_ROUTING_YAML names.
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "routing.private.yaml").write_text("remotes: {x: {}}\n")
+    monkeypatch.chdir(tmp_path)
+    got = ladder.select_routing(None, {"HEARTH_ROUTING_YAML": "config/routing.private.yaml"})
+    assert got == _REPO / "config" / "routing.private.yaml"
+
+
+@pytest.mark.parametrize(
+    ("cli", "env"),
+    [(None, {"HEARTH_ROUTING_YAML": "config/routing.nope.yaml"}),
+     (Path("/nonexistent/routing.yaml"), {})],
+    ids=["env-names-missing", "cli-names-missing"],
+)
+def test_a_missing_named_profile_exits_instead_of_falling_back(cli, env, capsys):
+    with pytest.raises(SystemExit) as exc:
+        ladder.select_routing(cli, env)
+    assert exc.value.code == 2
+    assert "routing profile not found" in capsys.readouterr().err
+
+
+def test_main_refuses_a_missing_profile_before_loading_anything(monkeypatch):
+    monkeypatch.setenv("HEARTH_ROUTING_YAML", "config/routing.nope.yaml")
+    monkeypatch.setattr(ladder, "make_provider", lambda *a: pytest.fail("provider built"))
+    with pytest.raises(SystemExit) as exc:
+        ladder.main(["--dry-run"])
+    assert exc.value.code == 2
