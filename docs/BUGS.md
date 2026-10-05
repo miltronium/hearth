@@ -73,7 +73,7 @@ must fail when the fix is reverted.
 - ~~[B-034](#b-034) Unknown adapter: the response claims the adapter it did not use (P1)~~ — fixed in `25aae9f`
 - ~~[B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)~~ — fixed in `927b686`
 - ~~[B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)~~ — fixed in `41bf026`
-- [B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)
+- ~~[B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)~~ — fixed in `2c8f5f9`
 - ~~[B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)~~ — fixed in `48634a5`
 - ~~[B-039](#b-039) `training/dataset.py` promises headerless datasets, then refuses them (P3)~~ — fixed in `46bddeb`
 - ~~[B-040](#b-040) Example docs give install/run commands that prune the venv (P2)~~ — fixed in `0c3b5f9`
@@ -90,6 +90,19 @@ must fail when the fix is reverted.
 - ~~[B-047](#b-047) bogus `HEARTH_DEFAULT_MODEL`: `/ready` failed but `auto` served by the default (P1)~~ — fixed in `45dc5e1` (CLI refuses to start; see the item for what `create_app` still does)
 - ~~[B-048](#b-048) `/ready` 503 when the default is evicted (P2)~~ — fixed in `927b686`
 - ~~[B-049](#b-049) finance example computes money with float (P1)~~ — fixed in `9d9177e`
+
+**Added 2026-10-05 (CLI-polish batch; recorded as found and fixed)**
+- ~~[B-050](#b-050) `--help` prose is ragged at 80 columns (P3)~~ — fixed in `9fd539c`
+- ~~[B-051](#b-051) `hearth stats` hides `failed` / `failure_rate`; "(served local)" label is false (P2)~~ — fixed in `6eb4fac`
+- ~~[B-052](#b-052) `hearth train` with a 1-record dataset ends in a traceback (P3)~~ — fixed in `eff5a9c`
+- ~~[B-053](#b-053) `hearth serve` printed "Serving on" before `create_app` raised (P3)~~ — fixed in `51b9a30`, pinned by `ff192b5`
+- ~~[B-054](#b-054) `ModelNotOnDiskError` says `hearth models pull` for paths and unregistered ids (P2)~~ — fixed in `5556f5d`
+- ~~[B-055](#b-055) MLX embedder error: "..", and sandbox advice (P3)~~ — fixed in `1d4da3f`
+- ~~[B-056](#b-056) `rag query` embeds before checking the collection is empty (P2)~~ — fixed in `0f72c06`
+- ~~[B-057](#b-057) `serve`'s stderr log handler: stale stream, suppressed by any foreign handler (P3)~~ — fixed in `258ff98`
+- ~~[B-058](#b-058) `doctor --offline` `serving_resolution` says `~/.hearth/models` under any `HEARTH_HOME` (P3)~~ — fixed in `f014ff6`
+- [B-059](#b-059) An unknown `HEARTH_BACKEND` ends every command in a traceback (P3)
+- [B-060](#b-060) An unknown `hearth.intent` / `--intent` is silently ignored (P3)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -787,7 +800,10 @@ must fail when the fix is reverted.
 ### B-037
 **`docs/API.md` documents endpoints that do not exist, and the wrong error envelope**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `2c8f5f9` — the endpoint list matches
+  `create_app().routes`; the never-built endpoints sit under "Not implemented", each marked;
+  the error model documents the 401 `detail` nesting and the real types. Drift test
+  `tests/test_api_doc_routes.py` checks both directions and the 401 body · **Effort:** S
 - **Evidence:** Checked: `docs/API.md` names `/v1/hearth/classify`, `/v1/hearth/summarize`, `/v1/hearth/train/`, `/v1/hearth/train/{run_id}`; no route defines them (`grep @app.(get|post)` in `src/hearth/gateway`). Docs agent also reports `/admin/models/{id}/load|unload` and `/admin/adapters/...`, and that the real 401 is nested under `detail` (`gateway/auth.py:34`).
 - **Impact:** Integrators build against an API that 404s.
 - **Fix outline:** Regenerate the endpoint list from the FastAPI app (`app.routes`) and add a test that every documented path exists.
@@ -888,10 +904,9 @@ must fail when the fix is reverted.
   `run`, `agent`, `mcp` and `rag query --answer` refuse to start (exit 2) naming the bad id and
   the registered ids; plain `doctor` FAILs (fatal); `doctor --offline` shows it as a non-fatal
   WARN row (a refusal to start is not an egress path), verdict unchanged. Unset → catalog
-  default. **Still true:** an app built directly with `create_app()` (not via `hearth serve`)
-  serves `auto` from the catalog default while `/ready` reports failed —
-  `gateway/app.py:_default_model_problem` re-derives the check from `os.environ` instead of
-  calling `require_default()` (gateway not touched in this batch) · **Effort:** S
+  default. The gateway half followed in `7e6e12e`: `create_app()` itself calls
+  `registry.require_default()` (`gateway/app.py:94`) and raises `UnregisteredDefaultModelError`
+  (re-measured in the CLI-polish batch) · **Effort:** S
 - **Evidence:** Confirmed live by the model-selection agent (in-process, real weights): with
   `HEARTH_DEFAULT_MODEL=bogus/no-such-model`, `/ready` → 503 `failed`, yet a `model=auto` chat
   is answered 200 by Coder-7B and `/admin/health` reports the 7B (`registry/__init__.py:59`
@@ -928,6 +943,134 @@ must fail when the fix is reverted.
   `hearth.finance` parsing if it fits.
 - **Acceptance test:** amounts that sum exactly in Decimal but not in float (e.g. 0.10 + 0.20)
   produce the exact total; a test fails if `float(` reappears in money paths.
+
+### B-050
+**`--help` prose is ragged at an 80-column terminal**
+
+- **Priority:** P3 · **Status:** **FIXED** in `9fd539c` · **Effort:** S
+- **Evidence:** Typer/rich keeps every single newline after a help text's summary paragraph,
+  so the ~90-column source lines wrapped again at 80 columns: `hearth --help` read
+  "…127.0.0.1:8080, with / a / chat page (/chat)…" with one-word orphan lines. Examples over
+  78 columns wrapped mid-command.
+- **Fix:** `cli.py:ReflowGroup` reflows every command's help once (unindented lines join;
+  indented example/command lines and list items stay verbatim, the convention
+  `scripts/gen_manpage.py` already reads). Long examples use `\` continuations.
+- **Acceptance test:** `tests/test_cli_help.py` at 80 columns: greedy-wrap invariant over every
+  page, and each indented docstring line renders as one line. Typer reads `TERMINAL_WIDTH`
+  once at import, so the test patches `typer.rich_utils.MAX_WIDTH` (without it the check ran
+  at 300 columns and passed vacuously).
+
+### B-051
+**`hearth stats` hides `failed` / `failure_rate`, and labels `escalations_failed` "(served local)"**
+
+- **Priority:** P2 · **Status:** **FIXED** in `6eb4fac` · **Effort:** S
+- **Evidence:** `cli.py` `stats` printed neither rollup key B-003 added, and the
+  `escalations_failed` count includes records whose local fallback also failed
+  (`RequestRecord.escalation_failed` and `failed` both set): nothing was served there.
+- **Fix:** rows "failed (error, no answer)", "failure rate", and "escalations failed (remote
+  errored; prompt may have left)".
+- **Acceptance test:** `tests/test_cli_stats.py` renders a real `MetricsStore` with a double
+  failure and asserts the rows; "served local" never appears.
+
+### B-052
+**`hearth train` with a 1-record dataset ends in a traceback**
+
+- **Priority:** P3 · **Status:** **FIXED** in `eff5a9c` · **Effort:** S
+- **Evidence:** `LoRAConfig.validate` raises `DatasetError` ("need at least 2 records…"), a
+  `ValueError`; `train` caught only `RuntimeError` / `CalledProcessError`.
+- **Fix:** validate before announcing the run; `Dataset error: …` / `Invalid training config:
+  …`, exit 1; the runner's batch-size `DatasetError` is caught too.
+- **Acceptance test:** `tests/test_cli_training.py::test_train_with_one_record_is_a_clean_dataset_error`.
+
+### B-053
+**`hearth serve` printed "Serving on http://…" before `create_app` raised**
+
+- **Priority:** P3 · **Status:** **FIXED** in `51b9a30` (B-033 moved `create_app` above the
+  banner); re-checked on the merged code and pinned by tests in `ff192b5` · **Effort:** S
+- **Acceptance test:** `tests/test_cli_startup_errors.py`: missing profile or a raising
+  `create_app` → no banner, uvicorn never called; a healthy start prints it.
+
+### B-054
+**`ModelNotOnDiskError` tells you to `hearth models pull` a path or an unregistered repo id**
+
+- **Priority:** P2 · **Status:** **FIXED** in `5556f5d` · **Effort:** S
+- **Evidence:** `providers/mlx.py:resolve_local_model` always said "`hearth models pull
+  <id>`", but `models pull` accepts registry ids only ("Unknown model id", exit 1).
+- **Fix:** path → "no such path"; registry entry (by id or source) → pull its registry id;
+  unregistered repo id → register in `config/models.yaml` then pull, or
+  `HEARTH_ALLOW_DOWNLOADS=1`.
+- **Acceptance test:** `tests/test_offline_model_resolution.py` (three cases, zero connects).
+
+### B-055
+**MLX embedder load error: a doubled period and sandbox-only advice**
+
+- **Priority:** P3 · **Status:** **FIXED** in `1d4da3f` · **Effort:** S
+- **Evidence:** `memory/embed.py` rendered "…HEARTH_ALLOW_DOWNLOADS=1.. Pre-pull it from an
+  unrestricted terminal (network is blocked here)."
+- **Fix:** one period, the resolver's own fix (or "`hearth models pull <registry id>`"), and a
+  B-011 note: the bge embedder cannot load under mlx-lm even on disk.
+- **Acceptance test:** `tests/test_mlx_embedder.py` (not-on-disk and "Model type bert not
+  supported." cases).
+
+### B-056
+**`rag query` embeds the query before checking that the collection has chunks**
+
+- **Priority:** P2 · **Status:** **FIXED** in `0f72c06` · **Effort:** S
+- **Evidence:** `RagIndex.query` embedded first, so with `HEARTH_EMBEDDER=mlx` (B-011) an empty
+  collection was "Embedder unavailable", exit 1, not "No chunks", exit 0.
+- **Fix:** `store.count(collection) == 0` → no chunks, no embedding (library: HTTP and MCP
+  too); the CLI checks first and skips `--answer` generation.
+- **Acceptance test:** `tests/test_cli_startup_errors.py` (empty collection with an unloadable
+  embedder; `RagIndex` with an embedder that raises on use).
+
+### B-057
+**`serve`'s stderr log handler kept a stale stream, and any foreign handler suppressed it**
+
+- **Priority:** P3 · **Status:** **FIXED** in `258ff98` · **Effort:** S
+- **Evidence:** `cli.py:_log_hearth_to_stderr` added a handler only `if not log.handlers`: a
+  repeat call kept the first handler (bound to a possibly closed stderr, the "--- Logging
+  error ---" trap), and a handler attached by anything else meant INFO was never enabled.
+- **Fix:** a tagged handler, replaced on each call, on the current stderr; level INFO.
+- **Acceptance test:** `tests/test_cli_log_handler.py`.
+
+### B-058
+**`doctor --offline` `serving_resolution` said `~/.hearth/models` whatever `HEARTH_HOME` was**
+
+- **Priority:** P3 · **Status:** **FIXED** in `f014ff6` · **Effort:** S
+- **Evidence:** hardcoded text in `status/probes.py:_serving_load_fact`.
+- **Fix:** `ModelNotOnDiskError.models_dir` carries the directory the resolver searched; the
+  row prints it (falls back to `$HEARTH_HOME/models`).
+- **Acceptance test:** `tests/test_status_probes.py::test_serving_resolution_names_the_models_dir_the_resolver_searched`.
+
+### B-059
+**An unknown `HEARTH_BACKEND` ends every command in a traceback**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Measured: `HEARTH_BACKEND=bogus hearth run hi` → a Rich traceback ending
+  `ValueError: Unknown HEARTH_BACKEND: 'bogus' (use auto|mlx|echo, or install a plugin …)`,
+  exit 1. Raised at `src/hearth/providers/__init__.py:99` (`select_provider`); no CLI command
+  that calls it (`serve`, `run`, `agent`, `mcp`, `rag query`, `eval`) catches it.
+- **Impact:** a typo in one variable buries the one-line fix, as B-033 did for profiles.
+- **Fix outline:** a `_backend_required()` context manager like `_routing_profile_required`
+  around `select_provider` in each command: print the message, exit 2.
+- **Acceptance test:** each command with `HEARTH_BACKEND=bogus` → exit 2, the message, no
+  `Traceback`; revert → fails.
+
+### B-060
+**An unknown `hearth.intent` / `--intent` is silently ignored**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/router/classify.py:58` uses the intent only if it is in
+  `TASK_CLASSES`, else falls through to keyword rules. Measured [in-process]:
+  `POST /v1/hearth/route` with `"intent": "bogus"` → 200 `{"class": "chat", "method":
+  "rules", …}`; `hearth run --intent bogus` prints `intent=bogus` and serves class `chat`.
+  docs/GUIDE.md §4.6 says the intent "must be one of" the classes.
+- **Impact:** a typo'd hint (e.g. `"clasify"`) silently routes by keywords instead, possibly to
+  a different model rung, while the caller believes the hint applied. CLAUDE.md §3 shape.
+- **Fix outline:** reject an unknown intent: 400 `invalid_request_error` (`param:
+  hearth.intent`) over HTTP, exit 2 at the CLI, naming the valid classes.
+- **Acceptance test:** an unknown intent → 400 / exit 2; a valid one still routes with
+  `method: "intent"`; revert → fails.
 
 ---
 
@@ -978,3 +1121,14 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `25aae9f` | **B-034.** An explicitly requested unknown/retired adapter is a 404 `adapter_not_found` before anything runs; `hearth.adapter` and the record name the adapter that actually generated (null for base weights, a base retry, a remote, or a backend that ignores adapters). Promoted default unchanged. |
 | `927b686` | **B-035, B-048.** `/ready` = the default loaded with weights at least once, its last load did not fail, and its weights resolve on disk; `loaded` reports residency. Warmup off is ready when on disk; an evicted default stays ready; deleted weights are 503 `failed`. |
 | `12d5366` | **B-006.** `auto` → echo fallback logs a WARNING and `/ready` is 503 `stub` (with `/health` `backend_fallback`); explicit `HEARTH_BACKEND=echo` stays ready. |
+| `9fd539c` | **B-050.** `--help` prose reflows to the terminal width; example lines stay intact (80-column render tests). |
+| `6eb4fac` | **B-051.** `hearth stats` shows `failed` / `failure rate`; `escalations_failed` labelled "(remote errored; prompt may have left)". |
+| `eff5a9c` | **B-052.** `hearth train` with one record: `Dataset error: need at least 2 records …`, exit 1, no traceback. |
+| `ff192b5` | **B-053.** Tests pin that `hearth serve` prints its banner only after `create_app` succeeds (the reorder itself was `51b9a30`). |
+| `5556f5d` | **B-054.** `ModelNotOnDiskError` hint per kind of id: path → no such path; registry id → pull; unregistered → register, then pull. |
+| `1d4da3f` | **B-055.** MLX embedder load error: one period, the real fix, the B-011 note. |
+| `0f72c06` | **B-056.** An empty RAG collection answers "No chunks" without embedding the query (CLI, HTTP, MCP). |
+| `258ff98` | **B-057.** `serve`'s stderr log handler is idempotent, on the current stderr, and not suppressed by foreign handlers. |
+| `f014ff6` | **B-058.** `doctor --offline` `serving_resolution` names the models dir the resolver searched. |
+| `2c8f5f9` | **B-037.** `docs/API.md` matches the app's routes and error envelopes; `tests/test_api_doc_routes.py` checks both ways. |
+| `05c4db5` | Docs: `docs/GUIDE.md` has no pending-change markers left; B-003/006/031/033–036/046–049 described as merged, with measured output. |
