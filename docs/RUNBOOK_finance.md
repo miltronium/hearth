@@ -74,18 +74,34 @@ prints the header row, the row count, and a per-column *type guess*, and **never
 uv run --no-sync python scripts/hearth_peek.py ~/hearth-statements/incoming/august.csv
 ```
 
-```
-  ~/hearth-statements/incoming/august.csv
-  128 data rows, 5 columns
+The output below is from a **synthetic** file of the same shape (128 invented rows), with the
+scan root rewritten to `~/hearth-statements`:
 
-    #  header                             looks like
-  ---  ---------------------------------- ----------------------------------------
-    0  Posting Date                       date-like
-    1  Description                        text
-    2  Amount                             number-like (accounting negatives present)
-    3  Balance                            number-like
-    4  Type                               text
 ```
+scanned 1 file(s) under ~/hearth-statements/incoming
+1 distinct table format(s), 0 text document(s), 0 unreadable
+
+── format 1 ── 1 file(s), 128 data rows ── needs ONE mapping ──
+     august.csv  (128 rows)
+
+       #  header                             looks like
+     ---  ---------------------------------- ----------------------------------------
+       0  Posting Date                       date-like
+       1  Description                        text
+       2  Amount                             number-like (accounting negatives present)
+       3  Balance                            number-like
+       4  Type                               text
+
+No cell values were printed. Header names are safe to share; values are not.
+You need 1 column mapping(s), one per format above.
+```
+
+`hearth_peek.py` also takes directories (walked recursively) and groups files by header
+signature. Twenty exports from one bank show up as one format that needs one mapping. A file
+it cannot read is listed under `── could not read ──` with the reason, and the exit code is 1.
+If the file has preamble lines above the real header (the case `skip_rows` is for), the
+"header" row it prints is the first preamble line, which is a cell value and not a header.
+Check that row before you share the output.
 
 That output is safe to read aloud, put in a note, or paste to a cloud agent for help writing
 the YAML. Write the mapping into `~/hearth-statements/mappings/acme-checking.yaml`:
