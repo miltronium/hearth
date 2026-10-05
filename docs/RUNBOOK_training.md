@@ -11,8 +11,9 @@ lifecycle. It calls only commands and functions that exist in the codebase today
 > Steps that ARE verifiable without hardware are marked *(CI-safe)*; steps that need real
 > hardware are marked *(hardware)*.
 
-The harness that automates steps 3 + 6 is `scripts/train_lora_real.sh`
-(run `scripts/train_lora_real.sh --help`).
+The harness that automates step 3 is `scripts/train_lora_real.sh`
+(run `scripts/train_lora_real.sh --help`). Its `--promote` option is broken (B-015); promote
+with `hearth eval --promote` (step 6).
 
 ---
 
@@ -92,6 +93,12 @@ Promotion is gated on a golden set (`hearth.training.eval`). Keep it separate fr
 training data. Objective classes (`extract`, `classify`, `summarize`, `rank`) score with
 exact-match or token-F1; subjective classes (`draft`, `code`) need a judge hook.
 
+`hearth eval` and `hearth prereg` read the golden set as a JSONL file of
+`{"prompt": ..., "expected": ...}` rows (a `hearth.dataset` or `hearth.golden` header line
+is skipped). It needs **at least 30 rows** to clear the gate's default `min_n`. The
+mathematical floor for any promotion at α=0.05 is 5, since the smallest achievable p is 0.5ⁿ.
+For scripting, the same set in Python:
+
 ```python
 from hearth.training.eval import as_golden_set
 golden = as_golden_set("extract", [
@@ -138,71 +145,143 @@ named `<task>-<run-id>` (`hearth.cli:train`).
 
 ---
 
-## 4. Evaluate the candidate *(hardware)*
+## 4. Pre-register the bar, then commit it *(CI-safe)*
 
-Score the candidate against your golden set. The one-command path is **`hearth eval`**,
-which wires the candidate through `MLXProvider`'s per-request adapter slot
-(`GenRequest.adapter`, via `AdapterStore.resolve_path(..., allow_candidate=True)`), scores it
-with the objective metric, compares against the currently-promoted adapter for the task (the
-incumbent), and prints the gate result:
+An adapter cannot be promoted on a score you typed (CLAUDE.md §7). The bar is declared
+**before** the measurement, in a pre-registration file that git has committed and that is
+unmodified when the gate runs. Scaffold one from the golden set (run, synthetic set):
 
 ```sh
-HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
-    --golden data/extract_golden.jsonl --metric exact \
-    --system "Reply with only the answer, nothing else."
-# add --promote to promote in one step when the gate passes (same gate as `adapters promote`).
+uv run --no-sync hearth prereg init --task extract --golden data/extract_golden.jsonl \
+    --metric exact --system "Reply with only the answer, nothing else." \
+    --out prereg/extract.yaml
+# -> Wrote prereg/extract.yaml. Fill in hypothesis/stopping_rule/kill_condition, then
+#    git commit it — an uncommitted prereg cannot gate a promotion.
 ```
 
-The golden set is a JSONL of `{"prompt", "expected"}` rows (a `hearth.dataset` header line
-is skipped if present). Under the hood it uses the same `hearth.training.eval` API, so you
-can also script it directly:
+The file pins the golden set by **content sha** and the decode parameters (temperature 0,
+`--max-tokens`, a hash of `--system`) by **fingerprint**, and declares the bar: `alpha`
+(default 0.05), `min_effect` (0.0), `min_n` (30), `test: auto`, and the degenerate baselines
+the candidate must beat (`empty`, `majority_label`, `copy_input`). The `--metric`,
+`--max-tokens` and `--system` you register here must be the ones you pass to `hearth eval`
+in step 5, or the run is refused as "not the registered experiment".
+
+Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand, then commit:
+
+```sh
+git add prereg/extract.yaml && git commit -m "prereg: extract adapter bar"
+uv run --no-sync hearth prereg check prereg/extract.yaml --golden data/extract_golden.jsonl
+# -> prints the registered bar, "Golden set matches (N examples).", and
+#    "git: committed at <sha> and unmodified."  (exit 0)
+```
+
+`prereg check` exits 1 if the file is not committed or has local edits
+(`git: not committed — ...`), or if the golden set no longer hashes to the registered sha
+(`Golden set has changed: ...`). The uncommitted path was run against a synthetic set; the
+committed path was not run here (it needs a commit in a real repo) and is covered by
+`tests/test_cli_eval.py`. Editing the golden set after registering it is exactly the
+thing the sha is there to catch.
+
+---
+
+## 5. Evaluate the candidate *(hardware for a real score; refusal paths CI-safe)*
+
+`hearth eval` runs the candidate through `MLXProvider`'s per-request adapter slot
+(`GenRequest.adapter`, via `AdapterStore.resolve_path(..., allow_candidate=True)`), scores it
+at temperature 0, scores the **incumbent** the same way (the currently-promoted adapter for
+the task, or **the base model** when none is promoted), scores the degenerate baselines,
+and runs the gate: a paired significance test over the per-example vectors (exact McNemar
+for exact-match, paired bootstrap otherwise), lift above `min_effect`, `n >= min_n`, and a
+win over every registered baseline.
+
+Measure and write the report without promoting *(needs real weights — not run)*:
+
+```sh
+HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
+    --golden data/extract_golden.jsonl --metric exact \
+    --system "Reply with only the answer, nothing else." \
+    --prereg prereg/extract.yaml --report-json reports/extract-<run-id>.json
+```
+
+It prints a table (candidate, incumbent or base, each baseline), then
+`gate: PASS|FAIL n=... alpha=... mcnemar_exact p=... (b=..., c=...)`, one line per failed
+condition, and the `golden_sha` / `config` fingerprint. The JSON report carries the
+per-example vectors and provenance, so the gate can be recomputed from it later.
+
+The same command on the `echo` backend runs the plumbing offline with no weights. Its
+scores are meaningless, so the gate fails. That is a useful check that the gate refuses a
+non-lift (run, synthetic 30-row golden set):
+
+```text
+gate: FAIL n=30 alpha=0.05 mcnemar_exact p=1.0000 (b=0, c=0)
+  · no lift: candidate 0.0000 does not exceed base 0.0000 + margin 0
+  · not significant: mcnemar_exact p=1.0000 > alpha=0.05 (b=0, c=0)
+  · fails degenerate baseline 'copy_input': ...
+```
+
+The refusals, all CI-safe (run on the echo backend; each exits 1):
+
+| You run | You get |
+|---|---|
+| `hearth eval ... --temperature 0.7` | `Refusing to score at temperature > 0: the gate would be re-rollable.` (`--allow-sampling` measures anyway; it can never be promoted under a temperature-0 prereg) |
+| `hearth eval ... --prereg prereg/extract.yaml` with a different `--system`/`--metric`/`--max-tokens` | `This run is not the registered experiment: decode config ... != registered ...` |
+| `hearth eval ... --promote` with no `--prereg` | `Promotion refused: --promote requires --prereg.` |
+| `hearth eval ... --prereg <uncommitted file> --promote` | `Promotion refused: <file> is not tracked by git ...` (or `not inside a git repository`) |
+
+`--check-determinism` re-generates a few prompts and refuses if any answer changes: a score
+that re-rolls is not a measurement.
+
+For scripted or custom scoring, the same API is in `hearth.training.eval`. Use
+`evaluate_gate`, not `beats_incumbent` (a legacy mean-only comparison with no significance
+or provenance check, which returns `False` when there is no incumbent):
 
 ```python
-from hearth.training.eval import score_candidate, beats_incumbent, EvalReport
+from hearth.training.eval import EvalConfig, baseline_reports, evaluate_gate, score_candidate
 
-candidate_report = score_candidate(golden, generate_with_candidate, metric="f1")
-# `generate_with_candidate` routes each prompt through the candidate adapter (A/B flag on).
-incumbent_report = None  # or score the currently-promoted adapter the same way
-assert beats_incumbent(candidate_report, incumbent_report), "candidate did not beat incumbent"
-print("candidate score:", candidate_report.score)
+cfg = EvalConfig.for_system("Reply with only the answer, nothing else.")  # temperature 0
+candidate = score_candidate(golden, generate_with_candidate, metric="exact", config=cfg)
+incumbent = score_candidate(golden, generate_with_base, metric="exact", config=cfg)  # or the promoted adapter
+gate = evaluate_gate(candidate, incumbent, incumbent_role="base",
+                     baselines=baseline_reports(golden, metric="exact", config=cfg))
+print(gate.passed, gate.reasons)
 ```
 
-Record `candidate_report.score` (and the incumbent's, if any) — you pass these to the
-promote step as *proof the gate passed*.
+Pass the same `config` to every report. Without it the reports carry no provenance and the
+gate refuses them (`candidate report has no provenance (golden_sha/config) — unverifiable`).
+This snippet was run against a synthetic 30-row set with stub generators.
 
 ---
 
-## 5. Confirm the eval gate blocks a regression *(CI-safe)*
+## 6. Promote the winning candidate *(needs real weights — not run)*
 
-The safety guarantee is that a candidate that does **not** beat the incumbent cannot be
-promoted. You can prove this with the CLI and no GPU by supplying scores directly:
+Promotion goes through the gate, under the committed pre-registration. Two equivalent ways.
 
-```sh
-# A weaker candidate is refused (gate not passed):
-uv run --no-sync hearth adapters promote extract-badrun --candidate-score 0.40 --incumbent-score 0.71
-# -> "Promotion refused: ... candidate did not beat the incumbent"  (exit 1)
-```
-
-`hearth adapters promote` computes `beats_incumbent(candidate, incumbent)` and the store
-raises `GateNotPassedError` unless it passes (`registry/adapters.py`,
-`cli.py:adapters_promote`).
-
----
-
-## 6. Promote the winning candidate *(hardware for a real adapter; gate logic CI-safe)*
-
-With real scores that clear the gate:
+Measure and promote in one step:
 
 ```sh
-scripts/train_lora_real.sh --data data/extract.jsonl --task extract \
-    --promote --candidate-score 0.82 --incumbent-score 0.71
+HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
+    --golden data/extract_golden.jsonl --metric exact \
+    --system "Reply with only the answer, nothing else." \
+    --prereg prereg/extract.yaml --promote
+# -> Promoted extract-<run-id> (gate passed, candidate=..., p=...).
 ```
 
-or directly:
+Or promote later from the step-5 report. `adapters promote` does **not** trust the verdict in
+the report: it recomputes the gate from the stored per-example vectors under the bar in the
+prereg, and re-checks that the prereg is committed and matches the report:
 
 ```sh
-uv run --no-sync hearth adapters promote extract-<run-id> --candidate-score 0.82 --incumbent-score 0.71
+uv run --no-sync hearth adapters promote extract-<run-id> \
+    --report reports/extract-<run-id>.json --prereg prereg/extract.yaml
+# -> Promoted extract-<run-id> (gate passed, mcnemar_exact p=..., n=...).
 ```
+
+Both `--report` and `--prereg` are required (`Promotion requires --report and --prereg.`,
+exit 1). The old `--candidate-score` / `--incumbent-score` flags are **removed**. Passing
+them prints `--candidate-score/--incumbent-score have been removed. An operator-typed score
+is not evidence...` and exits 2 (run). `scripts/train_lora_real.sh --promote` still passes
+them and therefore always fails (B-015). Train with the harness, then promote with
+`hearth eval --promote`.
 
 Confirm the lifecycle transitioned and any prior promoted adapter for the task was retired
 (the store keeps exactly one promoted adapter per task):
@@ -212,8 +291,9 @@ uv run --no-sync hearth adapters list --task extract
 # candidate -> promoted; a previously-promoted adapter for `extract` shows `retired`.
 ```
 
-The promotion is auditable: `~/.hearth/adapters.json` records the `promotion_proof`
-(candidate/incumbent scores + `gate_passed`).
+The promotion is auditable: `~/.hearth/adapters.json` records the `promotion_proof`, which
+holds the gate result (test, p-value, n, alpha, baselines) and the pre-registration it ran
+under (its sha and the commit it was committed at).
 
 ---
 
@@ -234,16 +314,9 @@ HF_HUB_OFFLINE=1 HEARTH_BACKEND=mlx uv run --no-sync hearth serve
 | Step | CI-safe? | Why |
 | ---- | -------- | --- |
 | 1 dataset build/validate | ✅ | Pure Python (`hearth.training.dataset`), no model. |
-| 2 golden set build | ✅ | Pure Python (`hearth.training.eval`). |
-| 3–4 real train + eval | ❌ | Needs Apple-Silicon GPU + cached weights + `[mlx]`. |
-| 5 gate blocks a regression | ✅ | `beats_incumbent` + `promote` refusal, scores supplied directly. |
-| 6 promote lifecycle | ⚠️ | Gate/lifecycle logic is CI-safe with supplied scores; promoting a *real* trained adapter is hardware. |
+| 2 golden set build | ✅ | Pure Python / a JSONL file. |
+| 3 real train | ❌ | Needs Apple-Silicon GPU + cached weights + `[mlx]`. |
+| 4 prereg init/check | ✅ | No model; `check` needs the file committed in a git repo. |
+| 5 eval | ⚠️ | The plumbing and every refusal run on the `echo` backend; a meaningful score needs real weights. |
+| 6 promote | ⚠️ | Every refusal is CI-safe (`tests/test_cli_eval.py`, `tests/test_cli_training.py`); a real promotion needs a real, significant lift. |
 | 7 serve with adapter | ❌ | Needs the MLX backend + real weights. |
-
-## Notes
-
-- **`hearth eval` now exists** (step 4) — a one-command wrapper over the
-  `hearth.training.eval` API (`score_candidate` / `beats_incumbent`) that resolves the
-  candidate through the MLX provider's per-request adapter slot, scores it against a golden
-  set, compares to the incumbent, and (with `--promote`) promotes through the same gate. The
-  underlying Python API is still available for scripted/custom scoring.
