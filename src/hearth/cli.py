@@ -888,6 +888,11 @@ def stats(
     hearth serve. For a running server, read GET /v1/hearth/admin/metrics?since=24h
     (same rollup, as JSON, token required).
 
+    A request that ended in an error is counted in requests and in failed / failure rate;
+    backend mix and latency count answered requests only. Escalations failed counts every
+    request whose remote call errored, whether the local fallback then answered or failed
+    too: the remote may have received the prompt either way.
+
     Examples:
       hearth stats
       hearth stats --since 24h
@@ -905,7 +910,14 @@ def stats(
     table.add_row("estimated frontier tokens saved", str(roll["estimated_frontier_tokens_saved"]))
     table.add_row("escalations", str(roll["escalations"]))
     table.add_row("escalation rate", f"{roll['escalation_rate']:.2%}")
-    table.add_row("escalations failed (served local)", str(roll["escalations_failed"]))
+    # The remote errored. The request was then served locally, or -- when it is also counted
+    # under "failed" -- the local fallback failed too. Either way the prompt may have left.
+    table.add_row(
+        "escalations failed (remote errored; prompt may have left)",
+        str(roll["escalations_failed"]),
+    )
+    table.add_row("failed (error, no answer)", str(roll["failed"]))
+    table.add_row("failure rate", f"{roll['failure_rate']:.2%}")
     backend_mix = ", ".join(f"{k}={v}" for k, v in roll["backend_mix"].items())
     class_mix = ", ".join(f"{k}={v}" for k, v in roll["class_mix"].items())
     table.add_row("backend mix", backend_mix or "-")
