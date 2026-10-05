@@ -351,3 +351,116 @@ def test_L4_the_mlx_pool_is_promotable():
     from hearth.training.promotion import backend_identity, backend_problems
 
     assert backend_problems(backend_identity(mlx_pool())) == []
+
+
+# -- A: the prereg must predate the adapter's FIRST measurement (B-079) -------------------
+
+
+def test_A_a_bar_registered_after_seeing_the_score_is_refused(world):
+    """Measure with no prereg (PASS + p printed), then commit the bar and re-measure."""
+    result = world.eval("extract-1")
+    assert result.exit_code == 0, _flat(result)
+    assert "PASS" in _flat(result)
+    assert "Exploratory measurement (no --prereg)" in _flat(result)
+    world.registered()  # the bar, written after the outcome was seen
+    world.eval_report()  # a deterministic re-measurement, "after the prereg"
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "first measured" in _flat(result) or "first recorded measurement" in _flat(result)
+    assert world.status() == "candidate"
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1, _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_A_a_measurement_on_any_other_golden_set_counts_as_first(world, tmp_path):
+    """Peeking on a scratch set outside git still fixes when the adapter was first seen."""
+    scratch = tmp_path / "scratch.jsonl"
+    scratch.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS[:35]))
+    peek = pe.runner.invoke(pe.app, ["eval", "extract-1", "--golden", str(scratch), "--metric",
+                                     "exact", "--max-tokens", "24"], env=world.env)
+    assert peek.exit_code == 0, _flat(peek)
+    world.registered()
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_A_a_backdated_prereg_commit_is_not_in_the_history_seen_at_first_measurement(world):
+    """GIT_COMMITTER_DATE can lie about WHEN; the HEAD recorded at measurement cannot."""
+    from datetime import UTC, datetime, timedelta
+
+    world.commit("golden.jsonl")
+    world.eval("extract-1")  # first measurement: HEAD = the golden-only commit
+    world.write_prereg()
+    world.commit("prereg.yaml", when=datetime.now(tz=UTC) - timedelta(days=30))  # backdated
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "was not in the history of" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_A_the_same_weights_under_a_fresh_id_are_not_a_fresh_adapter(world):
+    """Re-registering measured weights under a new id does not reset the first measurement."""
+    world.eval("extract-1")  # peek
+    path = world.store.get("extract-1").adapter_path
+    world.store.register("extract-1b", base_model=pe.BASE, task="extract", train_run_id="r",
+                         adapter_path=path)
+    world.registered()
+    world.eval_report("extract-1b")  # the provider answers by weights dir: same winner
+    result = world.promote("extract-1b")
+    assert result.exit_code == 1, _flat(result)
+    assert world.status("extract-1b") == "candidate"
+
+
+def test_A_a_report_whose_measurement_is_not_in_the_ledger_is_refused(world):
+    """Deleting the ledger does not make an adapter "never measured": the report is orphaned."""
+    from hearth.training.ledger import ledger_path
+
+    world.registered()
+    world.eval_report()
+    ledger_path(world.home).unlink()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not in the measurement ledger" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_A_a_tampered_ledger_refuses_promotion_and_measurement(world):
+    from hearth.training.ledger import ledger_path
+
+    world.registered()
+    world.eval("extract-1")
+    world.eval_report()
+    path = ledger_path(world.home)
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(lines[1:]) + "\n")  # drop the first measurement
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not intact" in _flat(result)
+    result = world.eval("extract-1")
+    assert result.exit_code == 1 and "cannot record the measurement" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_A_an_unknown_metric_is_refused_before_anything_is_recorded(world):
+    from hearth.training.ledger import ledger_path
+
+    result = pe.runner.invoke(pe.app, ["eval", "extract-1", "--golden", str(world.golden),
+                                       "--metric", "exactt"], env=world.env)
+    assert result.exit_code == 1 and "Unknown metric" in _flat(result)
+    assert not ledger_path(world.home).exists()
+
+
+def test_A_the_legitimate_order_records_the_first_measurement_in_the_proof(world):
+    world.registered()
+    first = world.eval_report()
+    world.eval_report()  # a second, later measurement under the same bar
+    result = world.promote()
+    assert result.exit_code == 0, _flat(result)
+    proof = world.store.get("extract-1").promotion_proof
+    assert proof["first_ledger_seq"] == first["ledger_seq"] == 0
+    assert proof["ledger_seq"] == 1
+    assert proof["first_measured_at"] == first["measured_at"]

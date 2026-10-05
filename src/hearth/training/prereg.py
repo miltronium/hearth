@@ -434,25 +434,36 @@ def committed_golden_problems(golden_git: dict, *, task: str, golden_sha: str) -
 
 
 def check_provenance(
-    registration: PreRegistration, *, measured_at: str, golden_git: dict, golden_sha: str
+    registration: PreRegistration,
+    *,
+    first_measurement: dict,
+    golden_git: dict,
+    golden_sha: str,
 ) -> GitStatus:
-    """Require the prereg to predate the measurement, in the repo that versions the golden set.
+    """Require the prereg to predate the adapter's FIRST measurement, next to the golden set.
 
-    Raises :class:`PreRegError`; returns the prereg's :class:`GitStatus` on success. Three
-    things must hold, each one an outcome rather than a configuration (B-061):
+    ``first_measurement`` is the adapter's earliest record in the measurement ledger
+    (:mod:`hearth.training.ledger`) — any golden set, with or without a prereg — and
+    ``golden_git`` / ``golden_sha`` describe the measurement being promoted. Raises
+    :class:`PreRegError`; returns the prereg's :class:`GitStatus` on success. Each check
+    asserts an outcome rather than a configuration (B-061, B-078, B-079):
 
     1. **Committed and unmodified** (:func:`verify_committed`): the bytes on disk are the
        committed blob, and they are the bytes ``registration`` was parsed from.
-    2. **Committed before the measurement.** The commit that last changed the file must be
-       no later than ``measured_at`` (the time the eval started, recorded in the — signed —
-       report). A bar committed seconds *after* the score was seen is the exact failure
-       pre-registration exists to prevent. Committer timestamps are second-granular and
-       set by whoever commits, so this stops the honest-but-post-hoc case and a casual
-       forger, not one who deliberately backdates a commit.
+    2. **Committed before the adapter was first measured.** It used to be "before THIS
+       run", so an operator could measure with no prereg, read PASS, then commit a bar and
+       re-measure (B-079). Two forms of "before", because each alone is weak:
+
+       * the commit that last changed the prereg has a committer time no later than the
+         first measurement's ``measured_at``;
+       * that commit is an ancestor of the HEAD the golden set's repository was at when the
+         first measurement started (recorded in the ledger then). Committer timestamps
+         are second-granular and settable with ``GIT_COMMITTER_DATE``; a commit hash
+         recorded at measurement time cannot contain a commit made afterwards.
     3. **In the repository that versions the golden set**, and the golden set itself
-       committed and unmodified there at measurement time (``golden_git``, recorded by
-       ``hearth eval``) — re-derived from the committed blob, whose content sha must be the
-       ``golden_sha`` that was scored (:func:`committed_golden_problems`, B-078).
+       committed and unmodified there (``golden_git``) — re-derived from the committed
+       blob, whose content sha must be the ``golden_sha`` that was scored
+       (:func:`committed_golden_problems`).
     """
     status = verify_committed(registration.path)
     if not status.committed:
@@ -462,14 +473,18 @@ def check_provenance(
             f"{registration.path} changed between being read and being verified: the bar "
             "that was parsed is not the bar that is committed"
         )
+    first_at = str(first_measurement.get("measured_at") or "")
+    adapter = first_measurement.get("adapter_id")
     committed = _parse_time(status.committed_at, "prereg commit time")
-    measured = _parse_time(measured_at, "measurement time")
+    measured = _parse_time(first_at, "first measurement time")
     if committed > measured:
         raise PreRegError(
             f"pre-registration was committed at {status.committed_at} (commit "
-            f"{status.commit[:12]}), AFTER the measurement started at {measured_at}: the bar "
-            "must be registered before the score is seen — re-run `hearth eval` now that it "
-            "is committed"
+            f"{status.commit[:12]}), AFTER the measurement started at {first_at} — the "
+            f"first recorded measurement of {adapter!r} (ledger record "
+            f"{first_measurement.get('seq')}). The bar must be registered before ANY score "
+            "of the adapter is seen; an adapter measured before its bar existed cannot be "
+            "promoted under it"
         )
     if not golden_git.get("committed"):
         raise PreRegError(
@@ -484,11 +499,29 @@ def check_provenance(
             f"versioned in {golden_root}: register the bar in the repository that holds the "
             "golden set"
         )
+    first_head = str((first_measurement.get("golden_git") or {}).get("head") or "")
+    if not first_head or not _is_ancestor(status.commit, first_head, root=status.repo_root):
+        raise PreRegError(
+            f"pre-registration commit {status.commit[:12]} was not in the history of "
+            f"{status.repo_root} when {adapter!r} was first measured at {first_at} (HEAD then: "
+            f"{first_head[:12] or 'no commit'}): the bar was registered AFTER the measurement, "
+            "or in another repository — an adapter measured before its bar existed cannot be "
+            "promoted under it"
+        )
     problems = committed_golden_problems(golden_git, task=registration.task,
                                          golden_sha=golden_sha)
     if problems:
         raise PreRegError("; ".join(problems))
     return status
+
+
+def _is_ancestor(commit: str, head: str, *, root: str) -> bool:
+    """Is ``commit`` reachable from ``head`` in the repository at ``root``? (False on error)."""
+    try:
+        _git(["merge-base", "--is-ancestor", commit, head], cwd=root)
+    except (_GitError, FileNotFoundError, NotADirectoryError):
+        return False
+    return True
 
 
 def provenance_proof(status: GitStatus, golden_git: dict) -> dict[str, object]:
@@ -514,6 +547,12 @@ def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[st
     those bytes, not a second read of the file that could differ.
     """
     status = verify_committed(path, data=data)
+    head = ""
+    if status.repo_root:
+        try:  # the repository's HEAD at measurement time, committed file or not (B-079)
+            head = _git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=status.repo_root)
+        except (_GitError, FileNotFoundError):
+            head = ""
     return {
         "committed": status.committed,
         "reason": status.reason,
@@ -521,6 +560,7 @@ def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[st
         "commit": status.commit,
         "rel_path": status.rel_path,
         "blob": status.blob,
+        "head": head,
     }
 
 

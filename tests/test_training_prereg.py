@@ -339,7 +339,8 @@ def test_check_provenance_refuses_a_prereg_that_changed_after_it_was_parsed(tmp_
     _git(tmp_path, "commit", "-qm", "prereg")
     assert verify_committed(path).committed
     with pytest.raises(PreRegError, match="changed between being read and being verified"):
-        check_provenance(registration, measured_at="2999-01-01T00:00:00+00:00",
+        check_provenance(registration,
+                         first_measurement={"measured_at": "2999-01-01T00:00:00+00:00"},
                          golden_git={}, golden_sha=GOLDEN.sha)
 
 

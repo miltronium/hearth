@@ -1470,12 +1470,16 @@ def eval_adapter(
     the base model when none is promoted. To pass, it must clear the significance level
     (exact McNemar or paired bootstrap), exceed the margin, have at least min_n examples,
     and beat the empty / majority-label / copy-input baselines. --promote additionally
-    requires a --prereg that is git-committed, unmodified, matches this run, was committed
-    before the run started, and lives in the git repository that holds the committed
-    golden set; its bar overrides --alpha / --margin / --min-n. The adapter's weights are
-    hashed before scoring (no weights, no eval) and --report-json signs the report with
-    this install's key, so adapters promote can tell it from a hand-written one. Real
-    scores need HEARTH_BACKEND=mlx; the echo backend runs the plumbing only.
+    requires a --prereg that is git-committed (its bytes are the committed blob),
+    unmodified, matches this run, and lives in the git repository that holds the
+    committed golden set; its bar overrides --alpha / --margin / --min-n. Every eval, with
+    or without --prereg, is recorded BEFORE scoring in a signed, append-only ledger
+    (HEARTH_HOME/measurements.jsonl), and the prereg must have been committed before the
+    adapter's FIRST recorded measurement: a bar written after seeing a result is refused.
+    The adapter's weights are hashed before scoring (no weights, no eval) and
+    --report-json signs the report with this install's key, so adapters promote can tell
+    it from a hand-written one. Only HEARTH_BACKEND=mlx scores can promote; the echo
+    backend and plugins run the plumbing only.
 
     Examples:
       hearth eval ADAPTER_ID --golden golden.jsonl
@@ -1487,9 +1491,11 @@ def eval_adapter(
     Env: HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_HOME, HEARTH_MODELS_YAML.
 
     Exit: without --promote, 0 once the gate was measured, whether it passed or failed
-    (read the gate: line); 1 when it refused to measure (unknown adapter, missing adapter
-    weights, bad golden set or prereg, a bar looser than the gate allows, temperature
-    above 0, non-determinism); 2 when HEARTH_DEFAULT_MODEL names an unregistered model or
+    (read the gate: line); 1 when it refused to measure (unknown adapter or metric,
+    missing adapter weights, bad golden set or prereg, a golden set that repeats a prompt,
+    a bar looser than the gate allows, temperature above 0, non-determinism, a ledger that
+    cannot be written or does not verify); 2 when HEARTH_DEFAULT_MODEL names an
+    unregistered model or
     the base model is empty, auto or not servable here (never a silent fallback). With
     --promote, 0 only when the adapter was promoted, else 1 (or 2 as above).
     """
@@ -1501,6 +1507,9 @@ def eval_adapter(
     from .registry.adapters import adapter_weights_sha
     from .serving.pool import AUTO_MODEL_IDS
     from .training.attest import AttestationError, load_key, sign
+    from .training.ledger import LedgerError, first_measurement
+    from .training.ledger import append as ledger_append
+    from .training.ledger import read as ledger_read
     from .training.eval import (
         EvalConfig,
         GateProvenanceError,
@@ -1520,6 +1529,11 @@ def eval_adapter(
     )
     from .training.promotion import REPORT_SCHEMA, backend_identity, backend_problems
 
+    if metric not in ("exact", "f1"):
+        # Checked before anything is measured: every measurement is recorded in the ledger
+        # (B-079), and a typo must not count as the adapter's first measurement.
+        console.print(f"[red]Unknown metric:[/red] {metric!r} (use 'exact' or 'f1').")
+        raise typer.Exit(code=1)
     if temperature > 0.0 and not allow_sampling:
         console.print(
             "[red]Refusing to score at temperature > 0:[/red] the gate would be re-rollable. "
@@ -1595,6 +1609,38 @@ def eval_adapter(
     # Where the golden set stands at measurement time, for the bytes being scored: promotion
     # requires them to be the committed blob, in the prereg's repository (check_provenance).
     golden_git = golden_git_status(golden, data=golden_bytes)
+
+    # Record the measurement in the append-only, signed ledger BEFORE a single score exists
+    # (B-079). Promotion requires the prereg to predate the adapter's FIRST recorded
+    # measurement, so a run with no prereg — or one aborted after the first lines of output
+    # — still counts: a bar cannot be chosen after the outcome was seen. No ledger, no
+    # measurement: an unrecorded score is exactly the hole this closes.
+    home = Settings().home
+    try:
+        key = load_key(home, create=True)
+        measurement = ledger_append(home, {
+            "adapter_id": adapter_id,
+            "weights_sha": candidate_weights,
+            "task": entry.task,
+            "base_model": base_model,
+            "golden_sha": golden_set.sha,
+            "metric": metric,
+            "config_fingerprint": config.fingerprint,
+            "measured_at": measured_at,
+            "backend": backend_identity(provider),
+            "golden_git": {k: golden_git.get(k)
+                           for k in ("repo_root", "head", "committed", "commit", "rel_path")},
+            "prereg_sha": registration.sha if registration is not None else "",
+        }, key)
+    except (AttestationError, LedgerError, OSError) as exc:
+        console.print(f"[red]Refusing to measure:[/red] cannot record the measurement: {exc}")
+        raise typer.Exit(code=1) from None
+    measurement_mac = measurement["signature"]["mac"]
+
+    def _first_measurement() -> dict:
+        records = ledger_read(home, key)  # LedgerError: a broken chain refuses
+        first = first_measurement(records, adapter_id=adapter_id, weights_sha=candidate_weights)
+        return first if first is not None else measurement
 
     def _generate_with(adapter_path: str | None, model: str | None = None):
         def _gen(prompt: str) -> str:
@@ -1758,6 +1804,8 @@ def eval_adapter(
             "incumbent_weights_sha": incumbent_weights,
             "incumbent_base_model": incumbent_base,
             "backend": backend_identity(provider),
+            "ledger_seq": measurement["seq"],
+            "ledger_mac": measurement_mac,
 
             "baselines": {k: v.to_json() for k, v in baselines.items()},
             "gate": gate.as_proof(),
@@ -1765,7 +1813,7 @@ def eval_adapter(
         # Signed with this install's key so `adapters promote --report` can tell a report
         # this command wrote from one a human typed (B-061; training/attest.py).
         try:
-            payload = sign(payload, load_key(Settings().home, create=True))
+            payload = sign(payload, key)
         except (AttestationError, OSError) as exc:
             console.print(f"[red]Cannot sign the eval report:[/red] {exc}")
             raise typer.Exit(code=1) from None
@@ -1776,10 +1824,31 @@ def eval_adapter(
         console.print(f"[dim]report written to {report_json}[/dim]")
 
     if not promote:
+        # The verdict above is printed with or without a prereg, but what it MEANS for
+        # promotion is said plainly: the ledger already holds this measurement (B-079).
+        try:
+            first = _first_measurement()
+        except LedgerError as exc:
+            console.print(f"[yellow]Not promotable:[/yellow] {exc}")
+            return
+        if registration is None:
+            console.print(
+                "[yellow]Exploratory measurement (no --prereg):[/yellow] recorded in the "
+                f"measurement ledger. {adapter_id} can only be promoted under a "
+                f"pre-registration committed BEFORE its first measurement ({first['measured_at']}"
+                "); a bar written after seeing this result will be refused."
+            )
+            return
+        try:
+            check_provenance(registration, first_measurement=first, golden_git=golden_git,
+                             golden_sha=candidate.golden_sha)
+        except PreRegError as exc:
+            console.print(f"[yellow]Not promotable under this pre-registration:[/yellow] {exc}")
+            return
         if gate.passed:
             console.print(
                 "[dim]promote with:[/dim] hearth eval "
-                f"{adapter_id} --golden {golden} --prereg <committed prereg> --promote"
+                f"{adapter_id} --golden {golden} --prereg {prereg} --promote"
             )
         return
 
@@ -1802,9 +1871,10 @@ def eval_adapter(
         )
         raise typer.Exit(code=1)
     try:
-        status = check_provenance(registration, measured_at=measured_at, golden_git=golden_git,
+        first = _first_measurement()
+        status = check_provenance(registration, first_measurement=first, golden_git=golden_git,
                                   golden_sha=candidate.golden_sha)
-    except PreRegError as exc:
+    except (PreRegError, LedgerError) as exc:
         console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
     if not gate.passed:
@@ -1835,6 +1905,9 @@ def eval_adapter(
     proof["measured_at"] = candidate.measured_at
     proof["candidate_weights_sha"] = candidate_weights
     proof["evidence"] = "measured"
+    proof["ledger_seq"] = measurement["seq"]
+    proof["first_measured_at"] = first["measured_at"]
+    proof["first_ledger_seq"] = first["seq"]
     try:
         store.promote(
             adapter_id, gate=gate, proof=proof,
@@ -2055,7 +2128,8 @@ def adapters_promote(
     id, task, base model and weights path, weights on disk that still hash to what was
     measured, and an incumbent that is still the incumbent. The gate is then recomputed
     from the report's per-example vectors under the committed pre-registration's bar.
-    The prereg must have been committed before the measurement started, in the git
+    The report's measurement must be in this install's measurement ledger, and the prereg
+    must have been committed before the adapter's FIRST recorded measurement, in the git
     repository that holds the (committed) golden set. The usual one-step path is hearth
     eval ADAPTER --golden G --prereg P --promote. The old --candidate-score /
     --incumbent-score flags are removed: a typed score is not evidence.
@@ -2067,14 +2141,17 @@ def adapters_promote(
     Env: HEARTH_HOME.
 
     Exit: 0 promoted; 1 refused (unsigned, edited or unusable report, a report about a
-    different adapter or stale weights/incumbent, an uncommitted, late or mismatched
-    prereg, gate failed); 2 the removed typed-score flags were used.
+    different adapter or stale weights/incumbent, scores not from the MLX backend, a
+    measurement missing from a broken ledger, an uncommitted, late or mismatched prereg,
+    gate failed); 2 the removed typed-score flags were used.
     """
     import json as _json
 
     from .config import Settings
     from .registry import AdapterError, GateNotPassedError
     from .training.attest import load_key, verify
+    from .training.ledger import LedgerError, binding_problems, find, first_measurement
+    from .training.ledger import read as ledger_read
     from .training.eval import EvalReport, GateProvenanceError, evaluate_gate
     from .training.prereg import (
         PreRegError,
@@ -2106,7 +2183,9 @@ def adapters_promote(
         payload = _json.loads(Path(report).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("the report is not a JSON object")
-        report_sha = verify(payload, load_key(Settings().home))
+        home = Settings().home
+        key = load_key(home)
+        report_sha = verify(payload, key)
         candidate = EvalReport.from_json(payload["candidate"])
         incumbent = EvalReport.from_json(payload["incumbent"])
         baselines = {
@@ -2149,14 +2228,34 @@ def adapters_promote(
             + "; ".join(problems)
         )
         raise typer.Exit(code=1)
+    # The report's measurement must be in this install's ledger, and the prereg must predate
+    # the adapter's FIRST recorded measurement — not merely this one (B-079).
+    try:
+        records = ledger_read(home, key)
+    except LedgerError as exc:
+        console.print(f"[red]Promotion refused:[/red] the measurement ledger is not intact: {exc}")
+        raise typer.Exit(code=1) from None
+    this = find(records, payload.get("ledger_mac"))
+    problems = binding_problems(this, {
+        "adapter_id": adapter_id,
+        "weights_sha": payload.get("candidate_weights_sha"),
+        "golden_sha": candidate.golden_sha,
+        "measured_at": payload.get("measured_at"),
+        "config_fingerprint": candidate.config_fingerprint,
+        "backend": payload.get("backend"),
+    })
+    if problems:
+        console.print("[red]Promotion refused:[/red] " + "; ".join(problems))
+        raise typer.Exit(code=1)
+    first = first_measurement(records, adapter_id=adapter_id,
+                              weights_sha=str(payload.get("candidate_weights_sha") or ""))
     try:
         status = check_provenance(
             registration,
-            measured_at=str(payload.get("measured_at") or ""),
+            first_measurement=first or this,
             golden_git=dict(payload.get("golden_git") or {}),
             golden_sha=candidate.golden_sha,
         )
-
     except PreRegError as exc:
         console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -2192,6 +2291,9 @@ def adapters_promote(
     proof["candidate_weights_sha"] = payload.get("candidate_weights_sha")
     proof["evidence"] = "signed-report"
     proof["report_sha"] = report_sha
+    proof["ledger_seq"] = this["seq"]
+    proof["first_measured_at"] = (first or this)["measured_at"]
+    proof["first_ledger_seq"] = (first or this)["seq"]
 
     def _report_still_holds() -> list[str]:
         # Re-run every binding check against the registry and weights as they are NOW,
