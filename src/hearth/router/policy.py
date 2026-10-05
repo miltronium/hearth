@@ -3,13 +3,16 @@
 Loads ``config/routing.yaml`` into a validated :class:`RoutingPolicy`. Routing is *data,
 not code*: per-class backend + escalation rules, global defaults, and a map of named
 remote endpoints. A bad or missing YAML must **never** take the server down — on any
-load/validation error we log a warning and fall back to safe built-in defaults.
+load/validation error we log a warning and fall back to safe built-in defaults. The one
+exception is a ``HEARTH_ROUTING_YAML`` that names a file which does not exist: that is the
+operator selecting a profile by name, and it is a startup error (see :func:`load_policy`).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -89,13 +92,67 @@ def _safe_defaults() -> RoutingPolicy:
     )
 
 
-def default_policy_path() -> Path:
-    """Path to the bundled ``config/routing.yaml`` (override via ``HEARTH_ROUTING_YAML``)."""
-    override = os.environ.get("HEARTH_ROUTING_YAML")
-    if override:
-        return Path(override)
-    # repo root is three parents up from src/hearth/router/policy.py
-    return Path(__file__).resolve().parents[3] / "config" / "routing.yaml"
+_ROUTING_ENV = "HEARTH_ROUTING_YAML"
+
+
+class RoutingProfileNotFoundError(RuntimeError):
+    """``HEARTH_ROUTING_YAML`` names a routing profile that does not exist."""
+
+
+@dataclass(frozen=True)
+class RoutingSelection:
+    """Which routing profile is selected, and how.
+
+    ``path`` is absolute. ``explicit`` is True when ``HEARTH_ROUTING_YAML`` chose it (the
+    operator asked for that file by name); ``raw`` is the variable's value as written.
+    """
+
+    path: Path
+    explicit: bool
+    raw: str | None = None
+
+
+def repo_root() -> Path:
+    """The checkout this package was imported from (three parents up from this file)."""
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_routing_selection(environ: Mapping[str, str] | None = None) -> RoutingSelection:
+    """The ONE resolver for ``HEARTH_ROUTING_YAML`` (B-008, B-025).
+
+    Used by the router (:func:`load_policy` / :func:`get_policy`), the status probe and
+    ``hearth doctor --offline``, so the path a report names is the path the router reads.
+
+    Resolution:
+
+    * unset or empty → the bundled ``<repo>/config/routing.yaml``;
+    * ``~`` / ``~user`` is expanded;
+    * an absolute path is used as is;
+    * a **relative path is resolved against the repo root, not the current directory**.
+
+    Why the repo root: the bundled default already lives there, and every shipped launcher
+    does the same (``scripts/hearth_private.sh`` prefixes ``$REPO_ROOT``, ``cmux-open``
+    passes ``$REPO_ROOT/config/...``), so ``HEARTH_ROUTING_YAML=config/routing.remote.yaml``
+    means the same file in a hand-run ``hearth serve`` as it does there. CWD-relative made
+    the selected profile depend on where the daemon happened to be started, and let a decoy
+    ``config/routing*.yaml`` under that directory be loaded instead of the repo's.
+
+    ``environ`` defaults to ``os.environ``; callers measuring another environment pass it.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get(_ROUTING_ENV) or "").strip()
+    if not raw:
+        return RoutingSelection(repo_root() / "config" / "routing.yaml", explicit=False)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = repo_root() / path
+    return RoutingSelection(path, explicit=True, raw=raw)
+
+
+def default_policy_path(environ: Mapping[str, str] | None = None) -> Path:
+    """Absolute path of the routing profile the router loads (see
+    :func:`resolve_routing_selection`)."""
+    return resolve_routing_selection(environ).path
 
 
 def _known_model_ids() -> set[str] | None:
@@ -120,8 +177,25 @@ def load_policy(path: Path | None = None, known_models: set[str] | None = None) 
 
     ``known_models`` overrides the set of ids a per-class ``local_model`` is checked against
     (default: the model registry). Tests inject it to stay off ``config/models.yaml``.
+
+    One exception to the fallback (B-008): with no ``path`` argument, when
+    ``HEARTH_ROUTING_YAML`` names a file that **does not exist**, this raises
+    :class:`RoutingProfileNotFoundError` instead of quietly substituting the safe defaults.
+    The fallback is all-local, so it never leaks — but the operator asked for a specific
+    profile by name and would otherwise be told nothing while running a different policy
+    (e.g. believing escalation was on, or that the finance ladder was active). A missing
+    file the operator *selected* is a startup error; a missing or broken *default*, and an
+    unparseable selected file, still degrade to safe defaults per ADR-005.
     """
-    path = path or default_policy_path()
+    if path is None:
+        selection = resolve_routing_selection()
+        if selection.explicit and not selection.path.is_file():
+            raise RoutingProfileNotFoundError(
+                f"{_ROUTING_ENV}={selection.raw!r} selects {selection.path}, which does not "
+                "exist (relative paths resolve against the repo root, "
+                f"{repo_root()}). Fix or unset {_ROUTING_ENV}."
+            )
+        path = selection.path
     try:
         raw = yaml.safe_load(path.read_text()) or {}
         known = known_models if known_models is not None else _known_model_ids()
@@ -201,4 +275,8 @@ __all__ = [
     "load_policy",
     "get_policy",
     "default_policy_path",
+    "resolve_routing_selection",
+    "RoutingSelection",
+    "RoutingProfileNotFoundError",
+    "repo_root",
 ]

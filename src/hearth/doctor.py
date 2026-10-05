@@ -143,12 +143,32 @@ def _has_weights(path: Path) -> bool:
         return False
 
 
-def _check_routing(policy_path: Path | None):
-    """The profile the router would load NOW, judged on the policy it resolves to."""
-    from .router.policy import default_policy_path
+def _check_routing(policy_path: Path | None, environ: dict[str, str] | None = None):
+    """The profile the router would load NOW, judged on the policy it resolves to.
+
+    The path comes from the router's own resolver (``resolve_routing_selection``), so ``~``
+    and repo-root-relative values name the same file here as in ``hearth serve``. A
+    ``HEARTH_ROUTING_YAML`` that names a missing file fails this check: the router refuses
+    to start on it (B-008), so reporting the safe-default fallback as SAFE would describe a
+    server that cannot run.
+    """
+    from .router.policy import resolve_routing_selection
     from .status.probes import _policy_outcome, policy_posture
 
-    path = Path(policy_path) if policy_path is not None else default_policy_path()
+    if policy_path is not None:
+        path = Path(policy_path)
+    else:
+        selection = resolve_routing_selection(environ)
+        path = selection.path
+        if selection.explicit and not path.is_file():
+            return None, Check(
+                "routing_profile",
+                False,
+                f"HEARTH_ROUTING_YAML={selection.raw!r} selects {path}, which does not exist "
+                "— the router refuses to start on it (relative paths resolve against the "
+                "repo root)",
+                fatal=True,
+            )
     policy, meta = _policy_outcome(path)
     if policy is None:
         return None, Check("routing_profile", False, f"{path}: {meta.get('error')}", fatal=True)
@@ -324,7 +344,7 @@ def run_offline_checks(
     env = dict(os.environ) if environ is None else dict(environ)
     registry = registry if registry is not None else load_registry()
 
-    policy, routing = _check_routing(policy_path)
+    policy, routing = _check_routing(policy_path, env)
     model_checks, on_disk = _check_models(settings, policy, registry)
     builtin = settings.backend.lower() in _BUILTIN_BACKENDS
     loopback = _is_loopback(settings.host)

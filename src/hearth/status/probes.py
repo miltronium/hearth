@@ -410,8 +410,13 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
     config_dir = root / "config"
     profiles = sorted(config_dir.glob("routing*.yaml")) if config_dir.is_dir() else []
 
-    active = env.get("HEARTH_ROUTING_YAML")
-    active_path = Path(active).expanduser() if active else config_dir / "routing.yaml"
+    # The router's own resolver (B-008/B-025): ~ expanded, relative paths against the repo
+    # root — so the path reported here is the path load_policy() reads, not a lookalike.
+    from ..router.policy import resolve_routing_selection
+
+    selection = resolve_routing_selection(env)
+    active = selection.raw
+    active_path = selection.path if selection.explicit else config_dir / "routing.yaml"
 
     facts: list[Fact] = [
         Fact(
@@ -419,7 +424,8 @@ def probe_egress(*, root: Path, environ: dict[str, str] | None = None) -> Sectio
             str(active_path),
             LEVEL_OK if active_path.exists() else LEVEL_WARN,
             ("selected by HEARTH_ROUTING_YAML" if active else "the built-in default path")
-            + ("" if active_path.exists() else " — but that file does not exist"),
+            + ("" if active_path.exists() else " — but that file does not exist"
+               + ("; the router refuses to start on it" if active else "")),
             {"path": str(active_path), "from_env": bool(active), "exists": active_path.exists()},
         )
     ]
