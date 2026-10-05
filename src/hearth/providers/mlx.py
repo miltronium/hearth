@@ -170,6 +170,7 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
         return model_id
     models_dir = settings.models_dir
     cache_dirs = ([str(models_dir)] if models_dir.is_dir() else []) + [None]
+    not_a_repo_id = False
     for cache_dir in cache_dirs:  # None = huggingface_hub's own cache resolution
         try:
             return snapshot_download(
@@ -179,15 +180,60 @@ def resolve_local_model(model_id: str, allow_downloads: bool | None = None) -> s
         # repo id at all. Anything else — a network error, a blocked socket — is NOT a cache
         # miss and must surface: swallowing it would let a resolver that reached for the
         # network still end in ModelNotOnDiskError and read as disk-only.
-        except (LocalEntryNotFoundError, HFValidationError):
+        except LocalEntryNotFoundError:
+            continue
+        except HFValidationError:
+            not_a_repo_id = True
             continue
     if allow_downloads:
         return model_id
-    raise ModelNotOnDiskError(
-        f"model {model_id!r} is not on disk (looked in {models_dir} and the huggingface "
-        f"hub cache) and HEARTH does not download on load. Fetch it deliberately with "
-        f"`hearth models pull {model_id}`, or set HEARTH_ALLOW_DOWNLOADS=1."
+    raise ModelNotOnDiskError(_not_on_disk_message(model_id, models_dir, not_a_repo_id))
+
+
+def _not_on_disk_message(model_id: str, models_dir: Path, not_a_repo_id: bool) -> str:
+    """The ModelNotOnDiskError text, with the fix that works for THIS kind of id.
+
+    ``hearth models pull`` accepts registry ids only, so telling the operator to pull a
+    filesystem path or an unregistered repo id sent them to a command that answers
+    "Unknown model id". Three cases: a path (no such path; nothing to pull), a registry
+    entry (pull its registry id), an unregistered repo id (register it, then pull).
+    """
+    looks_like_path = not_a_repo_id or model_id.startswith(("/", "~", ".")) or (
+        model_id.count("/") > 1
     )
+    if looks_like_path:
+        return (
+            f"model {model_id!r} is not on disk: no such path ({Path(model_id).expanduser()} "
+            "does not exist). A filesystem path is loaded as given and nothing can be pulled "
+            "for it; check the path, or name a registry id (hearth models list)."
+        )
+    where = (
+        f"model {model_id!r} is not on disk (looked in {models_dir} and the huggingface "
+        "hub cache) and HEARTH does not download on load."
+    )
+    entry = _registry_entry_for(model_id)
+    if entry is not None:
+        return f"{where} Fetch it deliberately with `hearth models pull {entry.id}`."
+    return (
+        f"{where} It is not in the model registry, so `hearth models pull` refuses it: "
+        "register it in config/models.yaml (or your HEARTH_MODELS_YAML) with this id as its "
+        f"source, then run `hearth models pull {model_id}`; or set HEARTH_ALLOW_DOWNLOADS=1 "
+        "to let loads download (doctor --offline then reports UNSAFE)."
+    )
+
+
+def _registry_entry_for(model_id: str):
+    """The registry entry whose id or download source is ``model_id``, else ``None``."""
+    try:
+        from ..registry import get_registry
+
+        entries = get_registry().list()
+    except Exception:  # noqa: BLE001 — a hint must never mask the not-on-disk error
+        return None
+    for entry in entries:
+        if model_id in (entry.id, entry.source):
+            return entry
+    return None
 
 
 def downloads_allowed(override: bool | None = None) -> bool:

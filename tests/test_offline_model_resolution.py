@@ -101,6 +101,59 @@ def test_a_missing_model_raises_instead_of_reaching_the_network(isolated):
     assert "HEARTH_ALLOW_DOWNLOADS" in message
 
 
+# --- the hint names a fix that works for the kind of id (`models pull` takes registry ids) ---
+
+REGISTERED = "mlx-community/Qwen2.5-3B-Instruct-4bit"  # in config/models.yaml
+
+
+def _not_on_disk(model_id: str) -> str:
+    with pytest.raises(ModelNotOnDiskError) as excinfo:
+        resolve_local_model(model_id)
+    return " ".join(str(excinfo.value).split())
+
+
+def test_a_registered_model_not_on_disk_names_the_pull_command(isolated):
+    message = _not_on_disk(REGISTERED)
+    assert f"`hearth models pull {REGISTERED}`" in message
+    assert "not in the model registry" not in message
+
+
+def test_an_unregistered_repo_id_says_to_register_it_first(isolated):
+    message = _not_on_disk(REPO)
+    assert "not in the model registry" in message
+    assert "config/models.yaml" in message
+    assert "HEARTH_ALLOW_DOWNLOADS=1" in message
+
+
+@pytest.mark.parametrize("path", ["/no/such/dir/weights", "./no-such-dir", "~/no-such-dir-x"])
+def test_a_missing_path_says_no_such_path_and_never_suggests_pull(isolated, path):
+    message = _not_on_disk(path)
+    assert "no such path" in message
+    assert "hearth models pull" not in message
+    assert "HEARTH_ALLOW_DOWNLOADS" not in message
+
+
+def test_the_pull_hint_is_what_models_pull_accepts(isolated, tmp_path):
+    """The outcome behind the wording: run the exact command the hint names. For a registry
+    id `hearth models pull` gets past its "Unknown model id" check (stopped before any
+    download); for a path the old hint named a command that answered "Unknown model id"."""
+    import re
+
+    from typer.testing import CliRunner
+
+    import hearth.cli as cli
+
+    message = _not_on_disk(REGISTERED)
+    named = re.search(r"`hearth models pull (\S+)`", message).group(1)
+    entry = cli.get_registry().get(named)
+    assert entry is not None and entry.source, f"hint names a non-registry id: {named!r}"
+    result = CliRunner().invoke(
+        cli.app, ["models", "pull", "/no/such/dir/weights"],
+        env={"HEARTH_HOME": str(tmp_path / "h"), "COLUMNS": "200"},
+    )
+    assert result.exit_code == 1 and "Unknown model id" in result.output
+
+
 def test_downloads_are_off_unless_the_operator_opts_in(isolated, monkeypatch):
     _, _, settings = isolated
     assert settings.allow_downloads is False
