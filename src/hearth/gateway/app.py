@@ -672,16 +672,24 @@ def _warmup(
         warm = getattr(provider, "warm", None)
         via_pool = callable(warm) and getattr(provider, "manager", None) is manager
         for index, model_id in enumerate(state.plan):
-            if index > 0 and not _fits_beside_residents(manager, registry, model_id):
-                state.skipped.add(model_id)
-                logger.info("warmup left %s unloaded: it does not fit under the RAM ceiling "
-                            "beside the rungs already warmed; it loads on demand", model_id)
-                continue
             try:
-                if via_pool:
-                    warm(model_id)
+                if index == 0:
+                    loaded = warm(model_id) if via_pool else manager.get(model_id)
                 else:
-                    manager.get(model_id)
+                    # Fit check and load in ONE step under the manager's load lock (B-110):
+                    # checked here and loaded later, a request's load in between made this
+                    # load evict the rung warmup had just warmed.
+                    loaded = (
+                        warm(model_id, only_if_fits=True)
+                        if via_pool
+                        else _get_if_fits(manager, registry, model_id)
+                    )
+                if loaded is None:
+                    state.skipped.add(model_id)
+                    logger.info("warmup left %s unloaded: it does not fit under the RAM "
+                                "ceiling beside what is resident; it loads on demand",
+                                model_id)
+                    continue
                 if not _weights_loaded(manager, model_id):
                     raise RuntimeError(f"warmup returned but {model_id!r} holds no weights")
                 state.errors.pop(model_id, None)
@@ -696,6 +704,16 @@ def _warmup(
         return ok
     finally:
         state.running = False
+
+
+def _get_if_fits(manager: ModelManager, registry: Registry, model_id: str):
+    """``manager.get_if_fits`` — or, for a manager without it, check-then-get (not atomic)."""
+    get_if_fits = getattr(manager, "get_if_fits", None)
+    if callable(get_if_fits):
+        return get_if_fits(model_id)
+    if not _fits_beside_residents(manager, registry, model_id):
+        return None
+    return manager.get(model_id)
 
 
 def _fits_beside_residents(manager: ModelManager, registry: Registry, model_id: str) -> bool:

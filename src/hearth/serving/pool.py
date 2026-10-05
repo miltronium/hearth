@@ -294,9 +294,17 @@ class ModelPool:
         resolved = self.resolve(model_id)
         return run_on_mlx_thread(self.manager.get, resolved)
 
-    def warm(self, model_id: str | None = None) -> ModelProvider:
-        """Load ``model_id`` (default: the registry default) now — warmup/readiness."""
-        return self.provider_for(model_id)
+    def warm(self, model_id: str | None = None, *, only_if_fits: bool = False):
+        """Load ``model_id`` (default: the registry default) now — warmup/readiness.
+
+        ``only_if_fits``: load only if it fits beside the residents without evicting, and
+        return ``None`` otherwise — checked and loaded in one job on the MLX thread under
+        the manager's load lock, so no request's load can land in between (B-110).
+        """
+        if not only_if_fits:
+            return self.provider_for(model_id)
+        resolved = self.resolve(model_id)
+        return run_on_mlx_thread(self.manager.get_if_fits, resolved)
 
     def evict(self, model_id: str) -> bool:
         """Evict ``model_id`` AND every adapter variant layered over it (B-107).
