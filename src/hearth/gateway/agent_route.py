@@ -118,8 +118,13 @@ def register_agent_route(app: FastAPI) -> None:
             file_roots=len(roots),
             warnings=warnings,
         )
+        # The chat stream's backstop (B-007): any exception the generator itself raises —
+        # building a step or terminal event — still ends with an error event and [DONE].
+        # Imported here because app.py imports this module.
+        from .app import _guarantee_done
+
         return StreamingResponse(
-            _stream_agent(
+            _guarantee_done(_stream_agent(
                 agent_factory=lambda on_step: _StreamingAgent(
                     state.router,
                     registry,
@@ -135,7 +140,7 @@ def register_agent_route(app: FastAPI) -> None:
                 applied=applied,
                 warnings=warnings,
                 reachable=_is_reachable(tool_names, roots),
-            ),
+            )),
             media_type="text/event-stream",
         )
 

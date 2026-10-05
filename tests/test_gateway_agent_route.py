@@ -540,3 +540,23 @@ def test_every_run_executes_on_one_reused_worker(tmp_path, local_policy, stateme
         threads.add(agent_route._RUNNER._thread_name_prefix)
 
     assert len(threads) == 1
+
+
+def test_a_failure_inside_the_stream_generator_still_ends_with_done(
+    tmp_path, local_policy, statements, monkeypatch
+):
+    """The worker thread's errors were handled, but an exception raised by the generator
+    itself — building the terminal event — dropped the stream with no [DONE]."""
+    from hearth.gateway import agent_route
+
+    def broken_terminal(**_kwargs):
+        raise RuntimeError("terminal event build failed")
+
+    monkeypatch.setattr(agent_route, "AgentRunEvent", broken_terminal)
+    client, _, _ = _build(
+        tmp_path, local_policy, [_answer("done")], file_roots=str(statements)
+    )
+    events = _events(client.post("/v1/hearth/agent", json={"task": "anything"}))
+    assert events[-1] == "[DONE]"
+    errors = [e for e in events if isinstance(e, dict) and "error" in e]
+    assert errors and errors[-1]["error"]["code"] == "hearth.stream.internal_error"
