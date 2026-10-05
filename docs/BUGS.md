@@ -65,14 +65,14 @@ must fail when the fix is reverted.
 - [B-030](#b-030) Test-infra: `sandbox-exec` is unavailable to agents and inside harness worktrees (P3)
 
 **Added 2026-10-05 (found while fixing B-008, B-024..B-029)**
-- [B-031](#b-031) `hearth doctor --offline` renders a non-fatal WARN row as FAIL (P3)
+- ~~[B-031](#b-031) `hearth doctor --offline` renders a non-fatal WARN row as FAIL (P3)~~ — fixed in `2cf9af6`
 - [B-032](#b-032) `train_lora_real.sh` runs `uv run --no-sync` from the caller's cwd (P3)
 
 **Added 2026-10-05 (found by the docs agent and the B-008 merge check)**
-- [B-033](#b-033) `hearth serve` with a missing named routing profile prints a full traceback (P2)
+- ~~[B-033](#b-033) `hearth serve` with a missing named routing profile prints a full traceback (P2)~~ — fixed in `51b9a30`
 - [B-034](#b-034) Unknown adapter: the response claims the adapter it did not use (P1)
 - [B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)
-- [B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)
+- ~~[B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)~~ — fixed in `41bf026`
 - [B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)
 - ~~[B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)~~ — fixed in `48634a5`
 - ~~[B-039](#b-039) `training/dataset.py` promises headerless datasets, then refuses them (P3)~~ — fixed in `46bddeb`
@@ -84,12 +84,12 @@ must fail when the fix is reverted.
 **Added 2026-10-05 (second batch)**
 - ~~[B-044](#b-044) `hearth_peek.py` printed preamble values as headers~~ — fixed in `1883397` (P0)
 - ~~[B-045](#b-045) unedited prereg template / empty baselines could gate a promotion~~ — fixed in `9165034` (P1)
-- [B-046](#b-046) `hearth train` steers to `adapters promote` without `--report/--prereg` (P3)
+- ~~[B-046](#b-046) `hearth train` steers to `adapters promote` without `--report/--prereg` (P3)~~ — runtime message fixed in `21b30d6` (the `train` docstring is left to the cli.py help pass)
 
 **Added 2026-10-05 (after the model-selection merge)**
-- [B-047](#b-047) bogus `HEARTH_DEFAULT_MODEL`: `/ready` failed but `auto` served by the default (P1)
+- ~~[B-047](#b-047) bogus `HEARTH_DEFAULT_MODEL`: `/ready` failed but `auto` served by the default (P1)~~ — fixed in `45dc5e1` (CLI refuses to start; see the item for what `create_app` still does)
 - [B-048](#b-048) `/ready` 503 when the default is evicted (P2)
-- [B-049](#b-049) finance example computes money with float (P1)
+- ~~[B-049](#b-049) finance example computes money with float (P1)~~ — fixed in `9d9177e`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -721,7 +721,8 @@ must fail when the fix is reverted.
 ### B-031
 **`hearth doctor --offline` renders a non-fatal WARN row as FAIL**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `2cf9af6` — same three-way PASS/FAIL/WARN mark as
+  plain `doctor`; test asserts the status cell, reverting the hunk fails it · **Effort:** S
 - **Evidence:** `src/hearth/cli.py` `_doctor_offline` sets
   `mark = "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]"`, ignoring `Check.fatal`
   (plain `hearth doctor` distinguishes WARN). Measured: the B-029 `default_model` row reads
@@ -746,7 +747,9 @@ must fail when the fix is reverted.
 ### B-033
 **`hearth serve` with a missing named routing profile prints a full traceback**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `51b9a30` — caught where the router is built in
+  `serve`, `run`, `agent`, `mcp`, `rag query` (with or without `--answer`); exit 2, the router's
+  message, no traceback. `stats`, `eval`, `rag ingest`, `models *` build no router · **Effort:** S
 - **Evidence:** Measured: `HEARTH_ROUTING_YAML=config/no-such.yaml hearth serve` exits 1 with the right message, but only after a Rich traceback from `cli.py` `serve` → `create_app` raising `RoutingProfileNotFoundError` (introduced by `2550766`, B-008).
 - **Impact:** Fails safe (server refuses to start) but buries the one-line fix under a traceback.
 - **Fix outline:** Catch `RoutingProfileNotFoundError` in `serve` (and `run`/`agent`/`mcp`), print the message, exit 2.
@@ -773,7 +776,9 @@ must fail when the fix is reverted.
 ### B-036
 **`hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `41bf026` — `EmbeddingUnavailableError` caught
+  around `ingest`/`query`; "Embedder unavailable: ..." and exit 1. The embedder itself still
+  cannot work (B-011) · **Effort:** S
 - **Evidence:** `src/hearth/cli.py` rag ingest (~line 740) has no handler for `EmbeddingUnavailableError` (checked: no `except` in the command body). The embedder itself cannot work (B-011).
 - **Impact:** A clean, actionable error becomes a stack trace.
 - **Fix outline:** Catch `EmbeddingUnavailableError` in `rag ingest`/`rag query`, print it, exit 1.
@@ -865,7 +870,11 @@ must fail when the fix is reverted.
 ### B-046
 **`hearth train` help and output steer users to `adapters promote` without `--report/--prereg`**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED (runtime message)** in `21b30d6` — the post-train
+  message names `hearth eval <id> --golden <set> --prereg <committed prereg> --promote`, or
+  `--report-json` then `adapters promote <id> --report <file> --prereg <prereg>`. The `train`
+  docstring (~"can be promoted (`hearth adapters promote`)") is left to the cli.py help pass ·
+  **Effort:** S
 - **Evidence:** Reported by the docs-hygiene agent: `src/hearth/cli.py` train docstring (~815)
   and the post-train message (~879) say "eval it, then `hearth adapters promote`" with no
   mention of the report/prereg the command requires.
@@ -875,7 +884,14 @@ must fail when the fix is reverted.
 ### B-047
 **A bogus `HEARTH_DEFAULT_MODEL`: `/ready` says failed, but `model=auto` is still served by the catalog default**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Priority:** P1 · **Status:** **FIXED** in `45dc5e1` — `Registry.require_default()`; `serve`,
+  `run`, `agent`, `mcp` and `rag query --answer` refuse to start (exit 2) naming the bad id and
+  the registered ids; plain `doctor` FAILs (fatal); `doctor --offline` shows it as a non-fatal
+  WARN row (a refusal to start is not an egress path), verdict unchanged. Unset → catalog
+  default. **Still true:** an app built directly with `create_app()` (not via `hearth serve`)
+  serves `auto` from the catalog default while `/ready` reports failed —
+  `gateway/app.py:_default_model_problem` re-derives the check from `os.environ` instead of
+  calling `require_default()` (gateway not touched in this batch) · **Effort:** S
 - **Evidence:** Confirmed live by the model-selection agent (in-process, real weights): with
   `HEARTH_DEFAULT_MODEL=bogus/no-such-model`, `/ready` → 503 `failed`, yet a `model=auto` chat
   is answered 200 by Coder-7B and `/admin/health` reports the 7B (`registry/__init__.py:59`
@@ -901,7 +917,9 @@ must fail when the fix is reverted.
 ### B-049
 **The finance ladder example computes money with `float`**
 
-- **Priority:** P1 (CLAUDE.md §4: "Decimal in Python, never a float") · **Status:** open · **Effort:** S
+- **Priority:** P1 (CLAUDE.md §4: "Decimal in Python, never a float") · **Status:** **FIXED** in
+  `9d9177e` — parsed by `hearth.finance.parse_money`, summed/compared/formatted as Decimal; an
+  AST guard test fails on any `float(` in the file · **Effort:** S
 - **Evidence:** Checked: `examples/finance/run_finance_ladder.py` `amount: float`, `float(r["amount"])`,
   and income/spend/net/by_category/largest totals all float (lines ~88, 111-117, 127, 236).
 - **Impact:** The shipped example teaches the exact practice the finance package forbids; float
@@ -949,3 +967,9 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `1883397` | **B-044.** `hearth_peek.py` never prints preamble or value-like cells; output asserted marker-free. |
 | `9165034` | **B-045.** A prereg needs written hypothesis/stopping_rule/kill_condition and cannot drop default baselines. |
 | `2d186dd` | **B-004, B-005.** ModelPool: the requested model serves (404 for unknown ids); telemetry from the provider that ran; warmup loads and `/ready` reports loading/failed with a reason. |
+| `2cf9af6` | **B-031.** `hearth doctor --offline` marks a non-fatal failed row WARN (fatal → FAIL), so the table cannot contradict the SAFE/UNSAFE verdict. |
+| `51b9a30` | **B-033.** A missing selected routing profile ends `serve`/`run`/`agent`/`mcp`/`rag query` with "Routing profile not found: ..." and exit 2, no traceback (caught where the router is built). |
+| `41bf026` | **B-036.** `rag ingest`/`rag query` with an embedder that cannot load print "Embedder unavailable: ..." and exit 1, no traceback. |
+| `21b30d6` | **B-046.** `hearth train`'s post-train message names `eval ... --prereg ... --promote` or `--report-json` + `adapters promote --report --prereg` (runtime message; docstring left to the help pass). |
+| `45dc5e1` | **B-047.** An explicitly set, unregistered `HEARTH_DEFAULT_MODEL` makes `serve`/`run`/`agent`/`mcp`/`rag query --answer` refuse to start (exit 2, bad id + registered ids); `doctor` FAIL, `doctor --offline` WARN. `Registry.default_id` stays lenient; `require_default()` is the strict form. |
+| `9d9177e` | **B-049.** `examples/finance/run_finance_ladder.py` parses with `hearth.finance.parse_money` and keeps every amount Decimal; tests assert exact totals where float sums drift, plus an AST no-`float(` guard. |
