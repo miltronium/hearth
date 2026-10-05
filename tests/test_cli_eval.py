@@ -129,6 +129,9 @@ def real_lift(monkeypatch):
     """Install a provider where the adapter genuinely beats the base model."""
     answers = {r["prompt"]: r["expected"] for r in ROWS}
     monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _FakeProvider(answers))
+    from test_promotion_evidence import allow_test_backends
+
+    allow_test_backends(monkeypatch)  # the fake stands in for the MLX pool (B-084)
 
 
 def test_help_lists_eval_and_prereg():

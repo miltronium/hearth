@@ -28,6 +28,7 @@ from test_promotion_evidence import World
 @pytest.fixture(autouse=True)
 def fake_provider(monkeypatch):
     monkeypatch.setattr("hearth.cli.select_provider", lambda settings: pe._Provider())
+    pe.allow_test_backends(monkeypatch)
 
 
 @pytest.fixture
@@ -301,3 +302,52 @@ def test_L5_an_incumbent_with_no_servable_base_is_not_measured(world, base):
     world.store.promote("extract-0", gate_passed=True)
     result = world.eval("extract-1")
     assert result.exit_code == 2, _flat(result)
+
+
+# -- L4: only the MLX pool's scores can license a promotion (B-084) -----------------------
+
+
+def test_L4_the_report_records_the_backend_that_generated_it(world):
+    world.registered()
+    payload = world.eval_report()
+    assert payload["backend"] == "test_promotion_evidence._Provider:fake"
+
+
+def test_L4_a_plugin_or_stub_backend_cannot_promote(world, monkeypatch):
+    """Without the test allowlist, the very same (passing) run is refused on both paths."""
+    from hearth.training import promotion
+
+    world.registered()
+    world.eval_report()
+    monkeypatch.setattr(promotion, "PROMOTABLE_BACKENDS",
+                        frozenset({"hearth.serving.pool.ModelPool:mlx"}))
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "not the MLX model pool" in _flat(result)
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1, _flat(result)
+    assert "not the MLX model pool" in _flat(result)
+    assert world.status() == "candidate"
+
+
+def test_L4_a_provider_that_calls_itself_mlx_is_not_the_pool(monkeypatch):
+    from hearth.providers.echo import EchoProvider
+    from hearth.training import promotion
+    from hearth.training.promotion import backend_identity, backend_problems
+
+    monkeypatch.setattr(promotion, "PROMOTABLE_BACKENDS",
+                        frozenset({"hearth.serving.pool.ModelPool:mlx"}))
+
+    class Plugin:
+        name = "mlx"
+
+    assert backend_problems(backend_identity(Plugin()))
+    assert backend_problems(backend_identity(EchoProvider()))
+    assert backend_problems(None)
+
+
+def test_L4_the_mlx_pool_is_promotable():
+    from hearth.providers import mlx_pool
+    from hearth.training.promotion import backend_identity, backend_problems
+
+    assert backend_problems(backend_identity(mlx_pool())) == []

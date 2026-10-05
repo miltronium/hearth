@@ -1518,7 +1518,7 @@ def eval_adapter(
         load_prereg,
         provenance_proof,
     )
-    from .training.promotion import REPORT_SCHEMA
+    from .training.promotion import REPORT_SCHEMA, backend_identity, backend_problems
 
     if temperature > 0.0 and not allow_sampling:
         console.print(
@@ -1757,6 +1757,7 @@ def eval_adapter(
             "incumbent_id": incumbent_id,
             "incumbent_weights_sha": incumbent_weights,
             "incumbent_base_model": incumbent_base,
+            "backend": backend_identity(provider),
 
             "baselines": {k: v.to_json() for k, v in baselines.items()},
             "gate": gate.as_proof(),
@@ -1788,6 +1789,10 @@ def eval_adapter(
             "declared and committed before the measurement (docs/LEARNING_plan.md §3.4); "
             "scaffold one with `hearth prereg init`."
         )
+        raise typer.Exit(code=1)
+    unmeasured = backend_problems(backend_identity(provider))
+    if unmeasured:
+        console.print(f"[red]Promotion refused:[/red] {unmeasured[0]}")
         raise typer.Exit(code=1)
     if base_model != entry.base_model:
         console.print(
