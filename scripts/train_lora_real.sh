@@ -6,10 +6,10 @@
 # eval gate. Everything here calls real, in-repo commands — nothing is faked.
 #
 # This script CANNOT run in CI or a locked-down sandbox: it needs the [mlx] extra, an
-# Apple-Silicon GPU, and a base model already present in the local HF cache (network
-# downloads are blocked). It is written to FAIL FAST with a clear message when a
-# prerequisite is missing, and it NEVER attempts a network download (it forces
-# HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 and verifies the base model is cached first).
+# Apple-Silicon GPU, and a base model already on disk — ~/.hearth/models (`hearth models
+# pull`) or the HF cache (network downloads are blocked). It is written to FAIL FAST with
+# a clear message when a prerequisite is missing, and it NEVER attempts a network download (it forces
+# HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 and verifies the base model is on disk first).
 #
 # See docs/RUNBOOK_training.md for the full walkthrough and expected artifacts.
 
@@ -31,15 +31,15 @@ Usage: scripts/train_lora_real.sh --data <dataset.jsonl> [options]
 
 Runs a REAL LoRA fine-tune on Apple Silicon and (optionally) promotes the resulting
 adapter through HEARTH's eval gate. Requires: `uv sync --extra mlx --extra mcp --extra dev --extra files`, an Apple-Silicon GPU,
-and the base model already cached under ~/.cache/huggingface (this script runs OFFLINE and
-will not download anything).
+and the base model already on disk: ~/.hearth/models (`hearth models pull`) or the HF cache
+(this script runs OFFLINE and will not download anything).
 
 Required:
   --data <path>            Dataset JSONL (built by hearth.training.dataset; see the runbook).
 
 Options:
   --base <model-id>        Base model to fine-tune. Default: the HEARTH default 7B coder
-                           (mlx-community/Qwen2.5-Coder-7B-Instruct-4bit). Must be cached.
+                           (mlx-community/Qwen2.5-Coder-7B-Instruct-4bit). Must be on disk.
   --task <name>            Task class the adapter targets (extract|classify|summarize|draft|
                            code). Default: extract.
   --iters <n>              Training iterations. Default: 200.
@@ -107,28 +107,16 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   die "real LoRA training needs an Apple-Silicon (arm64 macOS) GPU. Detected: $(uname -s)/$(uname -m)"
 fi
 
-# --- prereq: base model already cached (NO network) ----------------------------------
-# We verify the base model resolves from the local HF cache with downloads disabled. If it
-# is not cached, huggingface_hub raises under HF_HUB_OFFLINE=1 and we abort with guidance
-# instead of hanging or (worse) downloading.
-echo "==> Verifying base model is cached (offline)…"
-if ! uv run --no-sync python - "$BASE_MODEL" <<'PY'
-import sys
-from huggingface_hub import snapshot_download
-repo = sys.argv[1]
-try:
-    # local_files_only mirrors HF_HUB_OFFLINE=1: resolve from cache or raise.
-    path = snapshot_download(repo_id=repo, local_files_only=True)
-except Exception as exc:  # noqa: BLE001 - surface any cache-miss as a clean failure
-    print(f"NOT CACHED: {exc}", file=sys.stderr)
-    sys.exit(3)
-print(path)
-PY
-then
-  die "base model '${BASE_MODEL}' is not in the local HF cache.
-      Pre-warm it ONCE from an unrestricted network, e.g.:
-          HF_HUB_OFFLINE=0 uv run --no-sync huggingface-cli download ${BASE_MODEL}
-      or: hearth models pull ${BASE_MODEL}
+# --- prereq: base model on disk (NO network) -----------------------------------------
+# Resolved with hearth's own resolver (providers/mlx.py:resolve_local_model, downloads off),
+# the one `hearth train` uses: ~/.hearth/models (where `hearth models pull` writes) first,
+# then the huggingface hub cache. Checking the hub cache alone rejected pulled models (B-024).
+echo "==> Verifying base model is on disk (offline)…"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! uv run --no-sync python "${SCRIPT_DIR}/check_base_on_disk.py" "$BASE_MODEL"; then
+  die "base model '${BASE_MODEL}' is not on disk (looked in ~/.hearth/models and the HF cache).
+      Fetch it ONCE, deliberately:
+          hearth models pull ${BASE_MODEL}
       then re-run this script (it stays offline)."
 fi
 
