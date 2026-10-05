@@ -29,7 +29,8 @@ Standard OpenAI request. HEARTH adds **optional** fields (ignored by OpenAI clie
 
 ```jsonc
 {
-  "model": "auto",                     // "auto" = let the router decide; or a specific id
+  "model": "auto",                     // "auto"/"" = the router's per-class ladder, else the
+                                       // registry default; or an id from GET /v1/models
   "messages": [{"role": "user", "content": "Summarize this diff"}],
   "stream": true,
   "hearth": {                          // optional extension block
@@ -58,13 +59,43 @@ Response adds a `hearth` block in the final chunk / object:
 }
 ```
 
+**`model` is honoured, never substituted.** A specific id is served by exactly that model's
+weights: with the `mlx` backend the gateway holds one provider per model id
+(`hearth.serving.ModelPool`, LRU under `HEARTH_RAM_CEILING_GB`, default 24), loading on first
+use and evicting the least-recently-used model when the next one would not fit. The `hearth`
+block's `model` (and the stream's final chunk) is filled in by the provider instance that
+generated, not copied from the request. An id the server cannot serve is refused **before**
+anything is generated or a stream is opened — same for `stream: true` and for
+`POST /v1/hearth/agent`:
+
+```jsonc
+// HTTP 404
+{ "error": { "message": "The model 'bogus/model' does not exist in the HEARTH model registry (config/models.yaml). Servable models: [...]",
+             "type": "invalid_request_error", "param": "model", "code": "model_not_found" } }
+```
+
+404 covers: an id not in `config/models.yaml`; a registered id without the `chat` capability
+(e.g. the bge embed model); an id for another backend (e.g. `echo` while serving `mlx`). The
+message lists what is servable. A registered chat model whose weights are **not on disk** is
+not a 404: the load fails and the request gets `503` `provider_unavailable` whose message
+names the `hearth models pull <id>` to run (HEARTH never downloads on load). The CLI applies
+the same check: `hearth run --model <unknown>` / `hearth agent --model <unknown>` exit 2.
+
 ### `POST /v1/embeddings`
 
 Standard OpenAI embeddings shape. `model: "auto"` selects the configured local embedder.
 
 ### `GET /v1/models`
 
-Lists servable models and adapters from the registry (id, backend, context, capabilities).
+Lists exactly the models a chat request can name and be served by (id, backend, context,
+capabilities): the registry's `chat` models for the active backend. With `mlx` that excludes
+`echo` and embed-only entries. OpenAI clients — and the `/chat` page — build their model
+picker from this list, so an entry that could only 404 would be a trap; and
+`/v1/embeddings` ignores `model` (it always uses the configured embedder), so listing an embed
+model would serve nobody. The list and the 404 above share one rule
+(`hearth.serving.servable_for` / `check_model`), so they cannot disagree. Weights-on-disk is
+not checked here: a listed model that was never pulled answers 503 with the pull command
+(`hearth doctor --offline` reports which reachable models are on disk).
 
 ---
 
@@ -124,8 +155,41 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
 ### Admin (`/v1/hearth/admin/`)
 
 - `GET /admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
-- `GET /admin/health` · `GET /admin/ready` — liveness/readiness (warm models loaded).
-- `POST /admin/models/{id}/load|unload` — memory management.
+- `GET /admin/health` — liveness (unauthenticated): the process is up. Says nothing about
+  weights.
+- `GET /admin/ready` — readiness (unauthenticated). `200 {"status": "ready"}` only when the
+  default model is resident in the manager requests are served from **and** its provider
+  reports weights in memory. Otherwise `503` with a `status` and a `reason`:
+
+  | `status` | `reason` (examples) | meaning |
+  |---|---|---|
+  | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
+  | `loading` | `weights for '<id>' are not loaded` (+ ` (HEARTH_WARMUP is off)`) | nothing is loading them: warmup off, or the default was evicted to make room for another model |
+  | `failed` | `warmup of '<id>' failed: ModelNotOnDiskError: …` | the load raised (weights not on disk, corrupt checkpoint, mlx missing) |
+  | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
+  | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
+
+  Every body also carries `backend`, `model` (the default id) and `resident` (ids in memory).
+  The `echo` backend is always ready. Measured on 2026-10-05 with real weights: `503 loading`
+  at 0.05 s after start, `200 ready` at ~1.05 s (7B from page cache).
+- `GET /admin/models` — what is resident right now, read off the provider instances
+  themselves (auth required):
+
+  ```jsonc
+  { "backend": "mlx", "default": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+    "ram_ceiling_gb": 24.0, "resident_ram_gb": 6.5,
+    "resident": [ { "model": "mlx-community/Qwen2.5-3B-Instruct-4bit", "ram_gb": 2.0,
+                    "provider_model": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+                    "loaded": true,
+                    "loaded_path": "/Users/…/.hearth/models/models--mlx-community--Qwen2.5-3B-Instruct-4bit/snapshots/…",
+                    "generations": 5 } ] }
+  ```
+
+  `loaded_path` is the directory `mlx_lm.load` actually read and `generations` counts the
+  generations that instance ran — evidence of which weights answered, independent of anything
+  a response says about itself. `ram_gb` is the registry's estimate used for the ceiling, not
+  a measurement. Order is LRU (least recently used first).
+- `POST /admin/models/{id}/load|unload` — memory management. *(planned; not implemented)*
 - `POST /admin/adapters/{id}/promote|retire` — adapter lifecycle.
 
 ---
@@ -170,6 +234,10 @@ Standard OpenAI-style error envelope, plus a `hearth.code` for HEARTH-specific c
 { "error": { "message": "remote budget exhausted; escalation denied",
              "type": "budget_exhausted", "code": "hearth.budget.exhausted" } }
 ```
+
+A request naming a model the server cannot serve gets OpenAI's own shape: HTTP 404,
+`type: invalid_request_error`, `param: model`, `code: model_not_found` (see
+`POST /v1/chat/completions`).
 
 Notable HEARTH error types: `budget_exhausted`, `escalation_denied`, `model_not_loaded`,
 `adapter_not_found`, `backend_unavailable`. Clients should treat a local-only failure as

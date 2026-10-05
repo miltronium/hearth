@@ -258,3 +258,19 @@ def test_cli_exits_nonzero_when_unsafe_and_zero_when_safe(machine, monkeypatch, 
     unsafe = runner.invoke(app, ["doctor", "--offline"], env={"COLUMNS": "250"})
     assert unsafe.exit_code == 1, unsafe.output
     assert "UNSAFE offline" in unsafe.output and "routing_profile" in unsafe.output
+
+
+def test_a_rung_the_model_pool_would_refuse_is_not_safe(machine):
+    """The routing loader accepts any REGISTERED id as a rung (echo is registered), but the
+    mlx backend serves through ModelPool, which 404s an id that is not a chat model of its
+    backend. Such a rung must fail here, not at the first classified request."""
+    machine.profile.write_text(SAFE_PROFILE.replace(
+        "extract: {backend: local, escalate: never}",
+        "extract: {backend: local, escalate: never, local_model: echo}",
+    ))
+    checks, safe = machine.run()
+    assert not safe
+    assert not checks["model echo"].ok
+    assert "NOT servable" in checks["model echo"].detail
+    assert "class extract" in checks["model echo"].detail
+    assert checks[f"model {DEFAULT}"].ok
