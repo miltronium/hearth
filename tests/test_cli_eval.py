@@ -383,6 +383,96 @@ def test_adapters_promote_refuses_a_report_that_fails_the_gate(tmp_path):
     assert "refused" in result.stdout.lower()
 
 
+# -- B-070: never evaluate on a silent fallback model -------------------------------------
+
+
+@pytest.fixture
+def fresh_registry():
+    """`hearth eval` asks the process-cached registry; each test sets its own env."""
+    from hearth.registry import get_registry
+
+    get_registry.cache_clear()
+    yield
+    get_registry.cache_clear()
+
+
+def test_eval_refuses_an_unregistered_default_model(tmp_path, real_lift, fresh_registry):
+    """HEARTH_DEFAULT_MODEL naming no registered model is the B-047 refusal, here too."""
+    _seed_adapter(tmp_path)
+    golden = _golden(tmp_path, ROWS)
+    out = tmp_path / "r.json"
+    env = {**_env(tmp_path), "HEARTH_DEFAULT_MODEL": "org/not-a-registered-model"}
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24",
+         "--report-json", str(out)],
+        env=env,
+    )
+    flat = " ".join(result.output.split())
+    assert result.exit_code == 2, flat
+    assert "Refusing to start" in flat and "org/not-a-registered-model" in flat
+    assert "gate:" not in flat  # nothing was measured
+    assert not out.exists()
+
+
+def test_eval_runs_with_a_registered_default_model(tmp_path, real_lift, fresh_registry):
+    _seed_adapter(tmp_path)
+    golden = _golden(tmp_path, ROWS)
+    env = {**_env(tmp_path), "HEARTH_DEFAULT_MODEL": BASE}
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24"],
+        env=env,
+    )
+    assert result.exit_code == 0, result.output
+    assert "gate: PASS" in result.output
+
+
+@pytest.mark.parametrize("base_model", ["", "auto", "  "])
+def test_eval_refuses_an_adapter_with_no_concrete_base(tmp_path, real_lift, base_model):
+    """An empty / 'auto' base resolves to whatever the default is today: not a measurement."""
+    from hearth.registry import AdapterStore
+
+    AdapterStore(path=tmp_path / ".hearth" / "adapters.json").register(
+        "extract-1", base_model=base_model, task="extract", train_run_id="r",
+        adapter_path=_weights(tmp_path, "extract-1"),
+    )
+    golden = _golden(tmp_path, ROWS)
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24"],
+        env=_env(tmp_path),
+    )
+    flat = " ".join(result.output.split())
+    assert result.exit_code == 2, flat
+    assert "no concrete base model" in flat
+    assert "gate:" not in flat
+
+
+@pytest.mark.parametrize("via", ["entry", "--base"])
+def test_eval_refuses_an_unservable_base_with_any_provider(tmp_path, real_lift, via):
+    """The fake provider has no `resolve` (like echo or a plugin); the registry still decides."""
+    from hearth.registry import AdapterStore
+
+    store = AdapterStore(path=tmp_path / ".hearth" / "adapters.json")
+    store.register(
+        "extract-1", base_model="org/base" if via == "entry" else BASE, task="extract",
+        train_run_id="r", adapter_path=_weights(tmp_path, "extract-1"),
+    )
+    golden = _golden(tmp_path, ROWS)
+    extra = ["--base", "org/base"] if via == "--base" else []
+    result = runner.invoke(
+        app,
+        ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24",
+         *extra],
+        env=_env(tmp_path),
+    )
+    flat = " ".join(result.output.split())
+    assert result.exit_code == 2, flat
+    assert "Unknown model" in flat and "org/base" in flat
+    assert "gate:" not in flat
+
+
 def test_eval_unknown_adapter(tmp_path):
     golden = _golden(tmp_path, [{"prompt": "foo", "expected": "bar"}])
     result = runner.invoke(

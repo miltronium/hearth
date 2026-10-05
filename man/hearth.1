@@ -576,9 +576,9 @@ hearth eval ADAPTER_ID \-\-golden golden.jsonl \-\-prereg prereg/c.yaml \e
 .fi
 .RE
 .PP
-Env: HEARTH_BACKEND, HEARTH_HOME, HEARTH_MODELS_YAML.
+Env: HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_HOME, HEARTH_MODELS_YAML.
 .PP
-Exit: without \-\-promote, 0 once the gate was measured, whether it passed or failed (read the gate: line); 1 when it refused to measure (unknown adapter, missing adapter weights, bad golden set or prereg, a bar looser than the gate allows, temperature above 0, non\-determinism). With \-\-promote, 0 only when the adapter was promoted, else 1.
+Exit: without \-\-promote, 0 once the gate was measured, whether it passed or failed (read the gate: line); 1 when it refused to measure (unknown adapter, missing adapter weights, bad golden set or prereg, a bar looser than the gate allows, temperature above 0, non\-determinism); 2 when HEARTH_DEFAULT_MODEL names an unregistered model or the base model is empty, auto or not servable here (never a silent fallback). With \-\-promote, 0 only when the adapter was promoted, else 1 (or 2 as above).
 .PP
 Arguments and options:
 .RS 4

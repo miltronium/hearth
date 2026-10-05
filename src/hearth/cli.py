@@ -1493,13 +1493,14 @@ def eval_adapter(
       hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml \\
         --promote
 
-    Env: HEARTH_BACKEND, HEARTH_HOME, HEARTH_MODELS_YAML.
+    Env: HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_HOME, HEARTH_MODELS_YAML.
 
     Exit: without --promote, 0 once the gate was measured, whether it passed or failed
     (read the gate: line); 1 when it refused to measure (unknown adapter, missing adapter
     weights, bad golden set or prereg, a bar looser than the gate allows, temperature
-    above 0, non-determinism). With --promote, 0 only when the adapter was promoted,
-    else 1.
+    above 0, non-determinism); 2 when HEARTH_DEFAULT_MODEL names an unregistered model or
+    the base model is empty, auto or not servable here (never a silent fallback). With
+    --promote, 0 only when the adapter was promoted, else 1 (or 2 as above).
     """
     import json as _json
     from datetime import UTC, datetime
@@ -1507,6 +1508,7 @@ def eval_adapter(
     from .config import Settings
     from .registry import AdapterError
     from .registry.adapters import adapter_weights_sha
+    from .serving.pool import AUTO_MODEL_IDS
     from .training.attest import AttestationError, load_key, sign
     from .training.eval import (
         EvalConfig,
@@ -1531,6 +1533,9 @@ def eval_adapter(
             "Use --temperature 0 (default), or --allow-sampling to measure anyway."
         )
         raise typer.Exit(code=1)
+    # An unregistered HEARTH_DEFAULT_MODEL is a misconfiguration to fix, not a default to
+    # route around: the same refusal serve/run/agent make (B-047, B-070).
+    _require_registered_default()
 
     store = _adapter_store()
     entry = store.get(adapter_id)
@@ -1568,15 +1573,25 @@ def eval_adapter(
             console.print(f"[red]Pre-registration error:[/red] {exc}")
             raise typer.Exit(code=1) from None
 
-    base_model = base or entry.base_model
+    base_model = (base or entry.base_model or "").strip()
+    # Never evaluate on a silent fallback (B-070). An empty or "auto" base resolves to the
+    # registry default — whatever HEARTH_DEFAULT_MODEL or the catalog says today — so the
+    # report would name one model and measure another.
+    if base_model in AUTO_MODEL_IDS:
+        console.print(
+            f"[red]Refusing to measure:[/red] {adapter_id!r} records no concrete base model "
+            f"(base_model={entry.base_model!r}); pass --base <registered id>. An empty or "
+            "'auto' base would silently evaluate the registry default."
+        )
+        raise typer.Exit(code=2)
     # Fresh Settings() (not the lru_cached get_settings) so HEARTH_BACKEND is read per call.
     with _backend_required():
         provider = select_provider(Settings())
-    # The evaluated model must be the one that generates. Before ModelPool every eval ran
-    # the registry default whatever `base_model` said; now a pool refuses an unservable base
-    # (a single-model provider — echo, a plugin — has nothing to select between).
-    if callable(getattr(provider, "resolve", None)):
-        _require_known_model(provider, base_model)
+    # The evaluated model must be the one that generates, and must be one the registry
+    # serves. A pool resolves it against its backend; any other provider (echo, a plugin)
+    # serves every id itself, so check_model asks the registry that the id is a registered
+    # chat model. Either way an unservable base is exit 2, never a substitute.
+    _require_known_model(provider, base_model)
     config = EvalConfig.for_system(system, temperature=temperature, max_tokens=max_tokens)
     measured_at = datetime.now(tz=UTC).isoformat(timespec="seconds")
 
