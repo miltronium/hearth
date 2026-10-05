@@ -37,6 +37,10 @@ classes:
   classify: { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
   extract:  { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
   rank:     { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
+  # `embed` via chat is a hint, not an embedding call (/v1/embeddings ignores the router);
+  # pinned so it cannot fall through to the registry default — which made warmup and
+  # readiness load a 7B this profile otherwise never serves (B-075).
+  embed:    { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-3B-Instruct-4bit }
 
   # --- tier 2: larger, a handful of calls -----------------------------------------------
   summarize: { backend: local, escalate: never, local_model: mlx-community/Qwen2.5-14B-Instruct-4bit }

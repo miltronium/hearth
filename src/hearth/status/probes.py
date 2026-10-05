@@ -330,11 +330,17 @@ def _policy_outcome(path: Path) -> tuple[object | None, dict]:
     disagreement is reported as a discrepancy rather than laundered into a green line.
     """
     try:
-        from ..router.policy import load_policy
-
-        policy = load_policy(path)
-    except Exception:  # noqa: BLE001 — an unloadable router degrades this profile only
+        from ..router.policy import RoutingProfileNotFoundError, load_policy
+    except Exception:  # noqa: BLE001 — an unimportable router degrades this profile only
         return None, {"error": "policy loader unavailable"}
+    try:
+        policy = load_policy(path)
+    except RoutingProfileNotFoundError as exc:
+        # Includes RoutingPolicyError (an unusable rung): report WHY, not a generic line
+        # that hides the one sentence the operator needs (B-077).
+        return None, {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — never crash a status report
+        return None, {"error": f"policy failed to load: {type(exc).__name__}: {exc}"}
 
     raw_text = _read_text(path)
     if raw_text is None:

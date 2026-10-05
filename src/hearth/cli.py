@@ -620,12 +620,18 @@ def _routing_profile_required():
     """
     from rich.markup import escape
 
-    from .router.policy import RoutingProfileNotFoundError
+    from .router.policy import RoutingPolicyError, RoutingProfileNotFoundError
 
     try:
         yield
     except RoutingProfileNotFoundError as exc:
-        console.print(f"[red]Routing profile not found:[/red] {escape(str(exc))}")
+        # RoutingPolicyError subclasses it: the file exists but names an unusable rung (B-076).
+        label = (
+            "Routing profile unusable:"
+            if isinstance(exc, RoutingPolicyError)
+            else "Routing profile not found:"
+        )
+        console.print(f"[red]{label}[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from None
 
 

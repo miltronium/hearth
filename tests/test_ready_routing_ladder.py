@@ -60,13 +60,13 @@ def test_finance_profile_with_the_3b_absent_is_not_ready_either(fake, tmp_path):
     assert "class:classify" in body["models"][SMALL]["serves"]
 
 
-def test_the_finance_profile_still_reaches_the_default_through_intent_embed(fake, tmp_path):  # noqa: F811
-    """routing.finance.yaml pins 8 of 9 classes; ``intent: embed`` falls to the registry
-    default, so that model IS one ``auto`` can be routed to and readiness judges it."""
+def test_the_finance_profile_pins_every_class_so_the_default_is_not_judged(fake, tmp_path):  # noqa: F811
+    """routing.finance.yaml pins all 9 classes (B-075 pinned `embed` to the tier-1 3B), so
+    the registry default is not a model `auto` can reach and readiness does not judge it."""
     app, _, router = _app(tmp_path, load_policy(FINANCE_YAML))
     body = TestClient(app).get(READY).json()
-    assert body["models"][CODER7]["serves"] == ["class:embed (registry default)"]
-    assert router.decide(GenRequest(messages=[], model="auto"), intent="embed").model == CODER7
+    assert CODER7 not in body["models"], body["models"]
+    assert router.decide(GenRequest(messages=[], model="auto"), intent="embed").model == SMALL
 
 
 def test_a_default_the_profile_never_serves_is_not_judged(fake, tmp_path):  # noqa: F811
@@ -91,7 +91,8 @@ def test_warmup_loads_the_most_used_rung_first_not_the_unserved_default(fake, tm
     loaded = fake.loaded_paths()
     assert loaded, "warmup loaded nothing"
     # 5 of 9 classes route to the 14B, 3 to the 3B, only `embed` to the registry default.
-    assert loaded == [weights(BIG), weights(SMALL), weights(CODER7)]
+    # The 7B registry default is not a finance rung (B-075), so warmup never loads it.
+    assert loaded == [weights(BIG), weights(SMALL)]
     body = TestClient(app).get(READY).json()
     assert body["status"] == "ready", body
     assert body["model"] == BIG and body["loaded"] is True
