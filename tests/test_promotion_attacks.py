@@ -158,3 +158,98 @@ def test_E_a_report_claiming_a_committed_golden_set_is_checked_against_the_blob(
     assert result.exit_code == 1, _flat(result)
     assert "what was scored is not what was committed" in _flat(result)
     assert world.status() == "candidate"
+
+
+# -- F: the incumbent check and the registry write are one step (B-082) -------------------
+
+
+def test_F_a_promotion_landing_between_check_and_write_is_not_retired(world, monkeypatch):
+    """A report that beat the BASE; another adapter is promoted after the check, before the
+    write. store.promote used to retire it anyway."""
+    world.registered()
+    world.eval_report()
+    import hearth.training.promotion as promo
+
+    orig = promo.report_problems
+    fired = []
+
+    def racing(*a, **k):
+        out = orig(*a, **k)
+        if not fired:  # the concurrent `adapters promote` of extract-2 lands once, here
+            fired.append(True)
+            world.adapter("extract-2")
+            world.store.promote("extract-2", gate_passed=True)
+        return out
+
+    monkeypatch.setattr(promo, "report_problems", racing)
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "measured against 'the base model'" in _flat(result)
+    assert world.status() == "candidate"
+    assert world.store.get("extract-2").status == "promoted"
+
+
+def test_F_incumbent_weights_swapped_between_check_and_write_are_caught(world, monkeypatch):
+    """The precondition re-runs every binding check under the lock, weights included."""
+    old = world.adapter("extract-0")
+    world.store.promote("extract-0", gate_passed=True)
+    world.registered()
+    payload = world.eval_report()
+    assert payload["incumbent_id"] == "extract-0"
+    import hearth.training.promotion as promo
+
+    orig = promo.report_problems
+    calls = []
+
+    def swapping(*a, **k):
+        out = orig(*a, **k)
+        if not calls:
+            calls.append(True)
+            (old / "adapters.safetensors").write_bytes(b"incumbent retrained meanwhile")
+        return out
+
+    monkeypatch.setattr(promo, "report_problems", swapping)
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "the evidence changed while promoting" in _flat(result)
+    assert "incumbent 'extract-0' weights changed" in _flat(result)
+    assert world.status() == "candidate"
+    assert world.store.get("extract-0").status == "promoted"
+
+
+def test_F_eval_promote_rechecks_the_incumbent_under_the_lock(world, monkeypatch):
+    """The measuring path: an adapter promoted while the eval ran is not silently retired."""
+    world.registered()
+    import hearth.training.eval as ev
+
+    orig = ev.evaluate_gate
+
+    def racing(*a, **k):
+        world.adapter("extract-2")
+        world.store.promote("extract-2", gate_passed=True)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ev, "evaluate_gate", racing)
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1, _flat(result)
+    assert "measured against 'the base model'" in _flat(result)
+    assert world.status() == "candidate"
+    assert world.store.get("extract-2").status == "promoted"
+
+
+def test_F_eval_promote_refuses_an_incumbent_retrained_while_it_was_scored(world, monkeypatch):
+    old = world.adapter("extract-0")
+    world.store.promote("extract-0", gate_passed=True)
+    world.registered()
+
+    class _Swapping(pe._Provider):
+        def generate(self, req):
+            if req.adapter and req.adapter.endswith("extract-0"):
+                (old / "adapters.safetensors").write_bytes(b"incumbent retrained mid-eval")
+            return super().generate(req)
+
+    monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _Swapping())
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1, _flat(result)
+    assert "incumbent 'extract-0''s weights changed during the eval" in _flat(result)
+    assert world.status() == "candidate"

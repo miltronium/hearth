@@ -95,3 +95,70 @@ def test_promote_unknown_and_retired(tmp_path):
     store.retire("extract-1")
     with pytest.raises(AdapterError):
         store.promote("extract-1", gate_passed=True)
+
+
+# -- B-082: lock, re-check under the lock, atomic write ----------------------------------
+
+
+def test_promote_refuses_when_the_incumbent_is_not_the_one_beaten(tmp_path):
+    from hearth.registry.adapters import IncumbentChangedError
+
+    store = _store(tmp_path)
+    _register(store, "extract-1")
+    _register(store, "extract-0")
+    store.promote("extract-0", gate_passed=True)
+    with pytest.raises(IncumbentChangedError, match="measured against 'the base model'"):
+        store.promote("extract-1", gate_passed=True, expected_incumbent=None)
+    assert store.get("extract-0").status == STATUS_PROMOTED
+    assert store.get("extract-1").status == STATUS_CANDIDATE
+    # Naming the real incumbent is accepted, and retires it.
+    store.promote("extract-1", gate_passed=True, expected_incumbent="extract-0")
+    assert store.get("extract-0").status == STATUS_RETIRED
+
+
+def test_promote_runs_the_precondition_and_refuses_on_any_problem(tmp_path):
+    store = _store(tmp_path)
+    _register(store, "extract-1")
+    with pytest.raises(AdapterError, match="evidence changed while promoting — weights moved"):
+        store.promote("extract-1", gate_passed=True, precondition=lambda: ["weights moved"])
+    assert store.get("extract-1").status == STATUS_CANDIDATE
+
+
+def test_concurrent_registrations_lose_no_update(tmp_path):
+    """reload -> mutate -> rewrite with no lock lost updates under concurrency."""
+    import threading
+
+    errors = []
+
+    def worker(n):
+        try:
+            for i in range(6):
+                _register(_store(tmp_path), f"a-{n}-{i}")
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert len(_store(tmp_path).list()) == 48
+
+
+def test_a_failed_write_leaves_the_registry_intact(tmp_path, monkeypatch):
+    """The rewrite is temp + fsync + os.replace: a crash mid-write cannot truncate the file."""
+    import os as _os
+
+    store = _store(tmp_path)
+    _register(store, "extract-1")
+    before = store.path.read_bytes()
+
+    def boom(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_os, "fsync", boom)
+    with pytest.raises(OSError, match="disk full"):
+        _register(store, "extract-2")
+    assert store.path.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []

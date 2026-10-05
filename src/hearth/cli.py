@@ -1642,6 +1642,7 @@ def eval_adapter(
     # base model becomes the incumbent and has to be beaten (LEARNING_plan F2).
     incumbent_entry = store.promoted_for(entry.task)
     incumbent_weights = ""
+    incumbent_path: str | None = None
     if incumbent_entry is not None and incumbent_entry.id != adapter_id:
         incumbent_id = incumbent_entry.id
         incumbent_role = "incumbent"
@@ -1789,16 +1790,25 @@ def eval_adapter(
     if not gate.passed:
         console.print(f"[red]Promotion refused:[/red] {gate.reason}")
         raise typer.Exit(code=1)
-    # The bytes promoted must be the bytes measured.
-    try:
-        unchanged = adapter_weights_sha(candidate_path) == candidate_weights
-    except AdapterError:
-        unchanged = False
-    if not unchanged:
-        console.print(
-            f"[red]Promotion refused:[/red] {adapter_id!r}'s weights changed during the eval."
-        )
-        raise typer.Exit(code=1)
+    # The bytes promoted must be the bytes measured, and the incumbent beaten must still be
+    # the incumbent, with the weights it was scored with. Both are re-checked by the store
+    # UNDER ITS LOCK, against the registry as it is at write time (B-082).
+    def _still_the_measured_pair() -> list[str]:
+        problems = []
+        try:
+            unchanged = adapter_weights_sha(candidate_path) == candidate_weights
+        except AdapterError:
+            unchanged = False
+        if not unchanged:
+            problems.append(f"{adapter_id!r}'s weights changed during the eval")
+        if incumbent_role == "incumbent":
+            try:
+                same = adapter_weights_sha(incumbent_path) == incumbent_weights
+            except AdapterError:
+                same = False
+            if not same:
+                problems.append(f"incumbent {incumbent_id!r}'s weights changed during the eval")
+        return problems
 
     proof = dict(registration.as_proof())
     proof.update(provenance_proof(status, golden_git))
@@ -1806,9 +1816,13 @@ def eval_adapter(
     proof["candidate_weights_sha"] = candidate_weights
     proof["evidence"] = "measured"
     try:
-        store.promote(adapter_id, gate=gate, proof=proof)
+        store.promote(
+            adapter_id, gate=gate, proof=proof,
+            expected_incumbent=incumbent_id if incumbent_role == "incumbent" else None,
+            precondition=_still_the_measured_pair,
+        )
     except AdapterError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
     console.print(
         f"[green]Promoted[/green] {adapter_id} (gate passed, candidate={candidate.score:.4f}, "
@@ -2158,14 +2172,31 @@ def adapters_promote(
     proof["candidate_weights_sha"] = payload.get("candidate_weights_sha")
     proof["evidence"] = "signed-report"
     proof["report_sha"] = report_sha
+
+    def _report_still_holds() -> list[str]:
+        # Re-run every binding check against the registry and weights as they are NOW,
+        # under the store's lock: a promotion that landed since the first check, or weights
+        # swapped since, make this report evidence for a comparison that no longer exists.
+        now = store.get(adapter_id)
+        if now is None:
+            return [f"{adapter_id!r} is no longer registered"]
+        return report_problems(payload, adapter_id=adapter_id, entry=now, store=store,
+                               candidate=candidate, incumbent=incumbent)
+
     try:
-        store.promote(adapter_id, gate=gate, proof=proof)
+        store.promote(
+            adapter_id, gate=gate, proof=proof,
+            expected_incumbent=(payload.get("incumbent_id")
+                                if payload.get("incumbent_role") == "incumbent" else None),
+            precondition=_report_still_holds,
+        )
     except GateNotPassedError:
         console.print(f"[red]Promotion refused:[/red] {gate.reason}")
         raise typer.Exit(code=1) from None
     except AdapterError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
+
     console.print(
         f"[green]Promoted[/green] {adapter_id} (gate passed, {gate.test} "
         f"p={gate.p_value:.4f}, n={gate.n})."
