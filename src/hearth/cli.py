@@ -819,6 +819,7 @@ def train(
     can be promoted (``hearth adapters promote``). This command only *produces a
     candidate*; promotion is a separate, deliberate step.
     """
+    import subprocess
     from datetime import UTC, datetime
 
     from .config import Settings
@@ -847,6 +848,16 @@ def train(
         # The real runner raises with the fix hint when the [mlx] extra is missing, and
         # ModelNotOnDiskError (a RuntimeError) when the base model is not on disk.
         console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except subprocess.CalledProcessError as exc:
+        # The mlx_lm.lora child failed (OOM, bad data…): one clean line, not a traceback.
+        # Its stderr normally streamed to the terminal already; show a tail if captured.
+        console.print(f"[red]Training failed: the training process exited with code "
+                      f"{exc.returncode}.[/red]")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (
+            exc.stderr or "")
+        for line in stderr.strip().splitlines()[-20:]:
+            console.print(f"  {line}", markup=False, highlight=False)
         raise typer.Exit(code=1) from None
 
     console.print(f"[green]Trained.[/green] adapter -> {outcome.adapter_path}")

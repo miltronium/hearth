@@ -209,6 +209,38 @@ def test_cli_train_on_a_model_not_on_disk_leaves_the_train_root_empty(
     assert launches == []
 
 
+@pytest.mark.parametrize("stderr", [None, b"loading...\nRuntimeError: [metal] out of memory\n"])
+def test_cli_train_reports_a_failed_training_process_without_a_traceback(
+    isolated, tmp_path, launches, monkeypatch, stderr
+):
+    """B-027: mlx_lm.lora exiting non-zero ends `hearth train` with exit 1 and one line."""
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+    from hearth.training.dataset import write_dataset
+
+    home, hub = isolated
+    _plant(hub)
+
+    def failing_run(command, *args, **kwargs):
+        raise subprocess.CalledProcessError(137, command, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", failing_run)
+    data = write_dataset(_lora_config(tmp_path).dataset, tmp_path / "data.jsonl")
+    result = CliRunner().invoke(
+        app,
+        ["train", "--task", "extract", "--base", REPO, "--data", str(data),
+         "--out", str(tmp_path / "run"), "--no-register"],
+        env={"COLUMNS": "300", "HEARTH_HOME": str(home)},
+    )
+    assert result.exit_code == 1, result.output
+    assert not isinstance(result.exception, subprocess.CalledProcessError)
+    assert "Traceback" not in result.output
+    assert "exited with code 137" in result.output
+    if stderr:
+        assert "out of memory" in result.output
+
+
 # --- hearth models convert (mlx_lm convert in a child process) ------------------------------
 
 
