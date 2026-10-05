@@ -1,10 +1,12 @@
 # HEARTH documentation index
 
-**Start with [GUIDE.md](GUIDE.md).** It covers using HEARTH from install to training.
+**Start with [GUIDE.md](GUIDE.md)**, §0 "Learn HEARTH in 15 minutes". It covers using HEARTH
+from install to training. The same reference is built into the tool: `hearth --help`,
+`hearth COMMAND --help`, and the generated man page `man ./man/hearth.1`.
 
 Status key:
 
-- **current**: matches the code as of 2026-10-05 (`13b1438`).
+- **current**: matches the code as of 2026-10-05 (`d628c4f`, model selection merged).
 - **partly stale**: mostly right, with known wrong spots (named).
 - **design/reference**: background and rationale, not instructions.
 - **historical**: a record of a past state. Do not follow its commands.
@@ -16,12 +18,12 @@ and `hearth doctor --offline`. They measure; docs describe.
 
 | Doc | What it is for | Status |
 |---|---|---|
-| [GUIDE.md](GUIDE.md) | Start-to-finish user guide: install, models, serve, `/chat`, API, run, agent, RAG, MCP, routing, finance, training, env-var reference, troubleshooting, cheat-sheet | current (B-004/B-005 sections flagged as pending merge) |
-| [PRIVACY.md](PRIVACY.md) | The privacy model: what stays local, the two egress vectors, disk-only loads, the caller caveat, sealed mode, verifying no egress | current, except the "Formats" row, which lists only text/CSV (`.json`, `.xlsx` and `.pdf` are also supported) |
+| [GUIDE.md](GUIDE.md) | Start-to-finish user guide: install, models, serve, `/chat`, API, run, agent, RAG, MCP, routing, finance, training, env-var reference, troubleshooting, cheat-sheet | current. Areas another branch is changing right now carry a "⚠ changing (B-0xx)" note (B-003, B-031, B-033, B-034, B-035, B-036, B-047, B-048) |
+| [PRIVACY.md](PRIVACY.md) | The privacy model: what stays local, the two egress vectors, disk-only loads, the caller caveat, sealed mode, verifying no egress | current |
 | [AGENT.md](AGENT.md) | The local agent loop: tools, bounds, exit codes, security model, `hearth agent`, `POST /v1/hearth/agent`, `/chat` agent mode | current |
-| [API.md](API.md) | HTTP contract: OpenAI-compatible endpoints, `hearth` extension fields, `/chat`, streaming | partly stale: describes `/v1/hearth/classify`, `/summarize`, `/train/*` and `/admin/models|adapters` routes that do not exist. The 401 body is nested under `detail`. It lacks the B-004 404 and `/ready` reasons |
+| [API.md](API.md) | HTTP contract: OpenAI-compatible endpoints, `hearth` extension fields, `/chat`, streaming | partly stale (B-037): the model-selection 404, `/ready` reasons and `GET /admin/models` are current, but it still describes `/v1/hearth/classify`, `/summarize`, `/train/*` and `/admin/adapters/*` routes that do not exist, and the 401 body is nested under `detail` |
 | [RUNBOOK_finance.md](RUNBOOK_finance.md) | Your bank statements on this machine: staging, mappings, sealed run, ingest, reconcile, categorize, aggregate, audit | current |
-| [RUNBOOK_training.md](RUNBOOK_training.md) | Real-weights LoRA validation: dataset, train, eval, promote, serve | partly stale: its promote steps use the removed `--candidate-score/--incumbent-score` flags (exit 2; B-015). Use `hearth eval … --prereg … --promote` |
+| [RUNBOOK_training.md](RUNBOOK_training.md) | Real-weights LoRA validation: dataset, train, eval, promote, serve | current (promotion via `prereg` + `eval --prereg --promote`, B-041). `scripts/train_lora_real.sh --promote` still uses removed flags (B-015) |
 | [RUNBOOK_consumer_wiring.md](RUNBOOK_consumer_wiring.md) | Wiring CAMBOT (HTTP) and Claude Code (MCP) to a live HEARTH and reading token savings | current |
 | [INTEGRATION.md](INTEGRATION.md) | How any client consumes HEARTH (CAMBOT, Claude Code MCP, OpenAI SDKs, shell) | current in substance. Its `.mcp.json` uses a bare `hearth` command, so use the venv's absolute path (GUIDE §7) |
 | [STATUS.md](STATUS.md) | What `scripts/hearth_status.py` measures and what it cannot see | current |
@@ -53,9 +55,10 @@ and `hearth doctor --offline`. They measure; docs describe.
 
 | Path | What it is for | Status |
 |---|---|---|
+| [`../man/hearth.1`](../man/hearth.1) | The reference manual, generated from the CLI by `scripts/gen_manpage.py` (`man ./man/hearth.1`) | current (a test fails when it drifts from the CLI) |
 | [`../README.md`](../README.md) | Project overview and quick start | current quick start; the "Status" test counts are historical |
 | [`../CLAUDE.md`](../CLAUDE.md) | Working notes and rules for agents editing the repo | current |
 | [`cmux/README.md`](cmux/README.md) | Master map of the HEARTH × cmux integration effort (its own docs set) | current for that effort |
-| [`../examples/claude_code_mcp.md`](../examples/claude_code_mcp.md) | Registering `hearth mcp` with Claude Code | partly stale: says `uv sync --extra mcp` and bare `uv run hearth mcp`, both of which prune the venv. Use GUIDE §7 |
+| [`../examples/claude_code_mcp.md`](../examples/claude_code_mcp.md) | Registering `hearth mcp` with Claude Code | current (one-command sync, `uv run --no-sync --project`, B-040) |
 | [`../examples/finance/README.md`](../examples/finance/README.md) | The two-tier finance ladder, measured on synthetic data | design/reference |
 | [`../swift/README.md`](../swift/README.md), [`../swift/OFFLINE.md`](../swift/OFFLINE.md) | Swift SDK and the offline Core ML path | design/reference |
