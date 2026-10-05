@@ -1724,6 +1724,21 @@ must fail when the fix is reverted.
   B-062 tests matched only the exception type) and a candidate-block measured_at the ledger
   binding made look redundant. All now killed; the run ends with no survivors.
 
+### B-115
+**Spreadsheet cell text leaked to the calling agent through MCP tool errors**
+
+- **Priority:** P0 (privacy) · **Status:** **FIXED** in `0aa9b46` · **Effort:** S
+- **Evidence:** round-4 review, CONFIRMED against the real stdio server and reproduced by the
+  integrator: a cell typed `t="n"` holding `SSN-123-45-6789` made `hearth_summarize_file` return
+  `invalid literal for int() with base 10: 'SSN-123-45-6789'`; `t="d"` holding `ACCT 99887766`
+  returned `Invalid datetime value ACCT 99887766`. openpyxl converts read-only cells lazily, so
+  the error escaped `_xlsx_sheets`' try/except (files.py ~505-528); same path for
+  `agent/builtins.py`.
+- **Fix:** `_parse_contained` at the public reader boundary replaces every non-FileAccessError
+  with a fixed message (exception type only), `from None`.
+- **Acceptance test:** `tests/test_parser_error_containment.py` (message + formatted traceback,
+  both readers, three hostile workbooks); live MCP check.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -1820,3 +1835,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `d0f80b8` | **B-110.** Warmup's fit check and load are atomic under the manager's load lock. |
 | `e1102b9` | **B-111.** Tests kill the surviving `policy_rungs`-defaults and agent `on_close` mutants. |
 | `132fe0e` | **B-112.** Unknown-model 404s (chat, stream, agent route) are recorded as failed requests. |
+| `0aa9b46` | **B-115.** No parser message reaches a caller: lazily-raised openpyxl errors quoting cell text are replaced (type only, from None). |
