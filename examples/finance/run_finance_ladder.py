@@ -11,6 +11,9 @@ work on different local models, with nothing leaving the machine:
 Stage 2 is the load-bearing rule. LLM arithmetic is unreliable and these are financial
 figures, so no model on this ladder is ever asked to add anything up: Python computes the
 totals and hands them to tier 2 as facts to describe. The tier-2 prompt says so explicitly.
+And Python does it in :class:`decimal.Decimal`, never ``float`` (CLAUDE.md §4): every amount
+is parsed from its CSV string by :func:`hearth.finance.parse_money`, summed, compared and
+formatted as a Decimal, so ``0.10 + 0.20`` is ``0.30`` here, not ``0.30000000000000004``.
 
 The router picks the model for each stage purely from the routing policy — this script never
 names a model. It serves through :class:`hearth.serving.ModelPool`, the same front door the
@@ -37,6 +40,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +51,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from hearth.finance import SIGN_AS_WRITTEN, ColumnMapping, ParseError, parse_money  # noqa: E402
 from hearth.observability.budget import BudgetAccountant  # noqa: E402
 from hearth.observability.metrics import MetricsStore  # noqa: E402
 from hearth.providers.base import GenRequest, Message, ModelProvider  # noqa: E402
@@ -78,6 +83,25 @@ _SYSTEM = (
 
 # -- data ---------------------------------------------------------------------------------
 
+#: How the bundled synthetic CSV writes money: one signed ``amount`` column, money in
+#: positive, a leading minus for money out, ``.`` decimals. Stated once so the amounts go
+#: through HEARTH's own strict money parser (Decimal from the string; junk is refused).
+STATEMENT_MAPPING = ColumnMapping(
+    date_column="date",
+    description_column="description",
+    date_format="%Y-%m-%d",
+    sign=SIGN_AS_WRITTEN,
+    amount_column="amount",
+)
+
+ZERO = Decimal("0")
+CENT = Decimal("0.01")
+
+
+def money(value: Decimal) -> str:
+    """Format an exact amount to cents (``1,234.50``), rounding half up — no float involved."""
+    return f"{value.quantize(CENT, rounding=ROUND_HALF_UP):,}"
+
 
 @dataclass(frozen=True)
 class Transaction:
@@ -85,7 +109,7 @@ class Transaction:
 
     date: str
     description: str
-    amount: float
+    amount: Decimal
     expected: str
     difficulty: str
 
@@ -106,30 +130,38 @@ class Categorized:
 
 @dataclass
 class Aggregates:
-    """Every figure in the report, computed in Python. No model contributes a number."""
+    """Every figure in the report, computed in Python (Decimal). No model contributes one."""
 
-    total_income: float = 0.0
-    total_spend: float = 0.0
-    net: float = 0.0
+    total_income: Decimal = ZERO
+    total_spend: Decimal = ZERO
+    net: Decimal = ZERO
     transaction_count: int = 0
-    by_category: dict[str, float] = field(default_factory=dict)
+    by_category: dict[str, Decimal] = field(default_factory=dict)
     counts_by_category: dict[str, int] = field(default_factory=dict)
-    largest: tuple[str, float] | None = None
+    largest: tuple[str, Decimal] | None = None
 
 
 def load_transactions(path: Path) -> list[Transaction]:
-    """Read the synthetic CSV, skipping the leading ``#`` provenance comments."""
+    """Read the synthetic CSV, skipping the leading ``#`` provenance comments.
+
+    An amount that does not parse stops the load and names the data row — a skipped row
+    would leave totals that still add up, just wrong.
+    """
     rows = [line for line in path.read_text().splitlines() if not line.startswith("#")]
-    return [
-        Transaction(
+    txns = []
+    for n, r in enumerate(csv.DictReader(rows), 1):
+        try:
+            amount = parse_money(r["amount"], STATEMENT_MAPPING)
+        except ParseError as exc:
+            raise ValueError(f"{path}: data row {n}: amount: {exc}") from None
+        txns.append(Transaction(
             date=r["date"],
             description=r["description"],
-            amount=float(r["amount"]),
+            amount=amount,
             expected=r["expected_category"],
             difficulty=r["difficulty"],
-        )
-        for r in csv.DictReader(rows)
-    ]
+        ))
+    return txns
 
 
 # -- the local provider ----------------------------------------------------------------------
@@ -190,7 +222,7 @@ def _prompt(txn: Transaction) -> list[Message]:
             content=(
                 f"Categories: {', '.join(CATEGORIES)}\n\n"
                 f"Transaction: {txn.description}\n"
-                f"Amount: {abs(txn.amount):.2f} {direction}\n"
+                f"Amount: {money(abs(txn.amount))} {direction}\n"
                 "Category:"
             ),
         ),
@@ -233,9 +265,9 @@ def aggregate(rows: list[Categorized]) -> Aggregates:
     tier 2 only receives the finished numbers.
     """
     agg = Aggregates(transaction_count=len(rows))
-    by_category: dict[str, float] = defaultdict(float)
+    by_category: dict[str, Decimal] = defaultdict(Decimal)  # Decimal() == Decimal("0")
     counts: dict[str, int] = defaultdict(int)
-    largest: tuple[str, float] | None = None
+    largest: tuple[str, Decimal] | None = None
 
     for row in rows:
         amount = row.txn.amount
@@ -260,17 +292,20 @@ def render_facts(agg: Aggregates) -> str:
     """The precomputed fact sheet handed to tier 2 — the only numbers it ever sees."""
     lines = [
         f"Transactions: {agg.transaction_count}",
-        f"Total income: ${agg.total_income:,.2f}",
-        f"Total spend: ${agg.total_spend:,.2f}",
-        f"Net: ${agg.net:,.2f}",
+        f"Total income: ${money(agg.total_income)}",
+        f"Total spend: ${money(agg.total_spend)}",
+        f"Net: ${money(agg.net)}",
         "Spend by category (already summed):",
     ]
     for category, total in agg.by_category.items():
-        share = (total / agg.total_spend * 100.0) if agg.total_spend else 0.0
+        share = (total / agg.total_spend * 100) if agg.total_spend else ZERO
         count = agg.counts_by_category.get(category, 0)
-        lines.append(f"  - {category}: ${total:,.2f} across {count} transactions ({share:.1f}%)")
+        lines.append(
+            f"  - {category}: ${money(total)} across {count} transactions "
+            f"({share.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)}%)"
+        )
     if agg.largest:
-        lines.append(f"Largest single debit: {agg.largest[0]} at ${agg.largest[1]:,.2f}")
+        lines.append(f"Largest single debit: {agg.largest[0]} at ${money(agg.largest[1])}")
     return "\n".join(lines)
 
 
