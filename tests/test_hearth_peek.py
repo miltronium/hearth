@@ -28,6 +28,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "hearth_peek.py"
 FIXTURES = REPO / "tests" / "fixtures" / "peek"
+#: The shared privacy rule (VOCAB, header detection, file ids); its fixed strings print too.
+SHAPE = REPO / "src" / "hearth" / "finance" / "shape.py"
 
 
 def _load_peek():
@@ -248,7 +250,7 @@ def _make_token_source(rng: random.Random):
     peek = _load_peek()
     # Anything the script could print by itself is in its source; a random token that is a
     # substring of the source could match the output by coincidence, so it is re-drawn.
-    source = SCRIPT.read_text().lower()
+    source = (SCRIPT.read_text() + SHAPE.read_text()).lower()
 
     def token() -> str:
         while True:

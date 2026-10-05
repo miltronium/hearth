@@ -118,6 +118,7 @@ must fail when the fix is reverted.
 - [B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)
 - [B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)
 - [B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)
+- ~~[B-074](#b-074) `hearth_map_draft.py` printed a preamble as column names, drafted skip_rows 0, printed file names and a total~~ — fixed in `052d3af` (P0)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1211,6 +1212,42 @@ must fail when the fix is reverted.
   `adapter` field differing between route.py ~266 and app.py ~889 · **Effort:** S–M
 - **Evidence:** run_finance_ladder.py ~400-402 (B-008 bypass); config.py ~46; route.py ~266 vs app.py ~889. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
+### B-074
+**`hearth_map_draft.py` printed a preamble as column names, drafted `skip_rows: 0` for every file with a preamble, printed file names, and printed a value-derived total on request**
+
+- **Priority:** P0 (privacy) + P1 (correctness) · **Status:** **FIXED** in `052d3af` · **Effort:** M
+- **Evidence:** it took `rows[0]` as the header (grouping and profiling) and printed raw names
+  in `ColumnProfile.describe()`. Integrator, `--no-model`, synthetic file whose first rows were
+  `Account Holder,Jane Q Public,Premier Checking` and `Acct 4417123412341234,Open,x` above
+  `Date,Description,Amount`: printed `'Jane Q Public'` and `'Premier Checking'` as columns,
+  then "No cell value was printed above." On `examples/finance/statements.csv` it printed the
+  `#` comment text as column names and drafted nothing usable. `skip_rows` was hard-coded 0,
+  so every draft for a file with a preamble was wrong. Refusals and parse failures printed
+  `path.name`; `--show-total` printed the trial-parse sum; confirm items and verification
+  details interpolated raw header names (and a `MappingError` message that lists the whole
+  header).
+- **Fix:** the peek rule moved into `src/hearth/finance/shape.py` and is used by both scripts
+  (one implementation). map_draft finds the header with it (first row in 30 with >=2
+  vocabulary names; JSON key row), writes the rows above as `skip_rows`, groups by (header
+  row, header), and refuses a file with no identifiable header. Terminal: column names only
+  from the vocabulary, else `column N (withheld)`, through `Note` slots for every sentence
+  that names a column; files as `F1..Fn` (`--index-out` local); fixed reasons instead of
+  exception messages; the model-proposed draft file name prints only if it is vocabulary; no
+  counts of negatives/zeros, only yes/no. `--show-total` is refused (exit 2): a sum of the
+  amounts is a value-derived figure, and CLAUDE.md §4 says values are not safe; the sum stays
+  in the local draft. The closing lines say exactly what was printed and that the draft file
+  holds real header names, file names and the sum. Also fixed: a repeated header name crashed
+  the balance check (IndexError); such columns are now `repeated-name` and take no role.
+- **Acceptance test:** `tests/test_map_draft_privacy.py`: the integrator's file (no
+  Jane/Public/Premier/4417/file-name digits/3+ digit run in stdout; draft has `skip_rows: 2`,
+  the real names, and parses with `parse_rows`), a hostile fake local model, failure paths,
+  and a property test over 120 random tables (half with an echoing fake model). 19 mutants
+  killed (each guard reverted → a test fails).
+- **Remains:** a preamble row holding two vocabulary names (e.g. `Account Type,Checking,Account
+  Number,...`) would be taken as the header. Privacy holds (only vocabulary prints) and the
+  trial parse refuses the draft, but the operator then writes that mapping by hand. A header
+  with fewer than two vocabulary names (e.g. a non-English export) is refused, not drafted.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -1278,3 +1315,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `a731e8c` | **B-062.** Prereg bar range-checked at load (finite; alpha ∈ (0, 0.05]; min_effect ≥ 0; min_n ≥ 30; known test); `evaluate_gate` re-checks it and fails closed on non-finite input. |
 | `13038c5` | **B-061.** `adapters promote --report` needs an HMAC-signed report from `hearth eval` on this install, about this adapter (id, task, base, weights hash, incumbent), with a prereg committed before the measurement in the golden set's repo. |
 | `58890fa` | **B-070 (eval half).** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL or an empty/`auto`/unservable base; serving side still open. |
+| `052d3af` | **B-074.** `hearth_map_draft.py` finds the real header (shared `hearth.finance.shape` rule with peek), drafts `skip_rows`, prints only vocabulary column names / file ids / fixed reasons; `--show-total` refused; property-tested, 19 mutants killed. |
