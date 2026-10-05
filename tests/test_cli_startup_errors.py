@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from hearth.cli import app
+from hearth.config import get_settings
 from hearth.router import policy as policy_mod
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
@@ -25,11 +26,13 @@ MISSING_PROFILE = "config/hearth-test-no-such-profile.yaml"
 
 @pytest.fixture(autouse=True)
 def fresh_policy_cache():
-    """``get_policy`` is lru_cached per process: an earlier test's policy would mask the
-    missing profile. Clear it on both sides so no test leaks a policy into another."""
+    """``get_policy`` and ``get_settings`` are lru_cached per process: an earlier test's
+    policy/settings would mask this test's env. Clear both on both sides."""
     policy_mod.get_policy.cache_clear()
+    get_settings.cache_clear()
     yield
     policy_mod.get_policy.cache_clear()
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -106,3 +109,29 @@ def test_serve_with_a_missing_profile_prints_no_traceback_in_a_real_process(tmp_
     assert proc.returncode == 2, out
     assert "Traceback" not in out
     assert "Fix or unset HEARTH_ROUTING_YAML" in " ".join(out.split())
+
+
+# -- B-036: an embedder that cannot embed -------------------------------------------------
+
+#: An embedding model id that cannot be on disk, so MLXEmbedder's disk-only load fails
+#: (EmbeddingUnavailableError) whether or not mlx-lm is installed.
+ABSENT_EMBEDDER = "hearth-test/no-such-embedder"
+
+
+@pytest.mark.parametrize("argv", [
+    pytest.param(["rag", "ingest", "{doc}"], id="ingest"),
+    pytest.param(["rag", "query", "hello"], id="query"),
+    pytest.param(["rag", "query", "hello", "--answer"], id="query-answer"),
+])
+def test_an_unavailable_embedder_exits_1_with_its_message(argv, tmp_path):
+    doc = tmp_path / "doc.txt"
+    doc.write_text("some text worth embedding\n")
+    argv = [a.format(doc=doc) for a in argv]
+    result = CliRunner().invoke(app, argv, env=_env(
+        tmp_path, HEARTH_EMBEDDER="mlx", HEARTH_EMBED_MODEL=ABSENT_EMBEDDER
+    ))
+    assert result.exit_code == 1, (result.exit_code, result.output, result.exception)
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    flat = " ".join(result.output.split())
+    assert "Embedder unavailable" in flat
+    assert "Traceback" not in result.output

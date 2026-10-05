@@ -373,6 +373,24 @@ def _routing_profile_required():
         raise typer.Exit(code=2) from None
 
 
+@contextmanager
+def _embedder_required():
+    """Exit 1 with the embedder's own message when it cannot embed (B-036).
+
+    ``MLXEmbedder`` loads lazily, so the failure surfaces at the first ``embed()`` inside
+    ``ingest``/``query`` — catch it there rather than predicting it from the setting.
+    """
+    from rich.markup import escape
+
+    from .memory import EmbeddingUnavailableError
+
+    try:
+        yield
+    except EmbeddingUnavailableError as exc:
+        console.print(f"[red]Embedder unavailable:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from None
+
+
 @app.command()
 def agent(
     task: str = typer.Argument(None, help="What the agent should do. Omit to read from stdin."),
@@ -833,7 +851,8 @@ def rag_ingest(
         f"Ingesting [cyan]{path}[/cyan] → collection [cyan]{collection}[/cyan] "
         f"(embedder=[cyan]{index.embedder.name}[/cyan]) …"
     )
-    result = index.ingest(path, collection, size=size, overlap=overlap)
+    with _embedder_required():
+        result = index.ingest(path, collection, size=size, overlap=overlap)
     console.print(
         f"[green]Done.[/green] {result.files} file(s), {result.chunks} chunk(s) "
         f"in collection [cyan]{result.collection}[/cyan]."
@@ -855,7 +874,8 @@ def rag_query(
     provider = select_provider(get_settings())
     with _routing_profile_required():
         index = RagIndex(router=Router(local_provider=provider))
-    result = index.query(collection, query, k=k, answer=answer)
+    with _embedder_required():
+        result = index.query(collection, query, k=k, answer=answer)
 
     if not result.chunks:
         console.print(f"[yellow]No chunks in collection[/yellow] {collection!r}.")
