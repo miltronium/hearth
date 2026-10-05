@@ -34,7 +34,7 @@ must fail when the fix is reverted.
 - [B-005](#b-005) `/ready` returns 200 with no weights loaded (in progress)
 - [B-006](#b-006) `HEARTH_BACKEND=auto` silently becomes the echo stub, and the stub reports ready
 - [B-007](#b-007) An exception after the stream relay ends the SSE stream with no `[DONE]`
-- [B-008](#b-008) A relative `HEARTH_ROUTING_YAML` resolves from the current working directory
+- ~~[B-008](#b-008) A relative `HEARTH_ROUTING_YAML` resolves from the current working directory~~ — fixed in `2550766`
 - [B-009](#b-009) Router confidence is a prompt-length stub; short messages escalate under `routing.remote.yaml`
 - [B-010](#b-010) A promoted adapter with no significance proof is served by default; golden sets are below `min_n`
 
@@ -56,13 +56,17 @@ must fail when the fix is reverted.
 - [B-023](#b-023) Test-infra trap: empty `NO_PROXY` hides client disconnects from loopback tests
 
 **Added 2026-10-03 (found while closing B-001)**
-- [B-024](#b-024) `train_lora_real.sh` refuses models fetched with `hearth models pull` (P2)
-- [B-025](#b-025) Status probe expands `~` in `HEARTH_ROUTING_YAML`; the router does not (P2)
-- [B-026](#b-026) A failed `hearth train` leaves an empty run directory (P3)
-- [B-027](#b-027) A failed training subprocess ends `hearth train` in a traceback (P2)
+- ~~[B-024](#b-024) `train_lora_real.sh` refuses models fetched with `hearth models pull` (P2)~~ — fixed in `e00e5e1`
+- ~~[B-025](#b-025) Status probe expands `~` in `HEARTH_ROUTING_YAML`; the router does not (P2)~~ — fixed in `2550766`
+- ~~[B-026](#b-026) A failed `hearth train` leaves an empty run directory (P3)~~ — fixed in `3fae564`
+- ~~[B-027](#b-027) A failed training subprocess ends `hearth train` in a traceback (P2)~~ — fixed in `0f1bbe2`
 - [B-028](#b-028) `export-coreml` reports missing coremltools before a missing model (P3)
-- [B-029](#b-029) An unregistered `HEARTH_DEFAULT_MODEL` is silently ignored; `doctor --offline` does not warn (P2)
+- ~~[B-029](#b-029) An unregistered `HEARTH_DEFAULT_MODEL` is silently ignored; `doctor --offline` does not warn (P2)~~ — fixed in `d931473`
 - [B-030](#b-030) Test-infra: `sandbox-exec` is unavailable to agents and inside harness worktrees (P3)
+
+**Added 2026-10-05 (found while fixing B-008, B-024..B-029)**
+- [B-031](#b-031) `hearth doctor --offline` renders a non-fatal WARN row as FAIL (P3)
+- [B-032](#b-032) `train_lora_real.sh` runs `uv run --no-sync` from the caller's cwd (P3)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -271,7 +275,12 @@ must fail when the fix is reverted.
 ### B-008
 **A relative `HEARTH_ROUTING_YAML` resolves from the current working directory**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Priority:** P1 · **Status:** **FIXED in `2550766`** (with B-025). One resolver,
+  `router/policy.py:resolve_routing_selection`, used by the router, the status probe and
+  doctor: `~` expanded, relative paths against the **repo root**, and a missing
+  `HEARTH_ROUTING_YAML` file raises `RoutingProfileNotFoundError` (doctor: fatal FAIL).
+  Not done: logging the resolved path at startup / exposing it on `/health` (needs
+  `gateway/app.py`, owned elsewhere). · **Effort:** S
 - **Evidence:** `router/policy.py:94-96` returns `Path(override)` unchanged. `load_policy`
   (`policy.py:125-131`) falls back to `_safe_defaults()` (`:84-89`, zero remotes) on a
   missing file, with only a log warning. The status probe makes the same cwd-relative read
@@ -597,7 +606,7 @@ must fail when the fix is reverted.
 ### B-024
 **`scripts/train_lora_real.sh` refuses models fetched with `hearth models pull`**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `e00e5e1` (`scripts/check_base_on_disk.py`, called by the script)** · **Effort:** S
 - **Evidence:** The script's "is the base cached?" heredoc calls
   `snapshot_download(repo_id=repo, local_files_only=True)` with no `cache_dir`
   (`scripts/train_lora_real.sh` ~line 121), so it looks only in the hub cache. `hearth models
@@ -612,7 +621,7 @@ must fail when the fix is reverted.
 ### B-025
 **Status probe expands `~` in `HEARTH_ROUTING_YAML`; the router does not**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `2550766` (shared resolver; see B-008)** · **Effort:** S
 - **Evidence:** `src/hearth/status/probes.py:414` uses `Path(active).expanduser()`;
   `src/hearth/router/policy.py:96` returns `Path(override)` unexpanded.
 - **Impact:** For `HEARTH_ROUTING_YAML=~/x.yaml` the status report describes a file the
@@ -627,7 +636,7 @@ must fail when the fix is reverted.
 ### B-026
 **A failed `hearth train` leaves an empty run directory**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED in `3fae564`** · **Effort:** S
 - **Evidence:** `src/hearth/training/lora.py:121` creates `data_dir` before
   `runner_invocation` (`:212`) resolves the base model, so a `ModelNotOnDiskError` exits
   after the directory exists.
@@ -638,7 +647,7 @@ must fail when the fix is reverted.
 ### B-027
 **A failed training subprocess ends `hearth train` in a traceback**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `0f1bbe2`** · **Effort:** S
 - **Evidence:** `src/hearth/cli.py` (train command, ~line 846) catches only `RuntimeError`;
   the runner uses `subprocess.run(..., check=True)`, whose `CalledProcessError` is a
   `SubprocessError`, not a `RuntimeError`.
@@ -660,7 +669,7 @@ must fail when the fix is reverted.
 ### B-029
 **An unregistered `HEARTH_DEFAULT_MODEL` is silently ignored; `doctor --offline` does not warn**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED in `d931473` (doctor WARN row + one registry log line; fallback unchanged. The row shows FAIL under `--offline`, see B-031)** · **Effort:** S
 - **Evidence:** `src/hearth/registry/__init__.py:59-73` applies `HEARTH_DEFAULT_MODEL` only
   when it names a registry entry. Measured: `HEARTH_DEFAULT_MODEL=mlx-community/
   Qwen2.5-Coder-32B-Instruct-4bit hearth doctor --offline` → "SAFE", exit 0, checking the
@@ -686,6 +695,30 @@ must fail when the fix is reverted.
 - **How to apply:** The operator runs the kernel-level check from their own shell
   (docs/PRIVACY.md, "Verifying no egress yourself"). Label agent evidence as Python-level.
 
+### B-031
+**`hearth doctor --offline` renders a non-fatal WARN row as FAIL**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/cli.py` `_doctor_offline` sets
+  `mark = "[green]PASS[/green]" if c.ok else "[red]FAIL[/red]"`, ignoring `Check.fatal`
+  (plain `hearth doctor` distinguishes WARN). Measured: the B-029 `default_model` row reads
+  `FAIL` with a `WARN:` detail while the verdict is `SAFE offline`.
+- **Fix outline:** Same three-way mark as `doctor`: PASS / FAIL (fatal) / WARN (non-fatal).
+- **Acceptance test:** With an unregistered `HEARTH_DEFAULT_MODEL`, the `--offline`
+  `default_model` row's status column is `WARN`.
+
+### B-032
+**`scripts/train_lora_real.sh` runs `uv run --no-sync` from the caller's cwd**
+
+- **Priority:** P3 · **Status:** open (found by reading; not run, it needs the GPU) ·
+  **Effort:** S
+- **Evidence:** Unlike `scripts/hearth_private.sh` (`cd "$REPO_ROOT"`), the training script
+  never changes directory, and every `uv run --no-sync ...` discovers its project from the
+  cwd. Started outside the repo, the mlx-lm probe would run against a different (or no)
+  project and could report "mlx-lm is not installed" for a correctly synced venv.
+- **Fix outline:** `cd` to the repo root (as `hearth_private.sh` does), or pass
+  `--project "$REPO_ROOT"` to each `uv run`.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -710,3 +743,8 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `3919f7a` | Lint introduced on the branch was cleared. (The pre-existing findings are B-018.) |
 | `42ebf1f` | **B-001.** `hearth train`, `models convert`, `models export-coreml` resolve from disk and pin the hub offline in child processes; `models pull` is the only download path. Also fixed: every real `models convert` failed because the output dir was pre-created. |
 | `2868160` | `hearth doctor --offline`: a measured safe/unsafe verdict (exit 1 when unsafe) over routing, serving resolution, every reachable model, every load path, bind host and `HEARTH_ALLOW_DOWNLOADS`. |
+| `2550766` | **B-008, B-025.** One `HEARTH_ROUTING_YAML` resolver for router, status probe and doctor: `~` expanded, relative paths against the repo root (not the cwd), and a missing selected profile is a startup error instead of a silent fall back to safe defaults. |
+| `e00e5e1` | **B-024.** `train_lora_real.sh` checks the base model with `resolve_local_model` (via `scripts/check_base_on_disk.py`), so models from `hearth models pull` are accepted. |
+| `3fae564` | **B-026.** `hearth train` resolves the base model (and checks the mlx extra) before creating the run dir; a failed run leaves nothing behind. |
+| `0f1bbe2` | **B-027.** A failed `mlx_lm.lora` child ends `hearth train` with exit 1, its return code and any captured stderr tail, no traceback. |
+| `d931473` | **B-029.** `hearth doctor` / `doctor --offline` WARN when `HEARTH_DEFAULT_MODEL` is unregistered and ignored, naming the model that serves; the registry logs it once (seen at `hearth serve` startup). |
