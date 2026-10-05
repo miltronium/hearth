@@ -87,8 +87,10 @@ whose weights actually generated the answer: the requested id, or — when none 
 requested — the task class's promoted adapter (the default path, unchanged). It is `null`
 when base weights answered: no adapter selected, the request escalated to a remote, the
 adapter failed to load and the request was retried on base weights, or the backend ignores
-adapters (`echo`). An explicitly requested adapter that is not registered (or is retired) is
-refused before anything runs, exactly like an unknown model:
+adapters (`echo`). An adapter whose load failed is not reloaded on every request: the
+failure is remembered against the adapter's files (paths, mtimes, sizes) and base weights
+answer without evicting anything, until the adapter changes on disk (B-102). An explicitly requested adapter that is not registered (or is retired) is
+refused before anything runs, exactly like an unknown model (and recorded as a failed request):
 
 ```jsonc
 // HTTP 404
@@ -158,8 +160,11 @@ next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
 
 - `GET /v1/hearth/admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
   A request that ended in an error (the local provider failed, a routed local rung could not
-  be served — 404 / stream `model_not_found` —, an escalation was denied — 429 / stream
-  `hearth.budget.exhausted` —, or a remote stream died mid-answer) is recorded too: it counts
+  be served — 404 / stream `model_not_found` —, a requested adapter was refused — 404
+  `adapter_not_found` —, an escalation was denied — 429 / stream
+  `hearth.budget.exhausted` —, a remote stream died mid-answer, or the client abandoned a
+  stream — `failed: "client disconnected"`) is recorded too. A failed record's `model` is the
+  model that was attempted (`"echo"` for the stub), as a success would report: it counts
   in `requests` and in `failed` / `failure_rate` (added keys; nothing renamed), and — after a
   failed escalation, whatever the local fallback then did — in `escalations_failed`, since
   the remote may already have received the prompt. A denied escalation never left the
@@ -174,8 +179,11 @@ next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
   if some class actually falls through to it, so a default a pinned ladder never serves is not
   judged. Under an unpinned profile (the bundled `routing.yaml`) that is just the registry
   default. A routing profile whose rung cannot serve at all (unregistered, not chat, or the
-  wrong backend) never gets this far: the server refuses to start on it. Each model is judged
-  on outcomes: a load of it has completed with weights in memory at least once (warmup or
+  wrong backend) never gets this far: the server refuses to start on it — and that includes
+  the registry default when an unpinned class falls through to it, so
+  `HEARTH_DEFAULT_MODEL=echo` under `mlx` is refused at startup exactly like
+  `defaults.local_model: echo` (B-104). Each model is judged
+  on outcomes: it fits under `HEARTH_RAM_CEILING_GB` at all (B-100), a load of it has completed with weights in memory at least once (warmup or
   any request; residency granted without a load never counts), its most recent load did not
   fail, and — for a backend that can check without loading (`mlx`) — its weights still
   resolve on disk. Residency is reported separately, so a model that was LRU-evicted to make
@@ -185,8 +193,10 @@ next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
   `503 loading` until its first load.
 
   Warmup loads the most-used rung first (the 14B under `routing.finance.yaml`), then each
-  further rung that fits under `HEARTH_RAM_CEILING_GB` beside what it already loaded; it never
-  evicts a model it just warmed.
+  further rung that fits under `HEARTH_RAM_CEILING_GB` beside what is resident; it never
+  evicts a model it just warmed. The fit check and the load are one step under the model
+  manager's load lock, so a request's load landing in between cannot make warmup evict its
+  own rung (B-110).
 
   The top-level `status` aggregates the per-model verdicts: any `failed` → `503 failed`, with
   a `reason` joining the failing models' reasons (each names its model id); else any
@@ -204,6 +214,7 @@ next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
   | 503 | `failed` | `last load of '<id>' failed: …` / `warmup of '<id>' failed: …` | the load raised (corrupt checkpoint, mlx missing, over the RAM ceiling) |
   | 503 | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
   | 503 | `failed` | `'<id>' is not servable: …` | a judged model is registered but not a chat model of this backend |
+  | 503 | `failed` | `'<id>' can never load under this RAM ceiling (<id> needs 9.0 GB > ceiling 8.0 GB); every request routed to it fails — …` | the rung is larger than the whole `HEARTH_RAM_CEILING_GB`: every request routed to it 503s, so readiness says so with warmup on or off (B-100) |
 
   Every body also carries `backend`, `model` (the primary model: the most-used rung, the one
   warmup loads first — the registry default under an unpinned profile), `loaded` (the primary
@@ -342,10 +353,19 @@ Errors after a stream has started are in-band events (next section). The agent s
 ## Streaming
 
 SSE, OpenAI-compatible (`data: {...}\n\n`, terminating `data: [DONE]`). The final data event
-before `[DONE]` carries the `hearth` telemetry block.
+before `[DONE]` carries the `hearth` telemetry block. **Every chunk's `model` names the model
+that generates** — the role chunk and each content chunk included, not only the final one:
+the id the backend resolves the request to (`"echo"` for the echo stub whatever was asked).
+The final chunk's `model` is the one the generating provider reported (B-101).
 
 Every stream ends with `[DONE]`, on every path. A failure is an in-band `error` event just
 before it: `hearth.provider.unavailable` (the provider failed), `model_not_found`,
-`hearth.budget.exhausted`, `hearth.response_format.invalid_json`,
+`adapter_not_found` (the requested adapter could not be resolved when the stream was set up,
+after passing the up-front check — e.g. retired in between), `hearth.budget.exhausted`,
+`hearth.response_format.invalid_json`,
 `hearth.metrics.unavailable` (the answer and its final telemetry chunk were delivered, but
 the request could not be recorded), or `hearth.stream.internal_error` (anything else).
+
+A stream the client abandons (disconnects mid-answer) stops generating and is recorded as a
+failed request with `failed: "client disconnected"` — as an abandoned `/v1/hearth/agent` run
+is. A remote that had already streamed tokens is billed for them (B-106).

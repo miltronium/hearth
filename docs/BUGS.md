@@ -128,6 +128,21 @@ must fail when the fix is reverted.
 - ~~[B-093](#b-093) A vocabulary-word preamble (`Account Type,Credit Card`) was taken as the header (P2)~~ — fixed in `9ef10e6`
 - ~~[B-094](#b-094) A UTF-8 BOM stayed in the first header cell: withheld by peek, copied into drafts (P3)~~ — fixed in `5921df6`
 
+**Added 2026-10-05 (second adversarial review: serving / gateway layer)**
+- ~~[B-100](#b-100) `/ready` 200 while every request to a rung larger than the RAM ceiling 503s (P1)~~ — fixed in `3ae3188`
+- ~~[B-101](#b-101) Streamed role/content chunks and failed records carry the requested model, not the one generating (P2)~~ — fixed in `95626b6`
+- ~~[B-102](#b-102) A bad adapter evicts the base and forces a full base reload on every request (P2)~~ — fixed in `d58d5b1`
+- ~~[B-103](#b-103) B-071's queued-cancel guards untested; the pool's stream path loads before checking (P2)~~ — fixed in `28e8bd8`
+- ~~[B-104](#b-104) `HEARTH_DEFAULT_MODEL` naming an unservable model is not refused at build under an unpinned profile (P2)~~ — fixed in `1027848`
+- ~~[B-105](#b-105) Cancellation during the base retry after an adapter fails becomes `ProviderError` (503) (P2)~~ — fixed in `ef926ba`
+- ~~[B-106](#b-106) Abandoned chat streams, adapter 404s and a `select_adapter` raise leave no record (P2)~~ — fixed in `8445121`
+- ~~[B-107](#b-107) `ModelPool.evict(base)` leaves the base's adapter variants resident (P3)~~ — fixed in `2626e2b`
+- ~~[B-108](#b-108) Status shows an unusable active profile `[ok]`; doctor calls it "UNSAFE offline" (reads as egress) (P2)~~ — fixed in `acb10fd`
+- ~~[B-109](#b-109) `defaults: {local_model: null}` refused as "'None' is not in the model registry" (P3)~~ — fixed in `d1a627a`
+- ~~[B-110](#b-110) Warmup race: a request load between the fit check and the load made warmup evict its own rung (P3)~~ — fixed in `d0f80b8`
+- ~~[B-111](#b-111) Untested: `policy_rungs` honouring `defaults.local_model`; the agent route's `on_close=cancel.set` (P3)~~ — fixed in `e1102b9`
+- [B-112](#b-112) An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does (P3)
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -1421,6 +1436,137 @@ must fail when the fix is reverted.
   drafts `Date`, verifies, and `parse_rows` parses under the draft; 20% of property-test CSVs
   carry a BOM. Mutant: plain `utf-8` → 9 fail.
 
+### B-100
+**`/ready` 200 while every request to a rung larger than the RAM ceiling 503s**
+
+- **Priority:** P1 · **Status:** **FIXED** in `3ae3188` · **Effort:** S
+- **Evidence:** readiness (`gateway/app.py` `_judge_model`, `_fits_beside_residents`) never
+  compared a rung's `ram_gb` with `ram_ceiling_gb`. chat→14B (9 GB) under an 8 GB ceiling:
+  `/ready` 200 with warmup off ("on disk, loads on the first request") and on ("skipped, does
+  not fit beside residents"); every `auto` chat 503'd `needs 9.0 GB > ceiling 8.0 GB`.
+- **Fix:** `ModelManager.size_problem` is the one rule admission refuses on; readiness applies
+  it to every routed rung (`failed`, naming the rung) before any warmup/disk verdict.
+- **Acceptance test:** `tests/test_ready_ram_ceiling.py` (both warmup modes; a fitting control).
+
+### B-101
+**Streamed role/content chunks and failed records carry the requested model, not the one generating**
+
+- **Priority:** P2 · **Status:** **FIXED** in `95626b6` · **Effort:** S
+- **Evidence:** B-068 fixed only the final hearth chunk: under an echo stub every role/content
+  chunk said the requested 14B; `Router.record_failure` recorded `decision.model`.
+- **Fix:** `router.route.generating_model(provider, model)` (echo → `"echo"`, a pool → the id
+  it resolves, a bound provider → its `model_id`) labels every chunk and is the default
+  `model` of a failure record.
+- **Acceptance test:** `tests/test_echo_identity.py` checks every chunk; broken-echo records.
+
+### B-102
+**A bad adapter evicts the base and forces a full base reload on every request**
+
+- **Priority:** P2 · **Status:** **FIXED** in `d58d5b1` · **Effort:** S
+- **Evidence:** the variant's admission evicted the resident base, its load failed, the
+  router's base retry reloaded the base — 3 requests = 3 failed variant loads + 3 base loads.
+- **Fix:** `ModelPool._get` remembers a failed variant load against `adapter_fingerprint()`
+  (relpath, mtime_ns, size of each file) and refuses it (`AdapterLoadFailedError`, nothing
+  evicted or loaded) until the adapter's files change.
+- **Acceptance test:** `tests/test_bad_adapter_no_reload_loop.py` (1 failed variant load, 1
+  base load for 3 requests; a rewritten adapter is retried once).
+
+### B-103
+**B-071's queued-cancel guards untested; the pool's stream path loads before checking**
+
+- **Priority:** P2 · **Status:** **FIXED** in `28e8bd8` · **Effort:** S
+- **Evidence:** deleting `pool.py`'s or `mlx.py`'s "abandoned while queued" check failed no
+  test; `ModelPool.stream_deltas` had no check, so the provider's ran after `manager.get()` had
+  loaded (and evicted for) the weights.
+- **Fix:** the pool's stream job checks the scope before the manager lookup.
+- **Acceptance test:** `tests/test_cancel_before_load.py` (pool generate/stream, eviction,
+  bare provider); kills each guard alone and both together.
+
+### B-104
+**`HEARTH_DEFAULT_MODEL` naming an unservable model is not refused at build under an unpinned profile**
+
+- **Priority:** P2 · **Status:** **FIXED** in `1027848` · **Effort:** S
+- **Evidence:** `check_policy_servable` checked only named rungs: `HEARTH_DEFAULT_MODEL=echo`
+  under mlx built an app whose every `auto` request 404'd; `defaults.local_model: echo` was
+  refused.
+- **Fix:** the registry default unpinned classes fall through to (from `policy_rungs`) is
+  judged too, for providers that validate ids at serve time (`ModelPool`).
+- **Acceptance test:** `tests/test_default_model_servable_at_build.py`.
+
+### B-105
+**Cancellation during the base retry after an adapter fails becomes `ProviderError` (503)**
+
+- **Priority:** P2 · **Status:** **FIXED** in `ef926ba` · **Effort:** S
+- **Evidence:** `Router._generate`'s retry sat under a bare `except Exception`.
+- **Fix:** `GenerationCancelledError` / `UnknownModelError` re-raised from the retry too.
+- **Acceptance test:** `tests/test_cancel_during_base_retry.py`.
+
+### B-106
+**Abandoned chat streams, adapter 404s and a `select_adapter` raise leave no record**
+
+- **Priority:** P2 · **Status:** **FIXED** in `8445121` · **Effort:** M
+- **Evidence:** `GeneratorExit` skipped every `except` in `_stream_sse` (an abandoned agent run
+  was recorded, a chat stream was not); `check_adapter`'s 404 and a `select_adapter` failure
+  before the first chunk were never recorded.
+- **Fix:** `_stream_sse` wraps `_stream_sse_body` and records an abandoned stream as failed
+  `"client disconnected"` (billing a remote's partial output); `Router.record_refused` records
+  adapter 404s (gateway and `route()`); selection failures are recorded and streamed as
+  `adapter_not_found`.
+- **Acceptance test:** `tests/test_stream_abandon_record.py`; `tests/test_adapter_hotswap.py`.
+
+### B-107
+**`ModelPool.evict(base)` leaves the base's adapter variants resident**
+
+- **Priority:** P3 · **Status:** **FIXED** in `2626e2b` · **Effort:** S
+- **Fix:** `evict(model_id)` evicts the bare id and every variant over it in one MLX job.
+- **Acceptance test:** `tests/test_pool_evict_variants.py`.
+
+### B-108
+**Status shows an unusable active profile `[ok]`; doctor calls it "UNSAFE offline" (reads as egress)**
+
+- **Priority:** P2 · **Status:** **FIXED** in `acb10fd` · **Effort:** S
+- **Evidence:** `probe_egress` checked only that the active file existed; a profile outside
+  `config/` was never loaded; `doctor --offline` printed "UNSAFE offline: routing_profile".
+- **Fix:** status loads the active profile wherever it lives (FAIL "UNUSABLE … not an egress
+  finding"); doctor's `Check.reason` + `offline_verdict()` print "NOT SAFE TO RUN offline —
+  unusable, not an egress path" (exit 1) vs "UNSAFE offline: … (can egress)".
+- **Acceptance test:** `tests/test_status_unusable_profile.py`; `tests/test_doctor_offline.py`.
+
+### B-109
+**`defaults: {local_model: null}` refused as "'None' is not in the model registry"**
+
+- **Priority:** P3 · **Status:** **FIXED** in `d1a627a` · **Effort:** S
+- **Decision:** null means unset (= `auto`), like a class rule's `local_model: null` and an
+  absent key; three spellings of "unset" now behave one way.
+- **Acceptance test:** `tests/test_policy_null_default.py`.
+
+### B-110
+**Warmup race: a request load between the fit check and the load made warmup evict its own rung**
+
+- **Priority:** P3 · **Status:** **FIXED** in `d0f80b8` · **Effort:** S
+- **Evidence:** reproduced deterministically: a 14B request landing in the gap left only the
+  Coder-7B resident (the warmed 3B and the requested 14B were evicted).
+- **Fix:** `ModelManager.get_if_fits` (check + load under the load lock);
+  `ModelPool.warm(..., only_if_fits=True)` runs it as one MLX job.
+- **Acceptance test:** `tests/test_warmup_fit_atomic.py`.
+
+### B-111
+**Untested: `policy_rungs` honouring `defaults.local_model`; the agent route's `on_close=cancel.set`**
+
+- **Priority:** P3 · **Status:** **FIXED** in `e1102b9` · **Effort:** S
+- **Acceptance test:** `tests/test_policy_rungs_defaults.py` (readiness/warmup/request
+  outcomes); `tests/test_agent_cancellation.py` `close-unreachable` parametrization.
+
+### B-112
+**An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** `gateway/app.py` `chat_completions` returns `_model_not_found` from its
+  up-front `check_model` without a record (and `gateway/agent_route.py` likewise); since B-106
+  an adapter 404 on the same route is recorded. A routed rung's 404 inside `route()` is
+  recorded (B-066), so only the up-front refusal is invisible to `hearth stats`.
+- **Fix outline:** `router.record_refused(gen_req, exc, ...)` at both up-front checks.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -1504,3 +1650,15 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `aa80aec` | **B-091.** A printed draft name is vocabulary-only; the only digit it may carry is the draft's own rank. |
 | `77ee24e` | **B-092.** hearth.finance no-network test resolves relative imports to an internal allowlist and refuses importlib / `__import__`. |
 | `9ef10e6` | **B-093.** The header is a header-shaped row directly above data (2+ vocabulary names, no value, data below, data width). |
+| `3ae3188` | **B-100.** A rung larger than `HEARTH_RAM_CEILING_GB` is a `failed` readiness row (warmup on or off). |
+| `95626b6` | **B-101.** Every streamed chunk and every failure record names the generating/attempted model. |
+| `d58d5b1` | **B-102.** A failed adapter variant load is remembered against the adapter's files; no reload loop. |
+| `28e8bd8` | **B-103.** The pool's stream path checks cancellation before loading; every B-071 guard is mutation-tested. |
+| `1027848` | **B-104.** The registry default unpinned classes fall through to must be servable at build. |
+| `ef926ba` | **B-105.** Cancellation during the base retry stays a cancellation. |
+| `8445121` | **B-106.** Abandoned chat streams ("client disconnected"), adapter 404s and selection failures are recorded. |
+| `2626e2b` | **B-107.** `ModelPool.evict(base)` evicts its adapter variants. |
+| `acb10fd` | **B-108.** Status/doctor say "unusable" for a profile serve refuses, distinct from "can egress". |
+| `d1a627a` | **B-109.** `defaults.local_model: null` means unset. |
+| `d0f80b8` | **B-110.** Warmup's fit check and load are atomic under the manager's load lock. |
+| `e1102b9` | **B-111.** Tests kill the surviving `policy_rungs`-defaults and agent `on_close` mutants. |

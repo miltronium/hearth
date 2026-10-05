@@ -291,8 +291,12 @@ def _parse(
     if catalog is None and known_models is not None:
         catalog = _ModelCatalog(known=frozenset(known_models))
     d = raw.get("defaults", {}) or {}
+    # `local_model: null` (or `local_model:` with no value) is YAML for "unset", which a
+    # class rule already reads as "no opinion": here it means the same fall-through as
+    # `auto` (B-109). It used to be stringified to 'None' and refused as an unknown model.
+    default_rung = d.get("local_model")
     defaults = Defaults(
-        local_model=str(d.get("local_model", "auto")),
+        local_model="auto" if default_rung is None else str(default_rung),
         remote=str(d.get("remote", "default")),
         remote_budget_tokens_per_day=int(d.get("remote_budget_tokens_per_day", 200_000)),
     )

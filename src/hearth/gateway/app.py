@@ -35,7 +35,12 @@ from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..providers.echo import is_stub_backend
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router, check_policy_servable
-from ..router.route import AdapterChoice, UnknownAdapterError, policy_rungs
+from ..router.route import (
+    AdapterChoice,
+    UnknownAdapterError,
+    generating_model,
+    policy_rungs,
+)
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
@@ -175,6 +180,9 @@ def create_app(
         :func:`~hearth.router.route.policy_rungs`). Under an unpinned profile that is just
         the registry default, exactly as before. Each model is judged on outcomes:
 
+        * it fits under the RAM ceiling at all (``HEARTH_RAM_CEILING_GB``): a rung larger
+          than the whole ceiling is refused on every request, so it is ``failed`` whether
+          or not warmup ran (B-100); **and**
         * its last load attempt did not fail, and a load of it has completed with weights in
           memory at least once (warmup, or any request) — residency granted without a load
           never counts (B-005); **and**
@@ -279,12 +287,6 @@ def create_app(
             check_model(router.local, registry, req.model)
         except UnknownModelError as exc:
             return _model_not_found(exc)
-        # Same for an explicitly requested adapter: refused up front, never silently
-        # answered by base weights under the adapter's name (B-034).
-        try:
-            router.check_adapter(adapter)
-        except UnknownAdapterError as exc:
-            return _adapter_not_found(exc)
         messages = (
             json_instruction(req.messages)
             if response_format == "json_object"
@@ -296,6 +298,14 @@ def create_app(
             max_tokens=req.max_tokens,
             temperature=req.temperature,
         )
+        # Same for an explicitly requested adapter: refused up front, never silently
+        # answered by base weights under the adapter's name (B-034) — and recorded as the
+        # failed request it is (B-106), as route() records its own refusal.
+        try:
+            router.check_adapter(adapter)
+        except UnknownAdapterError as exc:
+            router.record_refused(gen_req, exc, intent=intent, adapter=adapter)
+            return _adapter_not_found(exc)
         if req.stream:
             return StreamingResponse(
                 _close_on_disconnect(
@@ -493,6 +503,17 @@ def _judge_model(
             resolve(model_id)
         except UnknownModelError as exc:
             return verdict("failed", f"{model_id!r} is not servable: {exc}")
+    # A rung larger than the whole RAM ceiling can never load: the manager refuses it on
+    # every request (ModelTooLargeError -> 503), warmup on or off. Judged with the manager's
+    # own rule over the footprint it will size the load by (B-100).
+    too_large = _size_problem(model_id, provider, manager)
+    if too_large is not None:
+        return verdict(
+            "failed",
+            f"{model_id!r} can never load under this RAM ceiling ({too_large}); every request "
+            "routed to it fails — raise HEARTH_RAM_CEILING_GB or route its classes to a "
+            "smaller model",
+        )
     can_locate = bool(getattr(provider, "can_locate", False))
     if can_locate:
         missing = provider.weights_problem(model_id)
@@ -591,6 +612,24 @@ def _readiness(
                    models=models)
 
 
+def _size_problem(model_id: str, provider: ModelProvider, manager: ModelManager) -> str | None:
+    """Why ``model_id`` can never be admitted by ``manager``, or ``None``.
+
+    Sized by ``provider.footprint`` — what the manager's admission sizes the load by (a
+    pool's per-model providers report the same registry ``ram_gb`` the pool does). A manager
+    without :meth:`~hearth.serving.ModelManager.size_problem` or a provider that cannot size
+    the model is not judged here: its load outcome still is.
+    """
+    size_problem = getattr(manager, "size_problem", None)
+    if not callable(size_problem):
+        return None
+    try:
+        ram_gb = provider.footprint(model_id).ram_gb
+    except Exception:  # noqa: BLE001 — an unsizable model is judged by its load instead
+        return None
+    return size_problem(model_id, ram_gb)
+
+
 def _weights_loaded(manager: ModelManager, model_id: str) -> bool:
     """True when ``model_id`` is resident AND its provider reports weights in memory."""
     resident = manager.peek(model_id)
@@ -633,16 +672,24 @@ def _warmup(
         warm = getattr(provider, "warm", None)
         via_pool = callable(warm) and getattr(provider, "manager", None) is manager
         for index, model_id in enumerate(state.plan):
-            if index > 0 and not _fits_beside_residents(manager, registry, model_id):
-                state.skipped.add(model_id)
-                logger.info("warmup left %s unloaded: it does not fit under the RAM ceiling "
-                            "beside the rungs already warmed; it loads on demand", model_id)
-                continue
             try:
-                if via_pool:
-                    warm(model_id)
+                if index == 0:
+                    loaded = warm(model_id) if via_pool else manager.get(model_id)
                 else:
-                    manager.get(model_id)
+                    # Fit check and load in ONE step under the manager's load lock (B-110):
+                    # checked here and loaded later, a request's load in between made this
+                    # load evict the rung warmup had just warmed.
+                    loaded = (
+                        warm(model_id, only_if_fits=True)
+                        if via_pool
+                        else _get_if_fits(manager, registry, model_id)
+                    )
+                if loaded is None:
+                    state.skipped.add(model_id)
+                    logger.info("warmup left %s unloaded: it does not fit under the RAM "
+                                "ceiling beside what is resident; it loads on demand",
+                                model_id)
+                    continue
                 if not _weights_loaded(manager, model_id):
                     raise RuntimeError(f"warmup returned but {model_id!r} holds no weights")
                 state.errors.pop(model_id, None)
@@ -657,6 +704,16 @@ def _warmup(
         return ok
     finally:
         state.running = False
+
+
+def _get_if_fits(manager: ModelManager, registry: Registry, model_id: str):
+    """``manager.get_if_fits`` — or, for a manager without it, check-then-get (not atomic)."""
+    get_if_fits = getattr(manager, "get_if_fits", None)
+    if callable(get_if_fits):
+        return get_if_fits(model_id)
+    if not _fits_beside_residents(manager, registry, model_id):
+        return None
+    return manager.get(model_id)
 
 
 def _fits_beside_residents(manager: ModelManager, registry: Registry, model_id: str) -> bool:
@@ -842,6 +899,28 @@ def _guarantee_done(stream: Iterator[str]) -> Iterator[str]:
         yield _sse("[DONE]")
 
 
+@dataclass
+class _StreamProgress:
+    """What a chat stream has done so far — read when the client abandons it (B-106).
+
+    Written by :func:`_stream_sse_body` as it goes; ``settled`` is set the moment the
+    stream's outcome has been recorded (an answer, an error, a refusal), so an abandonment
+    after that point records nothing twice.
+    """
+
+    decision: object | None = None
+    provider: ModelProvider | None = None
+    choice: AdapterChoice = field(default_factory=AdapterChoice)
+    started: float = 0.0
+    parts: list[str] = field(default_factory=list)
+    escalation_failed: str | None = None
+    settled: bool = False
+
+
+#: The ``failed`` reason of a chat stream the client walked away from (B-106).
+CLIENT_DISCONNECTED = "client disconnected"
+
+
 def _stream_sse(
     router: Router,
     gen_req: GenRequest,
@@ -849,6 +928,59 @@ def _stream_sse(
     allow_escalation: bool,
     adapter: str | None,
     response_format: str = "text",
+):
+    """:func:`_stream_sse_body`, plus a record when the client abandons the stream (B-106).
+
+    ``GeneratorExit`` (the stream closed mid-answer: ``_close_on_disconnect``) is not an
+    ``Exception``, so it skipped every ``except`` in the body: an abandoned chat stream left
+    no record at all, while an abandoned agent run was recorded as failed. Now it is a
+    failed request with reason ``"client disconnected"`` — and a remote that had already
+    produced tokens is billed for them, as when it dies mid-stream.
+    """
+    progress = _StreamProgress()
+    try:
+        yield from _stream_sse_body(
+            router, gen_req, intent, allow_escalation, adapter, response_format, progress
+        )
+    except GeneratorExit:
+        _record_abandoned_stream(router, gen_req, progress)
+        raise
+
+
+def _record_abandoned_stream(
+    router: Router, gen_req: GenRequest, progress: _StreamProgress
+) -> None:
+    """Record a stream closed before its outcome was recorded. Never raises."""
+    decision, provider = progress.decision, progress.provider
+    if progress.settled or decision is None:
+        return  # already recorded, or closed before anything was decided
+    progress.settled = True
+    text = "".join(progress.parts)
+    try:
+        if decision.would_escalate and text:
+            _record_failed_remote_stream(
+                router, gen_req, decision, provider, text, None, CLIENT_DISCONNECTED,
+                (time.perf_counter() - progress.started) * 1000.0,
+            )
+            return
+        router.record_failure(
+            gen_req, decision, provider, RuntimeError(CLIENT_DISCONNECTED),
+            started=progress.started, adapter=progress.choice.id,
+            escalation_failed=progress.escalation_failed,
+            completion_tokens=_estimate_stream_tokens(gen_req, text)[1] if text else 0,
+        )
+    except Exception as exc:  # noqa: BLE001 — closing a stream must not raise
+        logger.error("could not record abandoned stream: %s", exc)
+
+
+def _stream_sse_body(
+    router: Router,
+    gen_req: GenRequest,
+    intent: str | None,
+    allow_escalation: bool,
+    adapter: str | None,
+    response_format: str,
+    progress: _StreamProgress,
 ):
     """Yield OpenAI-compatible SSE chunks, then a final hearth chunk, then ``[DONE]``.
 
@@ -869,11 +1001,13 @@ def _stream_sse(
     def base_choice(delta: ChatChunkDelta, finish: str | None = None) -> ChatChunkChoice:
         return ChatChunkChoice(delta=delta, finish_reason=finish)
 
+    started = progress.started = time.perf_counter()
     try:
         decision, provider = _resolve_stream_provider(
             router, gen_req, intent, allow_escalation
         )
     except BudgetExhaustedError as exc:
+        progress.settled = True  # Router.provider_for recorded the denial (B-066)
         # Emit an OpenAI-style error event, then terminate the stream.
         yield _sse(
             {
@@ -887,13 +1021,25 @@ def _stream_sse(
         yield _sse("[DONE]")
         return
 
+    progress.decision, progress.provider = decision, provider
+
     # Adapters layer over the local backend only; resolve the requested id (or the task's
     # promoted default) to a concrete path so streaming hot-swaps like non-streaming does.
-    choice = (
-        AdapterChoice()
-        if decision.would_escalate
-        else router.select_adapter(adapter, decision.task_class, decision.model)
-    )
+    choice = AdapterChoice()
+    if not decision.would_escalate:
+        try:
+            choice = router.select_adapter(adapter, decision.task_class, decision.model)
+        except Exception as exc:  # noqa: BLE001 — recorded and named, before any chunk
+            # An adapter that became unservable after the up-front check, or an adapter
+            # store that raised: a failed request, recorded like any other (B-106).
+            progress.settled = True
+            router.record_failure(
+                gen_req, decision, provider, exc, started=started, adapter=adapter
+            )
+            yield _sse(_adapter_failure_event(exc))
+            yield _sse("[DONE]")
+            return
+    progress.choice = choice
     stream_req = GenRequest(
         messages=gen_req.messages,
         model=decision.model,
@@ -902,18 +1048,19 @@ def _stream_sse(
         adapter=choice.path,
     )
 
-    # First chunk announces the assistant role (OpenAI convention).
+    # First chunk announces the assistant role (OpenAI convention). Every chunk names the
+    # model that GENERATES (B-101): the echo stub is "echo" from the first chunk, not only in
+    # the final one — decision.model names what was asked for.
     yield _sse(
         ChatCompletionChunk(
             id=chunk_id,
             created=created,
-            model=decision.model,
+            model=generating_model(provider, decision.model),
             choices=[base_choice(ChatChunkDelta(role="assistant"))],
         )
     )
 
-    started = time.perf_counter()
-    parts: list[str] = []
+    parts = progress.parts
     finish_reason = "stop"
     escalation_failed: str | None = None
     # The model that actually generated, as reported by the provider instance that ran it
@@ -923,8 +1070,9 @@ def _stream_sse(
     # The adapter path the answer was actually generated with (None after a base retry).
     used_path: str | None = None
 
-    def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
+    def relay(provider: ModelProvider, stream_req: GenRequest):
         nonlocal finish_reason, served_model
+        model = generating_model(provider, stream_req.model)
         for event in iter_stream(provider, stream_req):
             if event.finish_reason:
                 finish_reason = event.finish_reason
@@ -949,7 +1097,7 @@ def _stream_sse(
         nonlocal used_path
         used_path = stream_req.adapter
         try:
-            yield from relay(router.local, stream_req, stream_req.model)
+            yield from relay(router.local, stream_req)
         except Exception as exc:  # noqa: BLE001
             if stream_req.adapter is None or parts:
                 raise
@@ -964,7 +1112,6 @@ def _stream_sse(
                     temperature=stream_req.temperature,
                     adapter=None,
                 ),
-                stream_req.model,
             )
 
     try:
@@ -972,12 +1119,13 @@ def _stream_sse(
             yield from relay_local(stream_req)
         else:
             try:
-                yield from relay(provider, stream_req, decision.model)
+                yield from relay(provider, stream_req)
             except Exception as exc:  # noqa: BLE001
                 if parts:
                     # The remote received the prompt and produced tokens before dying: that
                     # is spend and an escalation that failed, so it is billed and recorded —
                     # not left to a log line — and nothing local is spliced onto its answer.
+                    progress.settled = True
                     _record_failed_remote_stream(
                         router, gen_req, decision, provider, "".join(parts), None,
                         f"provider {provider.name!r} failed mid-stream: {exc}",
@@ -990,7 +1138,10 @@ def _stream_sse(
                 escalation_failed = f"provider {provider.name!r} failed: {exc}"
                 decision = router.degrade_to_local(gen_req, decision, exc)
                 provider = router.local
+                progress.escalation_failed = escalation_failed
+                progress.decision, progress.provider = decision, provider
                 choice = router.select_adapter(adapter, decision.task_class, decision.model)
+                progress.choice = choice
                 stream_req = GenRequest(
                     messages=gen_req.messages,
                     model=decision.model,
@@ -1003,6 +1154,7 @@ def _stream_sse(
         logger.error("stream refused: %s", exc)
         # Recorded like any failed request (B-066) — after a failed escalation too, where the
         # remote may already hold the prompt.
+        progress.settled = True
         router.record_failure(
             gen_req, decision, provider, exc, started=started, adapter=choice.id,
             escalation_failed=escalation_failed,
@@ -1022,6 +1174,7 @@ def _stream_sse(
     except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
         # Recorded before the error event goes out: a failed request (and, after a failed
         # escalation, a prompt the remote may already hold) must reach the metrics.
+        progress.settled = True
         router.record_failure(
             gen_req, decision, provider, exc, started=started, adapter=choice.id,
             escalation_failed=escalation_failed,
@@ -1033,8 +1186,8 @@ def _stream_sse(
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
     # A provider that cannot say which model ran (third-party, plain stream()) falls back to
-    # its bound model id if it has one, and only then to the decision.
-    model_served = served_model or getattr(provider, "model_id", None) or decision.model
+    # the same derivation that labelled the chunks: its bound model id, else the decision.
+    model_served = served_model or generating_model(provider, decision.model)
     # The adapter that actually served — not the one requested (B-034).
     served_adapter = router.served_adapter(provider, choice, used_path)
 
@@ -1051,6 +1204,7 @@ def _stream_sse(
     # the client still gets the final chunk, then a named error event, then [DONE].
     accounting_error: str | None = None
     stream_record: RequestRecord | None = None
+    progress.settled = True  # the outcome is recorded below (or its failure reported)
     try:
         if served_by == "remote":
             router.budget.spend(prompt_tokens + completion_tokens)
@@ -1122,6 +1276,26 @@ def _stream_sse(
                 }
             )
     yield _sse("[DONE]")
+
+
+def _adapter_failure_event(exc: Exception) -> dict:
+    """The in-band error event for an adapter that failed to resolve in stream setup."""
+    if isinstance(exc, UnknownAdapterError):
+        return {
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "hearth.adapter",
+                "code": "adapter_not_found",
+            }
+        }
+    return {
+        "error": {
+            "message": f"stream aborted: {type(exc).__name__}: {exc}",
+            "type": "internal_error",
+            "code": "hearth.stream.internal_error",
+        }
+    }
 
 
 def _estimate_stream_tokens(gen_req: GenRequest, text: str) -> tuple[int, int]:

@@ -74,8 +74,44 @@ def test_the_streamed_stub_names_itself_and_saves_nothing(tmp_path, local_policy
     final = next(e for e in reversed(events) if e.get("hearth"))
     assert final["model"] == "echo" and final["hearth"]["model"] == "echo"
     assert final["hearth"]["estimated_frontier_tokens_saved"] == 0
+    # EVERY chunk names the stub — the role chunk and each content chunk too, not just the
+    # final one (B-101: they used to carry the requested 14B's id).
+    chunks = [e for e in events if "choices" in e]
+    assert len(chunks) >= 3  # role, at least one content delta, final
+    assert [c["model"] for c in chunks] == ["echo"] * len(chunks)
     (rec,) = list(metrics._records)
     assert (rec.model, rec.estimated_frontier_tokens_saved) == ("echo", 0)
+
+
+class _BrokenEcho(EchoProvider):
+    """An echo stub whose generation dies: what was ATTEMPTED is still the stub."""
+
+    def generate(self, req):
+        raise RuntimeError("stub broke")
+
+    def stream_deltas(self, req):
+        raise RuntimeError("stub broke")
+        yield  # pragma: no cover — makes this a generator
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_failed_stub_request_is_recorded_as_the_stub(tmp_path, local_policy, stream):
+    """B-101: a failure record names the model that was attempted, as a success would."""
+    client, metrics = _app(tmp_path, _BrokenEcho(), local_policy, "echo")
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": BIG, "stream": stream,
+              "messages": [{"role": "user", "content": "hello there friend"}]},
+    )
+    if stream:
+        events = [json.loads(line[6:]) for line in resp.text.splitlines()
+                  if line.startswith("data: ") and line != "data: [DONE]"]
+        assert [e["model"] for e in events if "choices" in e] == ["echo"]  # the role chunk
+        assert events[-1]["error"]["code"] == "hearth.provider.unavailable"
+    else:
+        assert resp.status_code == 503
+    (rec,) = list(metrics._records)
+    assert rec.failed and (rec.model, rec.backend) == ("echo", "echo")
 
 
 def test_router_never_prices_an_echo_as_saved_tokens(local_policy):

@@ -235,7 +235,11 @@ class Router:
         served (``None`` for base weights, a remote, or an adapter that failed and was
         retried on base) — never merely the one requested.
         """
-        self.check_adapter(adapter)
+        try:
+            self.check_adapter(adapter)
+        except UnknownAdapterError as exc:
+            self.record_refused(req, exc, intent=intent, adapter=adapter)  # B-106
+            raise
         started = time.perf_counter()
         decision = self.decide(req, intent=intent, allow_escalation=allow_escalation)
         # Records a denied escalation (BudgetExhaustedError) before raising it (B-066).
@@ -245,7 +249,13 @@ class Router:
         # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
         choice = AdapterChoice()
         if not decision.would_escalate:
-            choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            try:
+                choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            except UnknownAdapterError as exc:  # unservable since check_adapter (B-106)
+                self.record_failure(
+                    req, decision, provider, exc, started=started, adapter=adapter
+                )
+                raise
 
         escalation_failed: str | None = None
         try:
@@ -270,11 +280,14 @@ class Router:
             # AND that an escalation was attempted and failed (``escalation_failed``).
             escalation_failed = str(exc)
             decision = self.degrade_to_local(req, decision, exc)
-            choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            choice = AdapterChoice(id=adapter)  # what the record names if selection fails
             provider = self.local
             try:
+                choice = self.select_adapter(adapter, decision.task_class, decision.model)
                 result, used_path = self._generate(self.local, decision, req, choice.path)
-            except (ProviderError, UnknownModelError, GenerationCancelledError) as local_exc:
+            except (
+                ProviderError, UnknownModelError, UnknownAdapterError, GenerationCancelledError
+            ) as local_exc:
                 # Both failed. The remote was CALLED and may already hold the prompt
                 # (docs/PRIVACY.md), so this is exactly the request the audit trail must
                 # not lose: record the failed escalation and the failed fallback, re-raise
@@ -368,6 +381,7 @@ class Router:
         completion_tokens: int = 0,
         backend: str | None = None,
         escalated: bool | None = None,
+        model: str | None = None,
     ) -> RequestRecord | None:
         """Record a request that ended in an error instead of an answer (``failed`` set).
 
@@ -377,14 +391,25 @@ class Router:
         request, else the promoted default; ``None`` for base weights or a remote) — the
         same meaning on every path (B-073). ``backend`` overrides ``provider.name`` when no
         provider was built (a denied escalation); ``escalated`` overrides
-        ``decision.would_escalate``. Never raises: a metrics store that fails here must not
+        ``decision.would_escalate``. ``model`` defaults to :func:`generating_model` of the
+        provider that was tried — the same identity a success would have reported (B-101).
+        Never raises: a metrics store that fails here must not
         replace the provider's error the client is about to receive with its own.
         """
         prompt_tokens = max(1, sum(len(m.content) for m in req.messages) // 4)
+        if model is None:
+            # The model that was ATTEMPTED — what the provider generates for this request —
+            # not what was asked for: an echo stub that fails is "echo", as its answer would
+            # have been (B-101). No provider (a denied escalation): the decision's model.
+            model = (
+                generating_model(provider, decision.model)
+                if provider is not None
+                else decision.model
+            )
         record = RequestRecord(
             task_class=decision.task_class,
             backend=backend if backend is not None else getattr(provider, "name", "none"),
-            model=decision.model,
+            model=model,
             served_by="remote" if decision.would_escalate else "local",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -402,6 +427,31 @@ class Router:
             logger.error("could not record failed request (%s): %s", exc, rec_exc)
             return None
         return record
+
+    def record_refused(
+        self,
+        req: GenRequest,
+        exc: Exception,
+        *,
+        intent: str | None = None,
+        adapter: str | None = None,
+    ) -> RequestRecord | None:
+        """Record a request refused before anything ran — an unservable adapter (a 404).
+
+        Such a request used to leave no record at all (B-106): ``hearth stats`` could not
+        see a client hammering a retired adapter. The record is attributed to the LOCAL
+        decision for the request (adapters only layer over local; nothing left the
+        machine), with ``failed`` set. Never raises.
+        """
+        started = time.perf_counter()
+        try:
+            decision = self.decide(req, intent=intent, allow_escalation=False)
+        except Exception as dec_exc:  # noqa: BLE001 — the refusal itself must still surface
+            logger.error("could not record refused request (%s): %s", exc, dec_exc)
+            return None
+        return self.record_failure(
+            req, decision, self.local, exc, started=started, adapter=adapter
+        )
 
     def degrade_to_local(
         self, req: GenRequest, decision: RouteDecision, exc: Exception
@@ -473,6 +523,10 @@ class Router:
                             adapter=None,
                         )
                     ), None
+                except (UnknownModelError, GenerationCancelledError):
+                    # Same rule as the first attempt: a caller that went away while the
+                    # adapter was failing is a cancellation, never a provider outage (503).
+                    raise
                 except Exception as retry_exc:  # noqa: BLE001
                     exc = retry_exc
             logger.error("provider %s failed to generate: %s", provider.name, exc)
@@ -561,9 +615,13 @@ class Router:
         if requested:
             self.check_adapter(requested)
             store = self._adapter_store()
-            return AdapterChoice(
-                id=requested, path=store.resolve_path(requested, allow_candidate=True)
-            )
+            try:
+                path = store.resolve_path(requested, allow_candidate=True)
+            except Exception as exc:  # noqa: BLE001 — retired/removed since check_adapter
+                raise UnknownAdapterError(
+                    requested, f"adapter {requested!r} cannot be served: {exc}"
+                ) from exc
+            return AdapterChoice(id=requested, path=path)
         store = self._adapter_store()
         if store is None:
             return AdapterChoice()
@@ -625,6 +683,33 @@ class Router:
         return self._adapters
 
 
+def generating_model(provider: ModelProvider, model: str) -> str:
+    """The model that GENERATES when ``provider`` is handed a request for ``model``.
+
+    Known before generation starts, so a stream can label its role and content chunks with
+    it (B-101) instead of the decision's model — which names what was asked for:
+
+    * the echo stub generates as ``"echo"`` whatever was asked (B-068);
+    * a provider that resolves ids (:class:`~hearth.serving.ModelPool`) generates the id it
+      resolves to (an unresolvable id is left as asked: that request fails anyway);
+    * a provider bound to one model (``model_id``) generates that model;
+    * anything else (a remote, a test fake) is taken at the requested id.
+
+    The terminal ``StreamDelta.model`` / ``GenResult.model`` stays the authority once the
+    generation reports it; this is the same derivation, made before the first token.
+    """
+    name = getattr(provider, "name", None)
+    if is_stub_backend(name):
+        return name
+    resolve = getattr(provider, "resolve", None)
+    if callable(resolve):
+        try:
+            return resolve(model)
+        except Exception:  # noqa: BLE001 — the request itself will fail and say why
+            return model
+    return getattr(provider, "model_id", None) or model
+
+
 def policy_rungs(policy: RoutingPolicy, default_id: str) -> dict[str, list[str]]:
     """Every local model an ``auto`` request can be routed to → where each comes from.
 
@@ -660,6 +745,7 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
     models of its own backend, so ``echo`` (or a plugin's model) as a rung under mlx is a
     request-time 404 for every task of that class. Judged with :func:`check_model`, the
     same function that 404s the request, so this check and the request cannot disagree.
+    The registry default counts as a rung when some class falls through to it (B-104).
     Raises :class:`RoutingPolicyError` naming every bad rung.
     """
     if registry is None:
@@ -674,6 +760,21 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
     for task_class, rule in policy.classes.items():
         if rule.local_model and rule.local_model != "auto":
             named.setdefault(rule.local_model, []).append(f"class {task_class!r}")
+    # The registry default an UNPINNED class falls through to is as much a rung as a named
+    # one (B-104): HEARTH_DEFAULT_MODEL=echo under mlx used to build an app whose every
+    # unpinned request 404'd, while `defaults.local_model: echo` was refused. Which classes
+    # fall through is read off policy_rungs — the same derivation readiness and warmup use.
+    # Judged only for a provider that validates ids when it serves them (a ModelPool's
+    # ``resolve``): any other provider (echo, a plugin, a test fake) answers the default
+    # whatever it is, so refusing it would refuse a server whose requests succeed.
+    validates_ids = callable(getattr(local, "resolve", None))
+    for model_id, sources in policy_rungs(policy, registry.default_id).items():
+        through = [s.split(" ", 1)[0] for s in sources if s.endswith("(registry default)")]
+        if through and validates_ids:
+            named.setdefault(model_id, []).append(
+                "the registry default (HEARTH_DEFAULT_MODEL, else the config/models.yaml "
+                f"default) that {', '.join(through)} fall through to"
+            )
     problems = []
     for model_id, where in named.items():
         try:
@@ -682,7 +783,7 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
             problems.append(f"{', '.join(where)} -> {exc}")
     if problems:
         raise RoutingPolicyError(
-            f"the routing profile names a model the {getattr(local, 'name', '?')!r} backend "
+            f"the routing profile routes to a model the {getattr(local, 'name', '?')!r} backend "
             "cannot serve: " + "; ".join(problems)
         )
 
@@ -710,6 +811,7 @@ def _estimate_remote_cost(req: GenRequest) -> int:
 
 __all__ = [
     "check_policy_servable",
+    "generating_model",
     "policy_rungs",
     "AdapterChoice",
     "BudgetExhaustedError",
