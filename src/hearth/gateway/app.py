@@ -277,8 +277,11 @@ def create_app(
         if req.stream:
             return StreamingResponse(
                 _close_on_disconnect(
-                    _stream_sse(
-                        router, gen_req, intent, allow_escalation, adapter, response_format
+                    _guarantee_done(
+                        _stream_sse(
+                            router, gen_req, intent, allow_escalation, adapter,
+                            response_format,
+                        )
                     )
                 ),
                 media_type="text/event-stream",
@@ -593,6 +596,32 @@ def _close_when_idle(stream: Iterator[str]) -> None:
             time.sleep(0.02)
 
 
+def _guarantee_done(stream: Iterator[str]) -> Iterator[str]:
+    """Relay an SSE generator so it ends with ``[DONE]`` however it ends.
+
+    :func:`_stream_sse` handles every failure it knows about; this is the backstop for the
+    ones it does not (an adapter store that raises before the first chunk, a bug in a
+    chunk build). An exception becomes a ``hearth.stream.internal_error`` event and
+    ``[DONE]`` instead of a dropped connection. ``yield from`` forwards ``close()`` to the
+    inner generator, so an abandoned stream still cancels generation (``GeneratorExit`` is
+    not an ``Exception`` and passes straight through).
+    """
+    try:
+        yield from stream
+    except Exception as exc:  # noqa: BLE001 — every stream ends with [DONE]
+        logger.exception("stream aborted by an unexpected error")
+        yield _sse(
+            {
+                "error": {
+                    "message": f"stream aborted: {type(exc).__name__}: {exc}",
+                    "type": "internal_error",
+                    "code": "hearth.stream.internal_error",
+                }
+            }
+        )
+        yield _sse("[DONE]")
+
+
 def _stream_sse(
     router: Router,
     gen_req: GenRequest,
@@ -779,28 +808,37 @@ def _stream_sse(
 
     prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
-    if served_by == "remote":
-        router.budget.spend(prompt_tokens + completion_tokens)
-        saved = 0
-    else:
-        saved = estimated_tokens_saved(decision.task_class, prompt_tokens, completion_tokens)
-
-    router.metrics.record(
-        RequestRecord(
-            task_class=decision.task_class,
-            backend=provider.name,
-            model=model_served,
-            served_by=served_by,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_ms=latency_ms,
-            escalated=decision.would_escalate,
-            escalation_reason=decision.reason if decision.would_escalate else None,
-            escalation_failed=escalation_failed,
-            adapter=adapter,
-            estimated_frontier_tokens_saved=saved,
-        )
+    saved = (
+        0
+        if served_by == "remote"
+        else estimated_tokens_saved(decision.task_class, prompt_tokens, completion_tokens)
     )
+    # The answer has already been streamed. Accounting that fails now (a full disk under the
+    # metrics store, an injected store that raises) must not drop the stream with no [DONE]:
+    # the client still gets the final chunk, then a named error event, then [DONE].
+    accounting_error: str | None = None
+    try:
+        if served_by == "remote":
+            router.budget.spend(prompt_tokens + completion_tokens)
+        router.metrics.record(
+            RequestRecord(
+                task_class=decision.task_class,
+                backend=provider.name,
+                model=model_served,
+                served_by=served_by,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                escalated=decision.would_escalate,
+                escalation_reason=decision.reason if decision.would_escalate else None,
+                escalation_failed=escalation_failed,
+                adapter=adapter,
+                estimated_frontier_tokens_saved=saved,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — accounting must not kill a delivered answer
+        accounting_error = f"{type(exc).__name__}: {exc}"
+        logger.error("stream served but accounting failed: %s", accounting_error)
 
     yield _sse(
         ChatCompletionChunk(
@@ -818,6 +856,17 @@ def _stream_sse(
             ),
         )
     )
+    if accounting_error is not None:
+        yield _sse(
+            {
+                "error": {
+                    "message": f"the answer was served but could not be recorded: "
+                    f"{accounting_error}",
+                    "type": "metrics_unavailable",
+                    "code": "hearth.metrics.unavailable",
+                }
+            }
+        )
     # Post-hoc validation for JSON mode: the deltas are already out, so the honest move is
     # to tell the client the object they just assembled is not usable, not to stay quiet.
     if response_format == "json_object":

@@ -274,7 +274,10 @@ class Router:
             adapter=adapter,
             estimated_frontier_tokens_saved=saved,
         )
-        self.metrics.record(record)
+        try:
+            self.metrics.record(record)
+        except Exception as exc:  # noqa: BLE001 — the answer exists; accounting can't 500 it
+            logger.error("request served but could not be recorded: %s", exc)
         return RouteResult(result=result, decision=decision, record=record)
 
     # -- helpers ----------------------------------------------------------------------

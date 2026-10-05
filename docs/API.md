@@ -254,3 +254,9 @@ retryable-with-escalation only if their policy allows it.
 
 SSE, OpenAI-compatible (`data: {...}\n\n`, terminating `data: [DONE]`). The final data event
 before `[DONE]` carries the `hearth` telemetry block.
+
+Every stream ends with `[DONE]`, on every path. A failure is an in-band `error` event just
+before it: `hearth.provider.unavailable` (the provider failed), `model_not_found`,
+`hearth.budget.exhausted`, `hearth.response_format.invalid_json`,
+`hearth.metrics.unavailable` (the answer and its final telemetry chunk were delivered, but
+the request could not be recorded), or `hearth.stream.internal_error` (anything else).
