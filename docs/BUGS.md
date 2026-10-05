@@ -710,7 +710,8 @@ must fail when the fix is reverted.
 ### B-032
 **`scripts/train_lora_real.sh` runs `uv run --no-sync` from the caller's cwd**
 
-- **Priority:** P3 · **Status:** open (found by reading; not run, it needs the GPU) ·
+- **Priority:** P3 · **Status:** **FIXED** in `554923d` — reproduced first: from /tmp with no
+  VIRTUAL_ENV the old pre-check exited 1 (mlx-lm "missing"), the fixed one exits 0 ·
   **Effort:** S
 - **Evidence:** Unlike `scripts/hearth_private.sh` (`cd "$REPO_ROOT"`), the training script
   never changes directory, and every `uv run --no-sync ...` discovers its project from the
