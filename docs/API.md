@@ -1,6 +1,7 @@
 # HEARTH — API Contract
 
-**Status:** Draft. The API *is* the product — this contract should be stable while
+**Status:** checked against the app's routes (`tests/test_api_doc_routes.py` fails when a
+documented endpoint is not served). The API *is* the product — this contract should be stable while
 backends and models churn beneath it. All examples are illustrative.
 
 Base URL (default): `http://127.0.0.1:8080`
@@ -51,7 +52,7 @@ Response adds a `hearth` block in the final chunk / object:
   "hearth": {
     "served_by": "local",              // "local" | "remote"
     "backend": "mlx",
-    "model": "qwen2.5-coder:7b-mlx",
+    "model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
     "adapter": "commit-msgs-v3",
     "escalated": false,
     "estimated_frontier_tokens_saved": 908
@@ -120,63 +121,49 @@ not checked here: a listed model that was never pulled answers 503 with the pull
 Ask the router what it *would* do, without executing — useful for debugging policy.
 
 ```jsonc
-// req
-{ "messages": [...], "intent": null }
-// resp
-{ "class": "code", "backend": "local", "model": "qwen2.5-coder:7b-mlx",
-  "would_escalate": false, "reason": "class policy: code→local unless low confidence" }
+// req (intent and allow_escalation are optional)
+{ "messages": [{"role": "user", "content": "Summarize this diff"}], "intent": null, "allow_escalation": true }
+// resp (measured, echo backend, default no-egress profile)
+{ "class": "summarize", "method": "rules", "backend": "local",
+  "model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+  "would_escalate": false, "reason": "class policy: summarize->local", "confidence": null }
 ```
 
-### `POST /v1/hearth/classify`
-
-Structured classification/extraction as a first-class op (returns typed JSON, not prose).
+### `POST /v1/hearth/rag/ingest` · `POST /v1/hearth/rag/query`
 
 ```jsonc
-// req
-{ "text": "...", "labels": ["bug", "feature", "question"] }
-// resp
-{ "label": "bug", "confidence": 0.91 }
+// ingest req (chunk is optional; sizes are characters)
+{ "collection": "notes", "paths": ["/abs/path/notes"], "chunk": {"size": 800, "overlap": 100} }
+// ingest resp
+{ "collection": "notes", "files": 1, "chunks": 1 }
+// query req (k defaults to 6, answer to false)
+{ "collection": "notes", "query": "how often to descale the kettle", "k": 6, "answer": false }
+// query resp (answer:false → just chunks; answer is the local model's reply when true)
+{ "chunks": [{ "text": "...", "source": "/abs/path/notes/kettle.md", "score": 0.58 }], "answer": null }
 ```
 
-### `POST /v1/hearth/summarize`
+A missing or empty collection returns `"chunks": []` without embedding the query.
+`answer: true` generates with the local model only (never escalated).
 
-Convenience wrapper: summarize text/file with length + style controls. Always local unless
-`allow_escalation: true`.
+### `POST /v1/hearth/agent`
 
-### `POST /v1/hearth/rag/ingest` · `POST /v1/hearth/rag/query`  *(Phase 3)*
-
-```jsonc
-// ingest
-{ "collection": "cambot", "paths": ["Sources/"], "chunk": {"size": 800, "overlap": 100} }
-// query
-{ "collection": "cambot", "query": "how does astrisctl auth?", "k": 6, "answer": false }
-// query resp (answer:false → just chunks)
-{ "chunks": [{ "text": "...", "source": "Sources/.../Auth.swift", "score": 0.83 }] }
-```
-
-### `POST /v1/hearth/train/*` · `GET /v1/hearth/train/{run_id}`  *(Phase 4)*
-
-Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for status + eval.
-
-```jsonc
-// start
-{ "base_model": "qwen2.5-coder:7b-mlx", "dataset": "commit-msgs.jsonl",
-  "method": "qlora", "epochs": 3 }
-// resp
-{ "run_id": "train_...", "status": "queued" }
-```
+The bounded, read-only agent loop, streamed as SSE: a start event, one event per step, a
+final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget": {...}}`
+(unknown fields are refused). Full contract, events and budgets:
+[docs/AGENT.md](AGENT.md) §9.
 
 ### Admin (`/v1/hearth/admin/`)
 
-- `GET /admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
+- `GET /v1/hearth/admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
   A request that ended in an error (the local provider failed, or a remote stream died
   mid-answer) is recorded too: it counts in `requests` and in `failed` / `failure_rate`
   (added keys; nothing renamed), and — after a failed escalation — in `escalations_failed`,
   since the remote may already have received the prompt. `backend_mix` and `latency_ms`
   count only requests that were served an answer.
-- `GET /admin/health` — liveness (unauthenticated): the process is up. Says nothing about
-  weights.
-- `GET /admin/ready` — readiness (unauthenticated). **Ready means the default model can
+- `GET /v1/hearth/admin/health` — liveness (unauthenticated): the process is up. Says nothing
+  about weights. Body: `status`, `version`, `backend`, `model` (the default id), plus
+  `backend_fallback` when `auto` fell back to echo (below).
+- `GET /v1/hearth/admin/ready` — readiness (unauthenticated). **Ready means the default model can
   serve a request now**: a load of it has completed with weights in memory at least once
   (warmup or any request; residency granted without a load never counts), its most recent
   load did not fail, and — for a backend that can check without loading (`mlx`) — its
@@ -208,7 +195,7 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
   it just cannot be mistaken for real inference.
   Measured on 2026-10-05 with real weights (warmup on): `503 loading` at 0.05 s after start,
   `200 ready` at ~1.05 s (7B from page cache).
-- `GET /admin/models` — what is resident right now, read off the provider instances
+- `GET /v1/hearth/admin/models` — what is resident right now, read off the provider instances
   themselves (auth required):
 
   ```jsonc
@@ -225,8 +212,25 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
   generations that instance ran — evidence of which weights answered, independent of anything
   a response says about itself. `ram_gb` is the registry's estimate used for the ceiling, not
   a measurement. Order is LRU (least recently used first).
-- `POST /admin/models/{id}/load|unload` — memory management. *(planned; not implemented)*
-- `POST /admin/adapters/{id}/promote|retire` — adapter lifecycle.
+
+### Not implemented
+
+Earlier drafts of this contract listed the endpoints below. **None exists**: a request to any
+of them is a 404. Each line carries the `(not implemented)` marker that
+`tests/test_api_doc_routes.py` uses to tell them apart from real endpoints.
+
+- `POST /v1/hearth/classify` — use chat completions (`/v1/chat/completions`) with
+  `"hearth": {"intent": "classify"}`, or the `hearth_classify` MCP tool. (not implemented)
+- `POST /v1/hearth/summarize` — same, with `"intent": "summarize"`, or `hearth_summarize`.
+  (not implemented)
+- `POST /v1/hearth/train` · `GET /v1/hearth/train/{run_id}` — training runs from the CLI
+  only (`hearth train`). (not implemented)
+- `POST /v1/hearth/admin/models/{id}/load` · `POST /v1/hearth/admin/models/{id}/unload` —
+  models load on first use and are evicted LRU under `HEARTH_RAM_CEILING_GB`; warmup loads the
+  default. (not implemented)
+- `POST /v1/hearth/admin/adapters/{id}/promote` · `POST /v1/hearth/admin/adapters/{id}/retire`
+  — CLI only: `hearth eval --prereg ... --promote`, `hearth adapters promote --report
+  --prereg`, `hearth adapters retire`. (not implemented)
 
 ---
 
@@ -239,8 +243,8 @@ A chat page for the operator, served by the gateway itself. Open
 so **no CORS middleware exists and none is needed**.
 
 - **Self-contained.** One inline HTML document — no CDN script, no web font, no external
-  stylesheet or image. The page issues exactly two requests, both relative: `/v1/models`
-  and `/v1/chat/completions`. `tests/test_gateway_chat_ui.py` greps the served bytes and
+  stylesheet or image. The page issues only relative requests: `/v1/models`,
+  `/v1/chat/completions` and, with agent mode on, `/v1/hearth/agent`. `tests/test_gateway_chat_ui.py` greps the served bytes and
   fails on any off-origin reference, because a single font request from a page discussing
   bank statements would be an egress channel.
 - **Unauthenticated route, no credential in the document.** A browser navigation cannot
@@ -264,22 +268,39 @@ a token did not already have. See `src/hearth/gateway/chat_ui.py` for the full r
 
 ## Error model
 
-Standard OpenAI-style error envelope, plus a `hearth.code` for HEARTH-specific cases:
+HEARTH's own errors use the OpenAI-style envelope, with a HEARTH-specific `code`:
 
 ```jsonc
 { "error": { "message": "remote budget exhausted; escalation denied",
              "type": "budget_exhausted", "code": "hearth.budget.exhausted" } }
 ```
 
-A request naming a model the server cannot serve gets OpenAI's own shape: HTTP 404,
-`type: invalid_request_error`, `param: model`, `code: model_not_found` (see
-`POST /v1/chat/completions`).
+| HTTP | `type` | `code` | when |
+|---|---|---|---|
+| 404 | `invalid_request_error` | `model_not_found` (`param: model`) | a model this server cannot serve (see `POST /v1/chat/completions`) |
+| 404 | `invalid_request_error` | `adapter_not_found` (`param: hearth.adapter`) | an explicitly requested adapter that is unknown or retired |
+| 400 | `invalid_request_error` | `hearth.response_format.unsupported` (`param: response_format`) | a `response_format` other than `text` / `json_object` |
+| 422 | `invalid_json_response` | `hearth.response_format.invalid_json` | `json_object` was requested and the reply does not parse; the raw reply is in the additive `hearth` block (`content`, `finish_reason`) |
+| 429 | `budget_exhausted` | `hearth.budget.exhausted` | the remote token budget is spent (remote profile only) |
+| 503 | `provider_unavailable` | `hearth.provider.unavailable` | the local provider failed to load or generate (e.g. weights not on disk; the message names the fix) |
 
-Notable HEARTH error types: `budget_exhausted`, `escalation_denied`, `model_not_loaded`,
-`adapter_not_found`, `backend_unavailable`. Clients should treat a local-only failure as
-retryable-with-escalation only if their policy allows it.
+Two responses do **not** use that top-level envelope, because FastAPI produces them:
 
----
+- **401** (missing or wrong bearer token, `gateway/auth.py`) nests the envelope under
+  `detail`:
+
+  ```jsonc
+  { "detail": { "error": { "message": "missing or invalid bearer token",
+                           "type": "invalid_request_error", "code": "hearth.auth.unauthorized" } } }
+  ```
+
+  with a `WWW-Authenticate: Bearer` header.
+- **422** for a request body that fails validation (a missing field, an unknown field on
+  `/v1/hearth/agent`) is FastAPI's `{ "detail": [ { "loc": [...], "msg": "...", "type": "..." } ] }`.
+
+Errors after a stream has started are in-band events (next section). The agent stream adds
+`agent_no_tools_reachable` (`hearth.agent.no_tools_reachable`) and `agent_error`
+(`hearth.agent.failed`).
 
 ## Streaming
 
