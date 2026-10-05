@@ -55,7 +55,9 @@ server, an offline embedded Swift path (Foundation Models + a **working Core ML 
 loop**), a plugin API, and multi-model serving + a quantization/export pipeline.
 
 **219 Python tests + a Swift package (two products, 20 tests), all green** on the `echo`
-backend with no model downloaded. Three real-hardware validations are **done on Apple Silicon**:
+backend with no model downloaded, at the end of the phase build (a historical count: for what
+is true now, run `uv run --no-sync pytest -q` and `uv run --no-sync python
+scripts/hearth_status.py`). Three real-hardware validations are **done on Apple Silicon**:
 an end-to-end LoRA training run on real 7B weights (train → eval gate both directions → promote →
 live serving); live CAMBOT / Claude Code / Swift wiring showing **2,210 estimated frontier tokens
 saved** over an all-local session; and (ADR-011) a **fully-offline Core ML generation loop** —
@@ -64,45 +66,51 @@ no daemon and no network, greedy-matching the source model. Full evidence:
 [docs/RESULTS.md](docs/RESULTS.md). See [docs/ROADMAP.md](docs/ROADMAP.md) for the
 phase-by-phase result log.
 
-## Run it now
+## Quick start
+
+New here? Follow **[docs/GUIDE.md §0, "Learn HEARTH in 15 minutes"](docs/GUIDE.md#0-learn-hearth-in-15-minutes)**.
+The short version, from the repo root:
 
 ```bash
-# install: every extra in ONE command (see the note below)
+# install: every extra in ONE command (a partial sync uninstalls the others)
 uv sync --extra mlx --extra mcp --extra dev --extra files
 uv run --no-sync python -c "import mlx_lm, mcp, openpyxl, pypdf; print('ok')"   # verify
 
-uv run --no-sync pytest -q               # test suite
-uv run --no-sync hearth doctor           # environment preflight
-uv run --no-sync hearth doctor --offline # is it safe to use HEARTH offline right now? (exit 1 if not)
-uv run --no-sync hearth run "hello"      # one-shot
-uv run --no-sync hearth serve            # OpenAI-compatible server on http://127.0.0.1:8080
-uv run --no-sync hearth stats            # token-savings + escalation rollups
-uv run --no-sync hearth mcp              # MCP server (stdio) so Claude Code can offload subtasks
+uv run --no-sync hearth doctor --offline   # safe to use offline right now? exit 0 = SAFE, 1 = UNSAFE
+uv run --no-sync hearth models list        # (default) marks the model that serves
+uv run --no-sync hearth run "hello"        # one local completion; stderr says which model served it
+uv run --no-sync hearth serve              # OpenAI-compatible API + chat page at http://127.0.0.1:8080/chat
 
-# real Apple Silicon inference:
-uv run --no-sync hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-HEARTH_BACKEND=mlx uv run --no-sync hearth serve
+# any OpenAI client: base_url http://127.0.0.1:8080/v1, api key = the token in ~/.hearth/token
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_API_KEY="$(cat ~/.hearth/token)"
 ```
 
-**Extras must be synced together, in one command:** `uv sync --extra X` syncs to exactly
-that set and *uninstalls* every extra not named. Use `uv run --no-sync` so `uv run` never
-re-syncs the environment. To add an optional extra, append it to the full command
-(e.g. `... --extra files --extra remote`).
+- **Always `uv run --no-sync`.** A bare `uv run` re-syncs the venv to the default set,
+  uninstalls `mlx`, and HEARTH silently falls back to the `echo` stub.
+- **Models load from disk only.** `hearth models pull <id>` is the one command that downloads;
+  `hearth doctor --offline` shows where each model resolved from.
+- **Help is built in.** `hearth --help` lists the commands in learning order;
+  `hearth COMMAND --help` gives examples, the `HEARTH_*` variables read and exit codes; the full
+  reference is the man page: `man ./man/hearth.1` (GUIDE §2.6 shows how to make `man hearth` work).
 
 **Optional extras:** `mlx` (real inference), `remote` (Anthropic escalation),
 `embeddings` (MLX RAG embeddings), `mcp` (MCP server), `vec` (sqlite-vec vector store),
-`coreml` (Core ML export), `files` (PDF/XLSX parsers), `dev` (tests). The core runs without
-them, using the offline `echo` backend and a dependency-free vector store.
+`coreml` (Core ML export), `files` (PDF/XLSX parsers), `dev` (tests). Add one by appending it
+to the full sync command. The core runs without them, using the offline `echo` backend and a
+dependency-free vector store.
 
 ## CLI surface
 
-`hearth doctor · serve · run · mcp · stats · train · eval · models (list/pull/rm/convert/export-coreml) · rag (ingest/query) · adapters (list/promote/retire) · plugins`
+`hearth doctor [--offline] · models (list/pull/rm/convert/export-coreml) · serve · run · agent · mcp · stats · rag (ingest/query) · train · eval · prereg (init/check) · adapters (list/promote/retire) · plugins · version`
 
 ## Documentation map
 
 | Doc | What's in it |
 | --- | --- |
-| [docs/PROPOSAL.md](docs/PROPOSAL.md) | The pitch: problem, vision, goals/non-goals, principles, success metrics, risks. **Start here.** |
+| [docs/GUIDE.md](docs/GUIDE.md) | **The user guide.** Learn HEARTH in 15 minutes, then install, models, serve, `/chat`, API, agent, RAG, MCP, routing, finance, training, env vars, troubleshooting. |
+| [man/hearth.1](man/hearth.1) | The reference manual, generated from the CLI (`man ./man/hearth.1`). |
+| [docs/README.md](docs/README.md) | Index of every doc with its status (current / partly stale / historical). |
+| [docs/PROPOSAL.md](docs/PROPOSAL.md) | The pitch: problem, vision, goals/non-goals, principles, success metrics, risks. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: layers, component interfaces, backends, data flow, deployment models, tech stack. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased build plan (Phase 0–7), deliverables, acceptance criteria. |
 | [docs/API.md](docs/API.md) | The gateway API contract: OpenAI-compatible endpoints + HEARTH extensions. |
@@ -122,20 +130,3 @@ them, using the offline `echo` backend and a dependency-free vector store.
 - **Alternate backends:** Ollama/llama.cpp (GGUF), Core ML, Apple Foundation Models (Swift).
 - **Client SDKs:** Swift package (for CAMBOT), Python client, plain HTTP.
 - **Hardware baseline:** Apple Silicon, 32 GB+ unified memory.
-
-## Quickstart
-
-```bash
-# install (editable, from the repo) — all extras in one command; syncing one prunes the others
-uv sync --extra mlx --extra mcp --extra dev --extra files
-
-# pull a local coder model and start the daemon
-uv run --no-sync hearth models pull mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-HEARTH_BACKEND=mlx uv run --no-sync hearth serve   # OpenAI-compatible server on http://127.0.0.1:8080
-
-# one-shot from the CLI
-uv run --no-sync hearth run "summarize this file" --file src/foo.swift
-
-# any OpenAI client just points at it
-export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-```

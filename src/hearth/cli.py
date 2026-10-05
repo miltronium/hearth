@@ -35,22 +35,91 @@ from .providers.base import GenRequest, Message
 from .registry import get_registry
 from .router import Router
 
+#: Help panels group the commands by what the operator is trying to do, in learning order.
+PANEL_START = "Start here"
+PANEL_USE = "Use"
+PANEL_TRAIN = "Train and evaluate"
+PANEL_EXTEND = "Extend"
+
 app = typer.Typer(
     name="hearth",
-    help="On-device intelligence layer — a local-first model gateway for Apple Silicon.",
+    help=(
+        "HEARTH: a local-first, no-egress LLM gateway for Apple Silicon.\n\n"
+        "Runs local MLX models behind an OpenAI-compatible API on 127.0.0.1:8080, with a\n"
+        "chat page (/chat), a bounded read-only agent, local RAG, an MCP server for Claude\n"
+        "Code, and LoRA training behind a statistical promotion gate. The shipped routing\n"
+        "profile defines no remote models, and loading a model never downloads it.\n\n"
+        "Learn it in this order:\n"
+        "  hearth doctor --offline        is it safe to use offline right now?\n"
+        "  hearth models list             which models exist; (default) marks what serves\n"
+        '  hearth run "hello"             one local completion\n'
+        "  hearth serve                   API + chat page at http://127.0.0.1:8080/chat\n"
+        '  hearth agent "..."             a bounded agent over files you allow\n'
+        "  hearth stats                   token savings (per process)"
+    ),
+    epilog=(
+        "Run it from the repo as: uv run --no-sync hearth COMMAND. A bare 'uv run' or a\n"
+        "partial 'uv sync' uninstalls mlx and silently drops you onto the echo stub.\n\n"
+        "Offline check: hearth doctor --offline (exit 0 = SAFE, 1 = UNSAFE).\n\n"
+        "Every command: hearth COMMAND --help. Full reference: man ./man/hearth.1.\n\n"
+        "Guide: docs/GUIDE.md (start with 'Learn HEARTH in 15 minutes')."
+    ),
     no_args_is_help=True,
     add_completion=False,
 )
-models_app = typer.Typer(help="Model registry: list, pull, remove, and convert models.")
-app.add_typer(models_app, name="models")
-rag_app = typer.Typer(help="Local RAG: ingest paths into a collection and query them.")
-app.add_typer(rag_app, name="rag")
-adapters_app = typer.Typer(help="LoRA adapter registry: list, promote, and retire adapters.")
-app.add_typer(adapters_app, name="adapters")
-prereg_app = typer.Typer(help="Pre-registration: declare the eval bar before training.")
-app.add_typer(prereg_app, name="prereg")
-plugins_app = typer.Typer(help="Third-party plugins discovered via entry points (Phase 7).")
-app.add_typer(plugins_app, name="plugins")
+models_app = typer.Typer(
+    help=(
+        "Model registry: list, download, remove, convert, export to Core ML.\n\n"
+        "The registry is config/models.yaml (or HEARTH_MODELS_YAML). 'models pull' is the\n"
+        "only command in HEARTH that downloads; every other load reads from disk only.\n\n"
+        "Examples:\n"
+        "  hearth models list\n"
+        "  hearth models pull mlx-community/Qwen2.5-3B-Instruct-4bit"
+    ),
+)
+app.add_typer(models_app, name="models", rich_help_panel=PANEL_START)
+rag_app = typer.Typer(
+    help=(
+        "Local RAG: chunk and index files into a collection, then search it.\n\n"
+        "Collections live in ~/.hearth/rag/NAME.db and hold the raw chunk text. The default\n"
+        "embedder (HEARTH_EMBEDDER=hash) is lexical: queries must share words with the text.\n\n"
+        "Examples:\n"
+        "  hearth rag ingest ~/notes --collection notes\n"
+        '  hearth rag query "descale the kettle" --collection notes'
+    ),
+)
+app.add_typer(rag_app, name="rag", rich_help_panel=PANEL_USE)
+adapters_app = typer.Typer(
+    help=(
+        "LoRA adapter registry: list, promote (from a measured report), retire.\n\n"
+        "Adapters are recorded in ~/.hearth/adapters.json as candidate, promoted or retired.\n"
+        "A promoted adapter is applied automatically to its task class when its base serves.\n\n"
+        "Examples:\n"
+        "  hearth adapters list --status candidate\n"
+        "  hearth adapters retire ADAPTER_ID"
+    ),
+)
+app.add_typer(adapters_app, name="adapters", rich_help_panel=PANEL_TRAIN)
+prereg_app = typer.Typer(
+    help=(
+        "Pre-registration: declare the eval bar before training, then commit it.\n\n"
+        "hearth eval --promote refuses unless a committed, unmodified pre-registration\n"
+        "declares the bar the run is judged against.\n\n"
+        "Examples:\n"
+        "  hearth prereg init --task classify --golden golden.jsonl --out prereg/classify.yaml\n"
+        "  hearth prereg check prereg/classify.yaml --golden golden.jsonl"
+    ),
+)
+app.add_typer(prereg_app, name="prereg", rich_help_panel=PANEL_TRAIN)
+plugins_app = typer.Typer(
+    help=(
+        "Third-party providers, vector stores and embedders found via entry points.\n\n"
+        "See docs/PLUGINS.md to write one.\n\n"
+        "Examples:\n"
+        "  hearth plugins list"
+    ),
+)
+app.add_typer(plugins_app, name="plugins", rich_help_panel=PANEL_EXTEND)
 console = Console()
 
 #: Characters of one agent step's observation shown in the terminal transcript. The loop has
@@ -176,13 +245,17 @@ def _agent_snippet(text: str, limit: int) -> str:
     return escape(flat)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_START)
 def version() -> None:
-    """Print the HEARTH version."""
+    """Print the HEARTH version.
+
+    Examples:
+      hearth version
+    """
     console.print(f"hearth {__version__}")
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_START)
 def doctor(
     offline: bool = typer.Option(
         False,
@@ -191,7 +264,31 @@ def doctor(
         "profile, model resolution and every load path; exits 1 when unsafe.",
     ),
 ) -> None:
-    """Run environment preflight checks (or, with --offline, the offline-safety checks)."""
+    """Check the environment; with --offline, decide if HEARTH is safe to use offline.
+
+    Plain doctor checks for Apple Silicon, enough memory, an importable mlx-lm, and a
+    writable ~/.hearth. A FAIL row is fatal. A WARN row (for example an unregistered
+    HEARTH_DEFAULT_MODEL, which is ignored) is not.
+
+    doctor --offline measures the offline posture of THIS shell's environment instead of
+    reading config: the routing profile the router would load has no remotes; the bind
+    host is loopback; HEARTH_ALLOW_DOWNLOADS is off; a model that is not on disk fails
+    with no connection attempted; every reachable model is on disk (the row names the
+    path); and train / models convert / models export-coreml are disk-only. Run it with
+    the same variables you serve with. It does not inspect firewalls or other processes.
+
+    Examples:
+      hearth doctor
+      hearth doctor --offline; echo $?
+      HEARTH_ROUTING_YAML=config/routing.finance.yaml hearth doctor --offline
+
+    Env: HEARTH_HOME, HEARTH_BACKEND, HEARTH_HOST, HEARTH_ALLOW_DOWNLOADS,
+    HEARTH_ROUTING_YAML, HEARTH_DEFAULT_MODEL, HEARTH_MODELS_YAML, HEARTH_EMBEDDER,
+    HF_HUB_CACHE, HF_HOME.
+
+    Exit: doctor: 0 ready (warnings allowed), 1 a fatal check failed.
+    doctor --offline: 0 SAFE offline, 1 UNSAFE (the last line names the failed rows).
+    """
     if offline:
         _doctor_offline()
         return
@@ -239,12 +336,49 @@ def _doctor_offline() -> None:
     console.print("[green]SAFE offline[/green] — no check found a path off this machine.")
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_USE)
 def serve(
-    host: str = typer.Option(None, help="Bind host (default from HEARTH_HOST / 127.0.0.1)."),
+    host: str = typer.Option(
+        None,
+        help="Bind host (default from HEARTH_HOST / 127.0.0.1). Anything but loopback "
+        "exposes the API to the network and makes doctor --offline UNSAFE.",
+    ),
     port: int = typer.Option(None, help="Bind port (default from HEARTH_PORT / 8080)."),
 ) -> None:
-    """Start the OpenAI-compatible gateway."""
+    """Start the OpenAI-compatible gateway and the /chat page on 127.0.0.1:8080.
+
+    Serves /v1/chat/completions, /v1/models, /v1/embeddings and the /v1/hearth/*
+    extensions to any OpenAI client (base_url http://127.0.0.1:8080/v1). For the built-in
+    chat page open http://127.0.0.1:8080/chat and paste the token once.
+
+    Routing profile: config/routing.yaml unless HEARTH_ROUTING_YAML names another. The
+    default defines zero remote models, so no request can leave this machine. A relative
+    HEARTH_ROUTING_YAML resolves against the repo root, ~ is expanded, and a named file
+    that does not exist stops serve from starting.
+
+    Token: every /v1/* route needs 'Authorization: Bearer TOKEN'. The token is created on
+    first run in ~/.hearth/token (mode 0600; $HEARTH_HOME/token). /chat,
+    /v1/hearth/admin/health and /v1/hearth/admin/ready need no token.
+
+    Readiness: on the mlx backend the default model loads in the background at startup
+    (HEARTH_WARMUP). GET /v1/hearth/admin/ready answers 200 once its weights are in
+    memory, else 503 with status 'loading' or 'failed' and a reason. Check backend= in
+    the banner: 'echo' means the test stub is answering, not a model.
+
+    Settings are read once at startup, so restart after changing any HEARTH_* variable.
+
+    Examples:
+      hearth serve
+      hearth serve --port 8081
+      HEARTH_ROUTING_YAML=config/routing.finance.yaml hearth serve
+
+    Env: HEARTH_HOST, HEARTH_PORT, HEARTH_BACKEND, HEARTH_ROUTING_YAML,
+    HEARTH_DEFAULT_MODEL, HEARTH_MODELS_YAML, HEARTH_REQUIRE_AUTH, HEARTH_WARMUP,
+    HEARTH_RAM_CEILING_GB, HEARTH_FILE_ROOTS, HEARTH_HOME.
+
+    Exit: runs until interrupted (Ctrl-C). Exits non-zero without serving when the
+    selected routing profile does not exist.
+    """
     import uvicorn
 
     from .gateway import create_app
@@ -285,7 +419,7 @@ def _log_hearth_to_stderr() -> None:
         log.setLevel(logging.INFO)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_USE)
 def run(
     prompt: str = typer.Argument(None, help="Prompt text. Omit to read from stdin."),
     max_tokens: int = typer.Option(512, help="Max tokens to generate."),
@@ -293,7 +427,10 @@ def run(
         None, "--file", help="Read the prompt from this file instead of the argument."
     ),
     intent: str = typer.Option(
-        None, "--intent", help="Routing intent hint (recorded; used by the router in Phase 2)."
+        None,
+        "--intent",
+        help="Task class hint that skips classification: summarize, extract, classify, rank, "
+        "draft, code, reason or chat. Picks that class's model under 'auto'.",
     ),
     model: str = typer.Option(
         "auto",
@@ -301,7 +438,26 @@ def run(
         help="Registry model id to serve this prompt. 'auto' lets the routing ladder pick.",
     ),
 ) -> None:
-    """Run a one-shot local completion and print the result."""
+    """Run one prompt through the local model and print the answer.
+
+    Always local: run never escalates, whatever the routing profile. It has no tools, so
+    it cannot open a file you mention: pass --file to send a file's text as the prompt,
+    or use hearth agent. The answer goes to stdout; a 'served by MODEL via BACKEND' line
+    goes to stderr, so piping the answer stays clean.
+
+    Examples:
+      hearth run "Summarize: HEARTH keeps inference on this Mac."
+      hearth run --file notes.txt --max-tokens 256
+      echo "crash when saving" | hearth run --intent classify
+      hearth run --model mlx-community/Qwen2.5-3B-Instruct-4bit "hello"
+
+    Env: HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_MODELS_YAML, HEARTH_ROUTING_YAML,
+    HEARTH_HOME.
+
+    Exit: 0 answered; 1 empty prompt; 2 --model names no servable registry model,
+    HEARTH_DEFAULT_MODEL names an unregistered id, or the selected routing profile
+    is missing.
+    """
     _require_registered_default()
     if file is not None:
         text = file.read_text()
@@ -411,7 +567,7 @@ def _embedder_required():
         raise typer.Exit(code=1) from None
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_USE)
 def agent(
     task: str = typer.Argument(None, help="What the agent should do. Omit to read from stdin."),
     collection: str = typer.Option(
@@ -448,29 +604,37 @@ def agent(
         help="Registry model id for every step. 'auto' lets the routing ladder pick.",
     ),
 ) -> None:
-    """Run a bounded, tool-using local agent over your own data (docs/AGENT.md).
+    """Run a bounded, read-only, tool-using local agent over your own files.
 
-    The agent plans, calls **one** tool, observes the result, and repeats until it answers or
-    hits a bound — every generation local, every step in the transcript. Unlike
-    ``hearth run`` (and unlike ``/v1/chat/completions``), it can actually *read* the files it
-    talks about, so "how many CSVs are under statements/" is answered from the filesystem
-    rather than from the model's imagination:
+    The agent plans, calls one tool, reads the result, and repeats until it answers or
+    hits a bound. Every generation is local and it never escalates. Unlike hearth run
+    (and plain /v1/chat/completions) it can actually read the files it talks about, so a
+    question about a directory is answered from the filesystem, not from imagination.
 
-        HEARTH_FILE_ROOTS=~/statements hearth agent "how many CSV files are there?"
+    Tools are assembled from what is present, and the header line lists them:
+    list_files and read_file always (deny-by-default: they refuse every path outside
+    HEARTH_FILE_ROOTS); rag_search with --collection; finance_total / finance_explain /
+    finance_rows when a ledger exists at ~/.hearth/finance/ledger.db. There are no write,
+    shell or network tools, and deliberately no flag to add or un-vet tools: only tools
+    whose code lives in hearth.agent run, which is what the no-network test covers. See
+    docs/AGENT.md.
 
-    **The exit code is the stop reason.** ``0`` only when the model answered; ``1`` when the
-    run stopped at a bound or a failure (and then there is no answer to print — ``AgentRun``
-    cannot hold one); ``2`` when the agent was never started — an impossible bound, or a
-    toolset that could reach nothing. A run that exhausted its budget must never read like a
-    completed one, in a terminal or in a pipeline.
+    Read the step table before trusting the answer: small local models retry failed
+    ideas and invent plausible filenames.
 
-    Tools are assembled from the collaborators that are actually present — the file tools
-    always, ``rag_search`` with ``--collection``, the ledger tools when a finance ledger
-    exists — and what was assembled is printed. There is deliberately **no flag to disable
-    tool vetting**: an agent here runs only tools whose code lives in ``hearth.agent``, which
-    is the source the no-network AST test covers, and a flag that switched that off from a
-    shell would hand back the one thing a tool cannot lie about. A caller who needs their own
-    tool writes Python against the library (``docs/AGENT.md`` §4, §5.1).
+    Examples:
+      HEARTH_FILE_ROOTS=~/statements hearth agent "how many CSV files are there?"
+      hearth agent --collection notes "when should I descale the kettle?"
+      HEARTH_FILE_ROOTS=~/notes hearth agent --json "list the markdown files" > run.json
+
+    Env: HEARTH_FILE_ROOTS (colon-separated readable directories; unset = none),
+    HEARTH_FILE_MAX_BYTES, HEARTH_BACKEND, HEARTH_DEFAULT_MODEL, HEARTH_ROUTING_YAML,
+    HEARTH_EMBEDDER, HEARTH_HOME.
+
+    Exit (the stop reason): 0 the model answered, and only then; 1 the run stopped at a
+    bound or a failure (max_iterations, timeout, token_budget, invalid_output,
+    provider_error, egress_refused) and there is no answer; 2 never started (an
+    impossible bound, an empty --collection, an unknown --model, or nothing reachable).
     """
     from .agent import Agent, AgentConfigError, Budget, local_toolset
     from .config import Settings
@@ -609,14 +773,29 @@ def agent(
         raise typer.Exit(code=1)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_USE)
 def mcp() -> None:
-    """Launch the HEARTH MCP server (stdio) so agents like Claude Code can offload subtasks.
+    """Start the stdio MCP server so Claude Code can hand subtasks to the local model.
 
-    Registers HEARTH as an MCP tool provider (summarize/classify/extract/draft/rag_query),
-    each running on the local model with escalation disabled — the delegated work never
-    spends the agent's frontier budget (ADR-010, docs/INTEGRATION.md). Requires the ``mcp``
-    extra; the tool logic itself lives in :mod:`hearth.mcp.tools` and needs no extras.
+    Exposes hearth_summarize, hearth_classify, hearth_extract, hearth_draft, the
+    path-taking hearth_summarize_file / hearth_classify_file / hearth_extract_file, and
+    hearth_rag_query. Every tool runs on the local model with escalation disabled, under
+    any routing profile, in-process (no HTTP, no token). Prefer the *_file tools for
+    anything confidential: HEARTH opens the file, so its content never enters the calling
+    agent's context. Those tools refuse every path outside HEARTH_FILE_ROOTS.
+
+    Register it with the venv's absolute path; an MCP subprocess has no activated venv
+    and no guaranteed working directory. Needs the mcp extra.
+
+    Examples:
+      hearth mcp
+      claude mcp add hearth -e HEARTH_FILE_ROOTS="$HOME/docs" -- \\
+        ~/Claude/apps/HEARTH/.venv/bin/hearth mcp
+
+    Env: HEARTH_FILE_ROOTS, HEARTH_FILE_MAX_BYTES, HEARTH_BACKEND, HEARTH_DEFAULT_MODEL,
+    HEARTH_ROUTING_YAML, HEARTH_EMBEDDER, HEARTH_HOME.
+
+    Exit: 0 when the client closes stdin; 1 when the mcp extra is not installed.
     """
     _require_registered_default()
     try:
@@ -638,17 +817,23 @@ def mcp() -> None:
         raise typer.Exit(code=1) from None
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_USE)
 def stats(
     since: str = typer.Option(
         None, "--since", help="Rollup window, e.g. 7d / 24h / 30m (default: all)."
     ),
 ) -> None:
-    """Show token-savings and escalation rollups (ARCHITECTURE §8).
+    """Show token-savings, escalation and latency rollups for THIS process.
 
-    Phase 2 keeps metrics in-memory per process, so a fresh CLI invocation reports an
-    empty store; the numbers accumulate within a running ``hearth serve`` daemon. A future
-    phase persists records to JSONL so the CLI can roll up across restarts.
+    Metrics are kept in memory per process and hold no prompt or response text. A fresh
+    'hearth stats' therefore always shows zeros; the numbers accumulate inside a running
+    hearth serve. For a running server, read GET /v1/hearth/admin/metrics?since=24h
+    (same rollup, as JSON, token required).
+
+    Examples:
+      hearth stats
+      hearth stats --since 24h
+      curl -s -H "Authorization: Bearer $(cat ~/.hearth/token)" http://127.0.0.1:8080/v1/hearth/admin/metrics?since=24h
     """
     from .gateway.app import _parse_since
     from .observability import get_metrics
@@ -673,7 +858,19 @@ def stats(
 
 @models_app.command("list")
 def models_list() -> None:
-    """List models in the registry."""
+    """List the models in the registry; (default) marks the one that serves 'auto'.
+
+    The registry is config/models.yaml (or HEARTH_MODELS_YAML). The (default) marker
+    reflects HEARTH_DEFAULT_MODEL when it names a registered id, so this is the way to
+    confirm which model will answer. Listing does not check that weights are on disk;
+    hearth doctor --offline does.
+
+    Examples:
+      hearth models list
+      HEARTH_DEFAULT_MODEL=mlx-community/Qwen2.5-3B-Instruct-4bit hearth models list
+
+    Env: HEARTH_MODELS_YAML, HEARTH_DEFAULT_MODEL.
+    """
     registry = get_registry()
     table = Table(title="hearth models", show_header=True, header_style="bold")
     table.add_column("id")
@@ -698,13 +895,20 @@ def models_list() -> None:
 
 @models_app.command("pull")
 def models_pull(model_id: str = typer.Argument(..., help="Registry model id to download.")) -> None:
-    """Download a model's weights from its registry `source` repo.
+    """Download a registry model's weights into ~/.hearth/models (needs the network).
 
-    The ONE deliberate download path in HEARTH: every load path (serve, train, convert,
-    export-coreml) resolves from disk only and fails rather than fetch
-    (``tests/test_offline_load_paths.py`` holds that line). Respects the ``HF_ENDPOINT``
-    mirror and ``HF_HUB_OFFLINE`` env vars — hosts are never hardcoded, so a locked-down
-    mirror works with no code change.
+    The ONE deliberate download path in HEARTH: serve, chat, agent, MCP, RAG, train,
+    models convert and models export-coreml all load from disk only and fail rather
+    than fetch. Only registry ids are accepted (hearth models list). Respects the
+    HF_ENDPOINT mirror and HF_HUB_OFFLINE; no host is hardcoded.
+
+    Examples:
+      hearth models pull mlx-community/Qwen2.5-3B-Instruct-4bit
+      HF_ENDPOINT=https://mirror.example hearth models pull mlx-community/Qwen2.5-14B-Instruct-4bit
+
+    Env: HEARTH_HOME, HEARTH_MODELS_YAML, HF_ENDPOINT, HF_HUB_OFFLINE.
+
+    Exit: 0 downloaded (or nothing to pull, e.g. echo); 1 unknown model id.
     """
     registry = get_registry()
     entry = registry.get(model_id)
@@ -726,7 +930,19 @@ def models_pull(model_id: str = typer.Argument(..., help="Registry model id to d
 
 @models_app.command("rm")
 def models_rm(model_id: str = typer.Argument(..., help="Registry model id to remove.")) -> None:
-    """Remove a model's cached weights from the local models dir."""
+    """Delete a model's downloaded copy from ~/.hearth/models.
+
+    Removes only HEARTH's own copy (models--ORG--NAME). It does not touch the Hugging
+    Face hub cache (HF_HUB_CACHE / ~/.cache/huggingface/hub), which the loader also
+    reads, so a model can still resolve after rm; hearth doctor --offline shows where.
+
+    Examples:
+      hearth models rm mlx-community/Qwen2.5-3B-Instruct-4bit
+
+    Env: HEARTH_HOME, HEARTH_MODELS_YAML.
+
+    Exit: 0 removed; 1 unknown id, or not present under ~/.hearth/models.
+    """
     import shutil
 
     registry = get_registry()
@@ -758,15 +974,20 @@ def models_convert(
     q_bits: int = typer.Option(4, "--q-bits", help="Quantization bit width (2/3/4/6/8)."),
     q_group_size: int = typer.Option(64, "--q-group-size", help="Quantization group size."),
 ) -> None:
-    """Quantize/convert a checkpoint into an MLX-servable model (ARCHITECTURE §5, Phase 7).
+    """Quantize or convert a checkpoint on disk into an MLX-servable model.
 
-    Real conversion needs the ``[mlx]`` extra and the source on disk (``hearth models pull``
-    or a local path). It never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
+    Needs the mlx extra and the source on disk (hearth models pull, or a local path). It
+    never downloads unless HEARTH_ALLOW_DOWNLOADS=1. To serve the result, add it to
+    config/models.yaml (the registry is data).
 
-        uv sync --extra mlx --extra mcp --extra dev --extra files
-        hearth models convert --source <id> --out ~/.hearth/models/<id>-q4 --q-bits 4
+    Examples:
+      hearth models convert --source ./my-checkpoint --out ~/.hearth/models/mine-q8 --q-bits 8
+      hearth models convert --source ./my-checkpoint --out ./my-checkpoint-mlx --no-quantize
 
-    Add the produced model to ``config/models.yaml`` to serve it (registry is data, §5).
+    Env: HEARTH_HOME, HEARTH_ALLOW_DOWNLOADS, HF_HUB_CACHE, HF_HOME.
+
+    Exit: 0 converted; 1 invalid options, source not on disk, output exists, or mlx
+    missing.
     """
     from .convert import ConvertConfig, ConvertUnavailableError
     from .convert import convert as run_convert
@@ -815,14 +1036,20 @@ def models_export_coreml(
         "ADR-011). Default off keeps Approach A (padded prefill, ANE) as the shipped path.",
     ),
 ) -> None:
-    """Export a checkpoint to a Core ML ``.mlpackage`` for the on-device Swift path (Phase 6).
+    """Export a checkpoint on disk to a Core ML .mlpackage for the offline Swift path.
 
-    The produced ``.mlpackage`` is loaded by the Swift ``CoreMLProvider`` (see swift/OFFLINE.md)
-    for fully-offline, ANE-accelerated inference. Real export needs the ``[coreml]`` extra and
-    the source on disk; it never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
+    The .mlpackage is loaded by the Swift CoreMLProvider (swift/OFFLINE.md) for
+    fully-offline, daemon-free inference. Needs the coreml extra (add --extra coreml to
+    the one-command sync) and the source on disk; it never downloads unless
+    HEARTH_ALLOW_DOWNLOADS=1.
 
-        uv sync --extra mlx --extra mcp --extra dev --extra files --extra coreml
-        hearth models export-coreml --source <id> --out ~/.hearth/coreml/<id>
+    Examples:
+      hearth models export-coreml --source ./my-checkpoint --out ~/.hearth/coreml/mine
+      hearth models export-coreml --source ./ckpt --out ./ckpt.mlpackage --compute-units cpuOnly
+
+    Env: HEARTH_HOME, HEARTH_ALLOW_DOWNLOADS, HF_HUB_CACHE, HF_HOME.
+
+    Exit: 0 exported; 1 invalid options, source not on disk, or coremltools missing.
     """
     from .coreml import CoreMLExportConfig, CoreMLExportUnavailableError
     from .coreml import export as run_export
@@ -865,7 +1092,19 @@ def rag_ingest(
     size: int = typer.Option(800, "--size", help="Chunk size in characters."),
     overlap: int = typer.Option(100, "--overlap", help="Chunk overlap in characters."),
 ) -> None:
-    """Chunk, embed, and store a path into a local RAG collection (ARCHITECTURE §6)."""
+    """Chunk, embed and store a file or directory into a local RAG collection.
+
+    The collection is ~/.hearth/rag/COLLECTION.db and holds the raw chunk text; delete
+    that file to purge it. The default embedder (HEARTH_EMBEDDER=hash) is offline and
+    lexical, not semantic. HEARTH_EMBEDDER=mlx does not work today (docs/BUGS.md B-011).
+
+    Examples:
+      hearth rag ingest ~/notes --collection notes
+      hearth rag ingest README.md --collection docs --size 400 --overlap 50
+
+    Env: HEARTH_EMBEDDER, HEARTH_EMBED_DIM, HEARTH_EMBED_MODEL, HEARTH_VECTOR_STORE,
+    HEARTH_HOME.
+    """
     from .memory import RagIndex
 
     index = RagIndex()
@@ -890,7 +1129,20 @@ def rag_query(
         False, "--answer", help="Answer with the local model grounded in retrieved chunks."
     ),
 ) -> None:
-    """Retrieve the top-k chunks for a query; optionally answer locally (ARCHITECTURE §6)."""
+    """Search a RAG collection; with --answer, have the local model answer from the hits.
+
+    Prints a table of score, source and text for the top --k chunks. --answer sends the
+    retrieved chunks plus your question to the local model (never escalated).
+
+    Examples:
+      hearth rag query "how often to descale the kettle" --collection notes --k 2
+      hearth rag query "descale" --collection notes --answer
+
+    Env: HEARTH_EMBEDDER, HEARTH_EMBED_DIM, HEARTH_VECTOR_STORE, HEARTH_BACKEND,
+    HEARTH_DEFAULT_MODEL, HEARTH_HOME.
+
+    Exit: 0, including for a missing or empty collection (it says so).
+    """
     from .memory import RagIndex
 
     if answer:  # --answer generates with the default model; retrieval alone does not
@@ -921,11 +1173,18 @@ def rag_query(
         console.print(result.answer, markup=False, highlight=False)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_TRAIN)
 def train(
     task: str = typer.Option(..., "--task", help="Task class the adapter targets (e.g. extract)."),
-    base: str = typer.Option(..., "--base", help="Base model id to fine-tune (LoRA)."),
-    data: Path = typer.Option(..., "--data", help="Dataset JSONL (see hearth.training.dataset)."),
+    base: str = typer.Option(
+        ..., "--base", help="Base model registry id to fine-tune (LoRA); must be on disk."
+    ),
+    data: Path = typer.Option(
+        ...,
+        "--data",
+        help="Dataset JSONL: a hearth.dataset.header line, then at least 2 "
+        '{"prompt","completion"} or {"messages"} rows.',
+    ),
     out: Path = typer.Option(
         None, "--out", help="Output dir for the run (default: ~/.hearth/train/<run-id>)."
     ),
@@ -934,17 +1193,23 @@ def train(
         True, "--register/--no-register", help="Register the result as a candidate adapter."
     ),
 ) -> None:
-    """Train a LoRA adapter and register it as a *candidate* (ARCHITECTURE §7, ADR-006).
+    """Train a LoRA adapter on disk-resident weights and register it as a candidate.
 
-    Real training needs the ``[mlx]`` extra and the base model on disk (``hearth models
-    pull``). It never downloads unless ``HEARTH_ALLOW_DOWNLOADS=1``:
+    Needs the mlx extra and the base model on disk (hearth models pull). It never
+    downloads unless HEARTH_ALLOW_DOWNLOADS=1, and it checks the base model before
+    creating the run directory, so a failed run leaves nothing behind. Training only
+    produces a candidate; it serves nothing until it passes the promotion gate:
+    hearth prereg init, commit the file, then hearth eval ADAPTER --prereg FILE --promote.
 
-        uv sync --extra mlx --extra mcp --extra dev --extra files
-        hearth train --task extract --base <id> --data data.jsonl
+    Examples:
+      hearth train --task classify --base mlx-community/Qwen2.5-3B-Instruct-4bit --data data.jsonl
+      hearth train --task classify --base mlx-community/Qwen2.5-3B-Instruct-4bit \\
+        --data data.jsonl --iters 50 --no-register
 
-    Training is eval-gated: a candidate must beat the incumbent on a golden set before it
-    can be promoted (``hearth adapters promote``). This command only *produces a
-    candidate*; promotion is a separate, deliberate step.
+    Env: HEARTH_HOME, HEARTH_ALLOW_DOWNLOADS, HF_HUB_CACHE, HF_HOME.
+
+    Exit: 0 trained (and registered); 1 dataset error, base model not on disk, mlx
+    missing, or the training process failed (its exit code and stderr tail are shown).
     """
     import subprocess
     from datetime import UTC, datetime
@@ -1018,7 +1283,7 @@ def train(
     )
 
 
-@app.command("eval")
+@app.command("eval", rich_help_panel=PANEL_TRAIN)
 def eval_adapter(
     adapter_id: str = typer.Argument(..., help="Candidate adapter id to score."),
     golden: Path = typer.Option(
@@ -1064,18 +1329,28 @@ def eval_adapter(
         False, "--promote", help="Promote the candidate if the gate passes (needs --prereg)."
     ),
 ) -> None:
-    """Score a candidate adapter against a golden set and (optionally) promote it (ADR-006).
+    """Score a candidate adapter against a golden set, and optionally promote it.
 
-    Wires the candidate through the provider's per-request adapter slot (``GenRequest.adapter``),
-    scores it with the objective metric at ``temperature=0`` and compares it against the
-    incumbent — **and when no adapter is promoted for the task, the incumbent is the base
-    model**, never a bare "any score above zero" (LEARNING_plan F2). The comparison is paired
-    over the per-example vectors and must clear ``alpha``; the candidate must also beat the
-    empty / majority-label / copy-input baselines. ``--promote`` additionally requires a
-    ``--prereg`` that is git-committed and matches this run.
+    The candidate is scored with an objective metric at temperature 0 and compared,
+    pairwise per example, against the incumbent: the promoted adapter for the task, or
+    the base model when none is promoted. To pass, it must clear the significance level
+    (exact McNemar or paired bootstrap), exceed the margin, have at least min_n examples,
+    and beat the empty / majority-label / copy-input baselines. --promote additionally
+    requires a --prereg that is git-committed, unmodified and matches this run; its bar
+    overrides --alpha / --margin / --min-n. Real scores need HEARTH_BACKEND=mlx; the echo
+    backend runs the plumbing only.
 
-    Real scoring needs the MLX backend (``HEARTH_BACKEND=mlx``) + a cached base model; the
-    echo backend runs the plumbing offline but won't produce meaningful scores.
+    Examples:
+      hearth eval ADAPTER_ID --golden golden.jsonl
+      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml --report-json r.json
+      hearth eval ADAPTER_ID --golden golden.jsonl --prereg prereg/c.yaml --promote
+
+    Env: HEARTH_BACKEND, HEARTH_HOME, HEARTH_MODELS_YAML.
+
+    Exit: without --promote, 0 once the gate was measured, whether it passed or failed
+    (read the gate: line); 1 when it refused to measure (unknown adapter, bad golden set
+    or prereg, temperature above 0, non-determinism). With --promote, 0 only when the
+    adapter was promoted, else 1.
     """
     import json as _json
     from datetime import UTC, datetime
@@ -1324,12 +1599,19 @@ def prereg_init(
     min_effect: float = typer.Option(0.0, "--min-effect", help="Minimum lift that would count."),
     min_n: int = typer.Option(30, "--min-n", help="Minimum golden-set size."),
 ) -> None:
-    """Scaffold a pre-registration for a golden set — then fill in the prose and commit it.
+    """Scaffold a pre-registration for a golden set; then write the prose and commit it.
 
-    The generated file pins the golden set by content sha and the decode parameters by
-    fingerprint, so the harness can later prove the run it gated was the run that was
-    registered. The hypothesis / stopping rule / kill condition are left blank on purpose:
-    a bar written by the tool is not a pre-registration.
+    The file pins the golden set by content sha and the decode parameters by
+    fingerprint, so the gate can later prove the run it judged is the run that was
+    registered. hypothesis, stopping_rule and kill_condition are left blank on purpose:
+    prereg check and eval --promote refuse the file until you write them, because a bar
+    written by the tool is not a pre-registration.
+
+    Examples:
+      hearth prereg init --task classify --golden golden.jsonl
+      hearth prereg init --task classify --golden golden.jsonl --out prereg/classify.yaml
+
+    Exit: 0 written (or printed); 1 the golden set is unreadable or empty.
     """
     from .training.prereg import template
 
@@ -1369,7 +1651,19 @@ def prereg_check(
         None, "--golden", help="Also check this golden set still hashes to the registered sha."
     ),
 ) -> None:
-    """Validate a pre-registration and report whether git has it committed and unmodified."""
+    """Validate a pre-registration and report whether git has it committed, unmodified.
+
+    Prints the registered bar (task, metric, golden sha, alpha, min_effect, min_n, test,
+    baselines). Refuses a file whose hypothesis / stopping_rule / kill_condition are
+    blank or that drops a default baseline. With --golden, also checks the golden set
+    still hashes to the registered sha.
+
+    Examples:
+      hearth prereg check prereg/classify.yaml
+      hearth prereg check prereg/classify.yaml --golden golden.jsonl
+
+    Exit: 0 valid, committed and unmodified (and the golden set matches); 1 otherwise.
+    """
     from .training.prereg import PreRegError, load_prereg, verify_committed
 
     try:
@@ -1422,9 +1716,20 @@ def prereg_check(
 @adapters_app.command("list")
 def adapters_list(
     task: str = typer.Option(None, "--task", help="Filter by task class."),
-    status: str = typer.Option(None, "--status", help="Filter by status."),
+    status: str = typer.Option(
+        None, "--status", help="Filter by status: candidate, promoted or retired."
+    ),
 ) -> None:
-    """List adapters in the registry (candidate/promoted/retired)."""
+    """List registered adapters with their task, base model, status and eval scores.
+
+    Examples:
+      hearth adapters list
+      hearth adapters list --task classify --status promoted
+
+    Env: HEARTH_HOME.
+
+    Exit: 0; 1 an invalid --status.
+    """
     from .registry import AdapterError
 
     try:
@@ -1466,17 +1771,22 @@ def adapters_promote(
         None, "--incumbent-score", hidden=True, help="REMOVED — a typed score is not evidence."
     ),
 ) -> None:
-    """Promote a candidate from a measured eval report (ARCHITECTURE §7, ADR-006).
+    """Promote a candidate from a measured eval report and a committed pre-registration.
 
-    The gate is **recomputed here** from the persisted per-example vectors under the bar in
-    the committed pre-registration — the report is evidence, not a verdict to be trusted.
-    Both ``--report`` and ``--prereg`` are required; the normal path is
-    ``hearth eval --prereg <file> --promote``, which measures and promotes in one step.
+    The gate is recomputed here from the report's per-example vectors under the bar in
+    the committed pre-registration: the report is evidence, not a verdict. Both --report
+    (from hearth eval --report-json) and --prereg are required. The usual one-step path
+    is hearth eval ADAPTER --golden G --prereg P --promote. The old --candidate-score /
+    --incumbent-score flags are removed: a typed score names no golden set, metric or
+    model, so it is not evidence.
 
-    ``--candidate-score`` / ``--incumbent-score`` are gone. They let an operator type two
-    floats and promote on them, with no golden set, no metric, and no measurement behind
-    either number (LEARNING_plan F3) — that was the path the promotion in docs/RESULTS.md
-    actually used.
+    Examples:
+      hearth adapters promote ADAPTER_ID --report r.json --prereg prereg/classify.yaml
+
+    Env: HEARTH_HOME.
+
+    Exit: 0 promoted; 1 refused (missing or unusable report, uncommitted or mismatched
+    prereg, gate failed); 2 the removed typed-score flags were used.
     """
     import json as _json
 
@@ -1576,7 +1886,15 @@ def adapters_promote(
 def adapters_retire(
     adapter_id: str = typer.Argument(..., help="Adapter id to retire."),
 ) -> None:
-    """Retire an adapter so it no longer serves."""
+    """Retire an adapter so it is no longer served, even if it was promoted.
+
+    Examples:
+      hearth adapters retire ADAPTER_ID
+
+    Env: HEARTH_HOME.
+
+    Exit: 0 retired; 1 unknown adapter.
+    """
     from .registry import AdapterError
 
     try:
@@ -1589,12 +1907,16 @@ def adapters_retire(
 
 @plugins_app.command("list")
 def plugins_list() -> None:
-    """List third-party plugins discovered via entry points (Phase 7, docs/PLUGINS.md).
+    """List plugins registered under HEARTH's entry-point groups, and whether each loaded.
 
-    Shows every entry point registered in the ``hearth.providers`` /
-    ``hearth.vector_stores`` / ``hearth.embedders`` groups, with its status: ``ok`` if it
-    imported and satisfied the group's Protocol, else why it was skipped. A broken plugin
-    is reported here rather than crashing the server.
+    Covers the hearth.providers, hearth.vector_stores and hearth.embedders groups. Status
+    is 'ok' when the plugin imported and satisfied its Protocol, else why it was
+    skipped; a broken plugin is reported here instead of crashing the server. Select one
+    by name with HEARTH_BACKEND, HEARTH_VECTOR_STORE or HEARTH_EMBEDDER. See
+    docs/PLUGINS.md.
+
+    Examples:
+      hearth plugins list
     """
     from .plugins import discover_all
 
