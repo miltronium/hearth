@@ -122,6 +122,11 @@ must fail when the fix is reverted.
 - ~~[B-075](#b-075) `routing.finance.yaml` does not pin the `embed` class: `intent: embed` reaches the registry default 7B (P3)~~ — fixed in `c3cb201`
 - ~~[B-076](#b-076) CLI prints "Routing profile not found:" for a profile that exists but names an unservable rung (P3)~~ — fixed in `c3cb201`
 - ~~[B-077](#b-077) Status/doctor report "policy loader unavailable" for a profile with a bad model rung, hiding the reason (P3)~~ — fixed in `c3cb201`
+- ~~[B-090](#b-090) Shape scripts printed workbook metadata (custom property names, print-area names) to stderr via openpyxl warnings (P0)~~ — fixed in `a77df5d`
+- ~~[B-091](#b-091) A model-proposed draft name printed an account number two digits at a time (P0)~~ — fixed in `aa80aec`
+- ~~[B-092](#b-092) hearth.finance no-network AST test skipped relative imports and importlib (P1)~~ — fixed in `77ee24e`
+- ~~[B-093](#b-093) A vocabulary-word preamble (`Account Type,Credit Card`) was taken as the header (P2)~~ — fixed in `9ef10e6`
+- ~~[B-094](#b-094) A UTF-8 BOM stayed in the first header cell: withheld by peek, copied into drafts (P3)~~ — fixed in `5921df6`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1331,6 +1336,91 @@ must fail when the fix is reverted.
   the real one (which rung, which file).
 - **Fix outline:** report `str(exc)` for a `RoutingProfileNotFoundError`.
 
+### B-090
+**Both shape scripts printed workbook metadata to stderr: openpyxl `warnings.warn` quotes it**
+
+- **Priority:** P0 (privacy) · **Status:** **FIXED** in `a77df5d` · **Effort:** S
+- **Evidence:** reviewer + integrator, synthetic `/tmp/peek_fx/custom.xlsx`: `hearth_peek.py`
+  and `hearth_map_draft.py` printed `UserWarning: Unknown type for HOLDER Jane Q Public SSN
+  123-45-6789` on stderr (openpyxl `packaging/custom.py:213`, a custom document property of
+  an unknown type). Same channel: `reader/workbook.py:118` (print-area defined name, quoted)
+  and `:102` (defined name for a missing sheet). `mcp/files.py:_silenced` closed pypdf's
+  logger but not `warnings`; `styles/cell_style.py:188` also `print()`s to stdout.
+- **Fix:** `files._quiet_parse()` wraps every handler in `read_text_file` / `read_table`:
+  warnings ignored, parser loggers silenced, `sys.stdout`/`sys.stderr` redirected to a
+  discarded buffer, under a lock so overlapping swaps cannot restore out of order.
+- **Acceptance test:** `tests/test_mcp_files.py` (warning recorder forced to "always" +
+  capfd, three metadata variants x both readers; restore-on-raise; a noisy handler), both
+  scripts in a real subprocess with `stderr == ""`, both scripts' test helpers assert empty
+  stderr and no warning on every run, and both property tests mix in hostile workbooks
+  (`tests/fixtures/hostile_statements.py`). Mutants: no `simplefilter` → 21 fail; no
+  `simplefilter` and no redirects → the subprocess tests fail on the exact lines.
+- **Remains:** while a parse runs, another thread's stdout/stderr output is dropped (not
+  leaked). Acceptable for the CLI scripts; noted for the MCP/gateway processes.
+
+### B-091
+**A model-proposed draft name printed an account number two digits at a time**
+
+- **Priority:** P0 (privacy) · **Status:** **FIXED** in `aa80aec` · **Effort:** S
+- **Evidence:** `shape.is_printable_slug` allowed `\d{1,2}` per hyphen word; a fake proposer
+  returning `account-number-98-76-54-32-10` printed `draft D1 written into the --out
+  directory: account-number-98-76-54-32-10.yaml`. The property test's `\d{3,}` check could
+  not see 2-digit groups.
+- **Fix:** `is_printable_slug` allows vocabulary words only, no digits. `draft_label(name,
+  rank)` strips only the `-{rank}` suffix `unique_name` appends; the rank is already printed
+  as `D{rank}`, so it is the only number that can appear. Anything else is withheld.
+- **Acceptance test:** `tests/test_map_draft_privacy.py`: the reviewer's name is withheld;
+  a parametrized `draft_label` table; the hostile property model proposes digit groups half
+  the time and every printed label may hold no digit but its rank. Mutants: `\d{1,2}`
+  re-allowed → 10 fail; any trailing `-digits` stripped → 6 fail.
+
+### B-092
+**The hearth.finance no-network AST test skipped relative imports and dynamic imports**
+
+- **Priority:** P1 (a privacy gate that was not one) · **Status:** **FIXED** in `77ee24e` ·
+  **Effort:** S
+- **Evidence:** `tests/test_finance_aggregate.py` checked only `ImportFrom` with
+  `node.level == 0`, so `from ..providers import remote` passed, and
+  `importlib.import_module("socket")` names its module in a string. Both planted in
+  `shape.py` → the old test passed 2/2.
+- **Fix:** relative imports are resolved to absolute names; `hearth.*` imports must be in
+  `hearth.finance`, `hearth.mcp.files` or `hearth.config`; `importlib`, `__import__`,
+  `import_module` and `builtins` are refused as imports, names or attributes; the two
+  admitted outside modules are checked one hop out for transport imports.
+- **Acceptance test:** 7 planted escape hatches (relative/absolute providers, `from .. import
+  providers`, gateway, importlib forms, `__import__`) each fail the new test.
+
+### B-093
+**A preamble of vocabulary words used as values was taken as the header**
+
+- **Priority:** P2 (privacy-adjacent: printed a value; correctness: wrong `skip_rows`) ·
+  **Status:** **FIXED** in `9ef10e6` · **Effort:** S
+- **Evidence:** `Account Type,Credit Card` above `Date,Description,Amount`: the old rule
+  ("first row with 2+ vocabulary names", `shape.py` `MIN_KNOWN`) chose the preamble, so both
+  scripts printed "Credit Card" and map_draft drafted `skip_rows: 0`.
+- **Fix:** `shape.find_header` takes the first row that has 2+ vocabulary names, no value of
+  its own (`is_data_like`: no numeric date, no bare number), a data-like row directly below,
+  and at least the data's modal populated width. Otherwise no header.
+- **Acceptance test:** fixture `VOCAB_PREAMBLE_CSV` through both scripts (header row 2,
+  `skip_rows: 1`, draft verifies and parses); a parametrized `find_header` table, one case
+  per rule; property-test oracles restate the rule independently. Each rule disabled alone
+  fails at least one test; the old rule fails 20.
+- **Remains:** a full-width vocabulary-only preamble sitting directly on data, with no real
+  header, would still be named; the bound is unchanged (vocabulary cells only, no digit).
+
+### B-094
+**A UTF-8 BOM stayed in the first header cell**
+
+- **Priority:** P3 · **Status:** **FIXED** in `5921df6` · **Effort:** S
+- **Evidence:** Excel "CSV UTF-8" (`/tmp/md_fx/in/G_bom.csv`): peek printed column 0 as
+  `(withheld)`, map_draft drafted `date_column: "<BOM>Date"` (invisible in the YAML), and a
+  BOM-prefixed JSON array was refused by `json.loads`.
+- **Fix:** `files._decode` uses `utf-8-sig`; `_cell_text` strips U+FEFF at a workbook cell's
+  edges. Drafts, peek and the parser all read through `read_table`, so they agree.
+- **Acceptance test:** BOM CSV/JSON/text/xlsx reader tests; peek names `Date`; map_draft
+  drafts `Date`, verifies, and `parse_rows` parses under the draft; 20% of property-test CSVs
+  carry a BOM. Mutant: plain `utf-8` → 9 fail.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -1409,3 +1499,8 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `36157af` | **B-070 (serving side).** `ModelPool.resolve("")`/`("auto")` and the router's default fall-through raise `UnregisteredDefaultModelError`. |
 | `1a872a2` | **B-071.** An abandoned `/v1/hearth/agent` stream cancels the run between steps and mid-generation (keepalive + `_close_on_disconnect` + `cancel_scope`). |
 | `c3cb201` | **B-075, B-076, B-077.** Finance profile pins `embed` (no 7B warmup); 'Routing profile unusable' label; status probe shows the routing error. |
+| `a77df5d` | **B-090.** File parsers run with warnings ignored, parser loggers silenced and stdout/stderr discarded; workbook metadata no longer reaches stderr from either shape script. |
+| `5921df6` | **B-094.** A UTF-8 BOM is stripped at decode (and from xlsx cell edges); drafts, peek and parser see `Date`. |
+| `aa80aec` | **B-091.** A printed draft name is vocabulary-only; the only digit it may carry is the draft's own rank. |
+| `77ee24e` | **B-092.** hearth.finance no-network test resolves relative imports to an internal allowlist and refuses importlib / `__import__`. |
+| `9ef10e6` | **B-093.** The header is a header-shaped row directly above data (2+ vocabulary names, no value, data below, data width). |
