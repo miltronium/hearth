@@ -1479,7 +1479,10 @@ def eval_adapter(
     committed golden set; its bar overrides --alpha / --margin / --min-n. Every eval, with
     or without --prereg, is recorded BEFORE scoring in a signed, append-only ledger
     (HEARTH_HOME/measurements.jsonl), and the prereg must have been committed before the
-    adapter's FIRST recorded measurement: a bar written after seeing a result is refused.
+    adapter's FIRST recorded measurement, and that first measurement must have been made
+    with this same --prereg: a bar written, or picked, after seeing a result is refused.
+    So run an adapter's first eval with --prereg; a run that does not match its --prereg
+    (golden set, metric, decode config) is refused before anything is measured.
     The adapter's weights are hashed before scoring (no weights, no eval) and
     --report-json signs the report with this install's key, so adapters promote can tell
     it from a hand-written one. Only HEARTH_BACKEND=mlx scores can promote; the echo
@@ -1617,6 +1620,20 @@ def eval_adapter(
     # Where the golden set stands at measurement time, for the bytes being scored: promotion
     # requires them to be the committed blob, in the prereg's repository (check_provenance).
     golden_git = golden_git_status(golden, data=golden_bytes)
+    if registration is not None:
+        # Checked BEFORE the measurement is recorded (B-122): a ledger record says which
+        # prereg a measurement was made under, so it must be the experiment that prereg
+        # registered — not a different golden set, metric or decode config run beside it.
+        problems = registration.run_mismatches(
+            task=entry.task, golden_sha=golden_set.sha, metric=metric,
+            config_fingerprint=config.fingerprint,
+        )
+        if problems:
+            console.print(
+                "[red]This run is not the registered experiment[/red] (nothing was measured): "
+                + "; ".join(problems)
+            )
+            raise typer.Exit(code=1)
 
     # Record the measurement in the append-only, signed ledger BEFORE a single score exists
     # (B-079). Promotion requires the prereg to predate the adapter's FIRST recorded
@@ -1639,7 +1656,11 @@ def eval_adapter(
             "backend": backend_identity(provider),
             "golden_git": {k: golden_git.get(k)
                            for k in ("repo_root", "head", "committed", "commit", "rel_path")},
+            # Which bar this measurement was made under ("" = exploratory). Promotion
+            # requires the adapter's FIRST measurement to have been made under the very
+            # prereg it is promoted under (B-122).
             "prereg_sha": registration.sha if registration is not None else "",
+            "prereg_path": str(Path(prereg).resolve()) if registration is not None else "",
             # The evals repository in force now (B-081): promotion requires the prereg to
             # live in the one recorded at the adapter's FIRST measurement.
             "anchor": resolve_anchor(home),
@@ -1735,12 +1756,6 @@ def eval_adapter(
     )
     test = "auto"
     if registration is not None:
-        problems = registration.mismatches(candidate)
-        if problems:
-            console.print(
-                "[red]This run is not the registered experiment:[/red] " + "; ".join(problems)
-            )
-            raise typer.Exit(code=1)
         alpha, margin, min_n, test = (
             registration.alpha,
             registration.min_effect,
@@ -1845,12 +1860,20 @@ def eval_adapter(
             console.print(f"[yellow]Not promotable:[/yellow] {exc}")
             return
         if registration is None:
-            console.print(
-                "[yellow]Exploratory measurement (no --prereg):[/yellow] recorded in the "
-                f"measurement ledger. {adapter_id} can only be promoted under a "
-                f"pre-registration committed BEFORE its first measurement ({first['measured_at']}"
-                "); a bar written after seeing this result will be refused."
-            )
+            if first.get("prereg_sha"):
+                console.print(
+                    "[yellow]Exploratory measurement (no --prereg):[/yellow] recorded in the "
+                    f"measurement ledger. {adapter_id} stays promotable only under the "
+                    f"pre-registration it was first measured under ({first.get('prereg_path')})."
+                )
+            else:
+                console.print(
+                    "[yellow]Exploratory measurement (no --prereg):[/yellow] recorded in the "
+                    f"measurement ledger. {adapter_id} was first measured "
+                    f"({first['measured_at']}) with no pre-registration, so it cannot be "
+                    "promoted: an adapter is promotable only under the bar its FIRST "
+                    "measurement was made under. Run the first eval of an adapter with --prereg."
+                )
             return
         try:
             check_provenance(registration, first_measurement=first, golden_git=golden_git,
@@ -2191,7 +2214,8 @@ def adapters_promote(
     from the report's per-example vectors under the committed pre-registration's bar.
     The report's measurement must be in this install's measurement ledger, and the prereg
     must have been committed before the adapter's FIRST recorded measurement, in the git
-    repository that holds the (committed) golden set. The usual one-step path is hearth
+    repository that holds the (committed) golden set, and that first measurement must
+    have been made under this same prereg (hearth eval --prereg). The usual one-step path is hearth
     eval ADAPTER --golden G --prereg P --promote. The old --candidate-score /
     --incumbent-score flags are removed: a typed score is not evidence.
 

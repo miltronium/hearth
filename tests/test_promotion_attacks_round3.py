@@ -8,6 +8,8 @@ ported to assert the refusal; each was run against 3caecb0 first and promoted th
         ancestor of the HEAD recorded at the first measurement" (B-120)
     H3  the same served weights re-registered under a new id with a junk file beside them
         were a "fresh, never-measured" adapter (B-121)
+    M1  a "menu" of bars committed before the first measurement: measure under one, see the
+        verdict, promote under another (B-122)
 """
 
 from __future__ import annotations
@@ -281,3 +283,80 @@ def test_H3_a_missing_config_is_not_the_same_as_a_present_one(tmp_path):
     (empty / "notes.txt").write_text("nothing mlx_lm loads")
     assert adapter_served_sha(empty) == ""
     assert adapter_served_sha(tmp_path / "missing") == ""
+
+
+# -- M1: the bar is the one the adapter was FIRST measured under (B-122) -------------------
+
+
+def _menu(world: World) -> Path:
+    """Two bars committed up front: the real one, and one on a golden set the adapter loses."""
+    import json
+
+    import yaml
+
+    from hearth.training.eval import as_golden_set
+
+    lose = world.repo / "lose.jsonl"
+    lose.write_text("".join(json.dumps({"prompt": r["prompt"], "expected": "Z"}) + "\n"
+                            for r in pe.ROWS))
+    world.write_prereg()
+    body = yaml.safe_load(world.prereg.read_text())
+    body["golden_sha"] = as_golden_set("extract", [(r["prompt"], "Z") for r in pe.ROWS]).sha
+    (world.repo / "prereg_lose.yaml").write_text(yaml.safe_dump(body))
+    world.commit("golden.jsonl", "lose.jsonl", "prereg.yaml", "prereg_lose.yaml")
+    return lose
+
+
+def test_M1_a_menu_of_bars_committed_up_front_cannot_be_picked_from_after_scoring(tmp_path):
+    """Reviewer R3: measure under prereg_lose (FAIL), then promote under prereg (PASS)."""
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    lose = _menu(w)
+    first = pe.runner.invoke(pe.app, ["eval", "a1", "--golden", str(lose), "--metric", "exact",
+                                      "--max-tokens", "24", "--prereg",
+                                      str(w.repo / "prereg_lose.yaml")], env=w.env)
+    assert first.exit_code == 0 and "FAIL" in _flat(first), _flat(first)
+    result = w.eval("a1", "--prereg", str(w.prereg), "--promote")
+    _refused(result, w, "a1", "under another pre-registration")
+    # ...and the offline path refuses it for the same reason.
+    w.eval_report("a1")
+    _refused(w.promote("a1"), w, "a1", "under another pre-registration")
+
+
+def test_M1_an_exploratory_first_measurement_is_unpromotable_even_after_the_bar(tmp_path):
+    """Bar committed first, then a peek with no --prereg: the bar was not the one in force."""
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.registered()
+    peek = _peek(w)
+    assert "cannot be promoted" in _flat(peek)
+    result = w.eval("a1", "--prereg", str(w.prereg), "--promote")
+    _refused(result, w, "a1", "with no pre-registration (an exploratory run)")
+
+
+def test_M1_first_measured_under_the_bar_stays_promotable_after_a_later_peek(tmp_path):
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.registered()
+    first = w.eval("a1", "--prereg", str(w.prereg))
+    assert first.exit_code == 0 and "promote with:" in _flat(first), _flat(first)
+    later = _peek(w)  # exploratory, but not the first measurement
+    assert "stays promotable only under" in _flat(later)
+    result = w.eval("a1", "--prereg", str(w.prereg), "--promote")
+    assert result.exit_code == 0 and w.status("a1") == "promoted", _flat(result)
+
+
+def test_M1_the_ledger_records_which_prereg_each_measurement_was_made_under(tmp_path):
+    from hearth.training import attest, ledger
+
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    w.registered()
+    w.eval("a1", "--prereg", str(w.prereg))
+    _peek(w)
+    first, second = ledger.read(w.home, attest.load_key(w.home))
+    from hearth.training.prereg import load_prereg
+
+    assert first["prereg_sha"] == load_prereg(w.prereg).sha
+    assert first["prereg_path"] == str(w.prereg.resolve())
+    assert second["prereg_sha"] == second["prereg_path"] == ""

@@ -351,7 +351,7 @@ def test_adapters_promote_consumes_a_report_and_recomputes_the_gate(tmp_path, re
     runner.invoke(
         app,
         ["eval", "extract-1", "--golden", golden, "--metric", "exact", "--max-tokens", "24",
-         "--report-json", str(out)],
+         "--report-json", str(out), "--prereg", path],  # first measured UNDER the bar
         env=_env(tmp_path),
     )
     result = runner.invoke(

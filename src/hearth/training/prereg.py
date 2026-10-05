@@ -137,20 +137,35 @@ class PreRegistration:
         drifted from the plan — a different golden set, a different metric, different
         decode parameters — and the gate must not treat it as the registered test.
         """
+        return self.run_mismatches(task=report.task, golden_sha=report.golden_sha,
+                                   metric=report.metric,
+                                   config_fingerprint=report.config_fingerprint)
+
+    def run_mismatches(
+        self, *, task: str, golden_sha: str, metric: str, config_fingerprint: str
+    ) -> tuple[str, ...]:
+        """:meth:`mismatches` for a run that has not been scored yet (B-122).
+
+        Everything the comparison needs is fixed before the first generation, so ``hearth
+        eval --prereg`` checks it BEFORE recording the measurement: a run recorded as "made
+        under" a prereg is then always the experiment that prereg registered.
+        """
         problems: list[str] = []
-        if report.task and report.task != self.task:
-            problems.append(f"task {report.task!r} != registered {self.task!r}")
-        if report.golden_sha != self.golden_sha:
+        if task and task != self.task:
+            problems.append(f"task {task!r} != registered {self.task!r}")
+        if golden_sha != self.golden_sha:
             problems.append(
-                f"golden_sha {report.golden_sha[:12] or '<unknown>'} != registered "
+                f"golden_sha {golden_sha[:12] or '<unknown>'} != registered "
                 f"{self.golden_sha[:12]}"
             )
         expected_metric = _metric_name(self.metric)
-        if report.metric != expected_metric:
-            problems.append(f"metric {report.metric!r} != registered {expected_metric!r}")
-        if report.config_fingerprint != self.generation.fingerprint:
+        if _metric_name(metric) != expected_metric:
             problems.append(
-                f"decode config {report.config_fingerprint or '<unknown>'} != registered "
+                f"metric {_metric_name(metric)!r} != registered {expected_metric!r}"
+            )
+        if config_fingerprint != self.generation.fingerprint:
+            problems.append(
+                f"decode config {config_fingerprint or '<unknown>'} != registered "
                 f"{self.generation.fingerprint}"
             )
         return tuple(problems)
@@ -475,6 +490,9 @@ def check_provenance(
        (:func:`committed_golden_problems`).
     4. **That repository is the anchored evals repository** recorded in the ledger at the
        first measurement (:func:`resolve_anchor`, B-081).
+    5. **The first measurement was made under THIS prereg** (its ``prereg_sha``, B-122):
+       a bar merely committed before the first measurement can be one of several, picked
+       after the score was seen.
     """
     status = verify_committed(registration.path)
     if not status.committed:
@@ -532,6 +550,24 @@ def check_provenance(
             f"{first_head[:12] or 'no commit'}): the bar was registered AFTER the measurement, "
             "or in another repository — an adapter measured before its bar existed cannot be "
             "promoted under it"
+        )
+    # The bar is the one the adapter was FIRST measured under — not merely one committed
+    # before that measurement (B-122). Two bars committed up front (two golden sets, or one
+    # strict and one loose) let the operator measure under one, see the verdict, and promote
+    # under the other: the choice of bar was made after seeing a score. Each measurement
+    # records the prereg it was made under (none for an exploratory run), so an adapter
+    # first measured exploratory, or under another prereg, is not promotable under this one.
+    first_prereg = str(first_measurement.get("prereg_sha") or "")
+    if first_prereg != registration.sha:
+        under = (f"under another pre-registration (sha {first_prereg[:12]}, "
+                 f"{first_measurement.get('prereg_path') or 'path not recorded'})"
+                 if first_prereg else "with no pre-registration (an exploratory run)")
+        raise PreRegError(
+            f"{adapter!r} was first measured at {first_at} (ledger record "
+            f"{first_measurement.get('seq')}) {under}, not under {registration.path} (sha "
+            f"{registration.sha[:12]}): an adapter is promotable only under the bar it was "
+            "FIRST measured under, so that the bar cannot be picked after seeing a score — "
+            "run the first `hearth eval` of an adapter with --prereg"
         )
     problems = committed_golden_problems(golden_git, task=registration.task,
                                          golden_sha=golden_sha)
