@@ -86,6 +86,27 @@ class GoldenExample:
     expected: str
 
 
+def normalize_prompt(prompt: str) -> str:
+    """The identity of a prompt for duplicate detection: whitespace collapsed, case-folded.
+
+    Deliberately coarser than what the model sees: ``"Q 1"`` and ``"q  1 "`` are near
+    certain to get correlated answers, so counting them as two independent items would
+    overstate ``n``. Erring towards "duplicate" makes the gate stricter, never looser.
+    """
+    return " ".join(prompt.split()).casefold()
+
+
+def require_distinct(golden: GoldenSet) -> None:
+    """Raise :class:`ValueError` when ``golden`` repeats a prompt (B-080)."""
+    dups = golden.duplicate_prompts()
+    if dups:
+        raise ValueError(
+            f"golden set repeats {len(dups)} prompt(s) (e.g. {dups[0][:60]!r}): a repeated "
+            "item is one observation counted twice, so n and the p-value would be "
+            "inflated — every golden row must be a distinct prompt"
+        )
+
+
 @dataclass(frozen=True)
 class GoldenSet:
     """A golden evaluation set for one task class.
@@ -101,6 +122,24 @@ class GoldenSet:
 
     def __len__(self) -> int:
         return len(self.examples)
+
+    def duplicate_prompts(self) -> tuple[str, ...]:
+        """Prompts that occur more than once, after :func:`normalize_prompt` (B-080).
+
+        A golden set's ``n`` is what licenses a promotion (``min_n``, McNemar's p). Three
+        distinct items repeated ten times are n=3, not n=30: under greedy decoding a
+        repeated prompt gets the same answer every time, so the copies are one observation
+        counted ten times and the p-value is computed on a sample that does not exist.
+
+        Duplicates are keyed by the *prompt alone*, not prompt+expected: the same prompt
+        with two different expected answers is not two examples either — a deterministic
+        model answers it one way, so one copy is guaranteed wrong (or the item is
+        mislabelled). Either way the set is malformed and is refused rather than deduped,
+        because silently dropping rows would change the content sha a pre-registration
+        pins.
+        """
+        counts = Counter(normalize_prompt(ex.prompt) for ex in self.examples)
+        return tuple(sorted(p for p, k in counts.items() if k > 1))
 
     @property
     def sha(self) -> str:
@@ -323,6 +362,7 @@ def score_candidate(
     """
     if not golden.examples:
         raise ValueError("cannot score an empty golden set")
+    require_distinct(golden)
     if judge is not None and metric is not None:
         raise ValueError(
             "pass either 'metric' or 'judge', not both — a judge silently overriding the "
@@ -769,7 +809,9 @@ __all__ = [
     "default_judge",
     "evaluate_gate",
     "exact_match_score",
+    "normalize_prompt",
     "objective_metric_for",
+    "require_distinct",
     "score_candidate",
     "token_f1_score",
 ]

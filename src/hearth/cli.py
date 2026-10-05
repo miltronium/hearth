@@ -1522,6 +1522,7 @@ def eval_adapter(
         baseline_reports,
         check_determinism,
         evaluate_gate,
+        require_distinct,
         score_candidate,
     )
     from .training.prereg import (
@@ -1567,6 +1568,7 @@ def eval_adapter(
 
     try:
         golden_set = _load_golden_set(golden, task=entry.task)
+        require_distinct(golden_set)
     except (OSError, ValueError) as exc:
         console.print(f"[red]Golden set error:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -1851,7 +1853,7 @@ def prereg_init(
     Exit: 0 written (or printed); 1 the golden set is unreadable or empty, or the bar is
     looser than the gate allows (alpha above 0.05, negative min-effect, min-n below 30).
     """
-    from .training.eval import DEFAULT_MIN_N, check_bar
+    from .training.eval import DEFAULT_MIN_N, check_bar, require_distinct
     from .training.prereg import template
 
     try:
@@ -1863,6 +1865,7 @@ def prereg_init(
 
     try:
         golden_set = _load_golden_set(golden, task=task)
+        require_distinct(golden_set)
     except (OSError, ValueError) as exc:
         console.print(f"[red]Golden set error:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -1910,6 +1913,7 @@ def prereg_check(
 
     Exit: 0 valid, committed and unmodified (and the golden set matches); 1 otherwise.
     """
+    from .training.eval import require_distinct
     from .training.prereg import PreRegError, load_prereg, verify_committed
 
     try:
@@ -1937,6 +1941,7 @@ def prereg_check(
     if golden is not None:
         try:
             golden_set = _load_golden_set(golden, task=registration.task)
+            require_distinct(golden_set)
         except (OSError, ValueError) as exc:
             console.print(f"[red]Golden set error:[/red] {exc}")
             raise typer.Exit(code=1) from None

@@ -479,3 +479,13 @@ def test_beats_incumbent_no_longer_promotes_on_a_missing_incumbent():
     """F2 at the wrapper: "no incumbent" used to mean "any score above zero wins"."""
     cand = EvalReport(task="extract", metric="f1", score=0.5)
     assert beats_incumbent(cand, None) is False
+
+
+def test_score_candidate_refuses_a_golden_set_that_repeats_a_prompt():
+    """B-080: n counts distinct items. The library refuses too, not just the CLI."""
+    from hearth.training.eval import as_golden_set as _gs
+
+    golden = _gs("extract", [(f"q{i % 3}", "A") for i in range(30)])
+    assert len(golden.duplicate_prompts()) == 3
+    with pytest.raises(ValueError, match="repeats 3 prompt"):
+        score_candidate(golden, lambda p: "A", metric="exact")
