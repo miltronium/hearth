@@ -703,6 +703,7 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
     models of its own backend, so ``echo`` (or a plugin's model) as a rung under mlx is a
     request-time 404 for every task of that class. Judged with :func:`check_model`, the
     same function that 404s the request, so this check and the request cannot disagree.
+    The registry default counts as a rung when some class falls through to it (B-104).
     Raises :class:`RoutingPolicyError` naming every bad rung.
     """
     if registry is None:
@@ -717,6 +718,21 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
     for task_class, rule in policy.classes.items():
         if rule.local_model and rule.local_model != "auto":
             named.setdefault(rule.local_model, []).append(f"class {task_class!r}")
+    # The registry default an UNPINNED class falls through to is as much a rung as a named
+    # one (B-104): HEARTH_DEFAULT_MODEL=echo under mlx used to build an app whose every
+    # unpinned request 404'd, while `defaults.local_model: echo` was refused. Which classes
+    # fall through is read off policy_rungs — the same derivation readiness and warmup use.
+    # Judged only for a provider that validates ids when it serves them (a ModelPool's
+    # ``resolve``): any other provider (echo, a plugin, a test fake) answers the default
+    # whatever it is, so refusing it would refuse a server whose requests succeed.
+    validates_ids = callable(getattr(local, "resolve", None))
+    for model_id, sources in policy_rungs(policy, registry.default_id).items():
+        through = [s.split(" ", 1)[0] for s in sources if s.endswith("(registry default)")]
+        if through and validates_ids:
+            named.setdefault(model_id, []).append(
+                "the registry default (HEARTH_DEFAULT_MODEL, else the config/models.yaml "
+                f"default) that {', '.join(through)} fall through to"
+            )
     problems = []
     for model_id, where in named.items():
         try:
@@ -725,7 +741,7 @@ def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=
             problems.append(f"{', '.join(where)} -> {exc}")
     if problems:
         raise RoutingPolicyError(
-            f"the routing profile names a model the {getattr(local, 'name', '?')!r} backend "
+            f"the routing profile routes to a model the {getattr(local, 'name', '?')!r} backend "
             "cannot serve: " + "; ".join(problems)
         )
 
