@@ -119,9 +119,9 @@ must fail when the fix is reverted.
 - ~~[B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)~~ — fixed in `7c9e510`
 - ~~[B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)~~ — fixed in `d4eb825` (2 of 3) and `dd4b774` (adapter field)
 - ~~[B-074](#b-074) `hearth_map_draft.py` printed a preamble as column names, drafted skip_rows 0, printed file names and a total~~ — fixed in `052d3af` (P0)
-- [B-075](#b-075) `routing.finance.yaml` does not pin the `embed` class: `intent: embed` reaches the registry default 7B (P3)
-- [B-076](#b-076) CLI prints "Routing profile not found:" for a profile that exists but names an unservable rung (P3)
-- [B-077](#b-077) Status/doctor report "policy loader unavailable" for a profile with a bad model rung, hiding the reason (P3)
+- ~~[B-075](#b-075) `routing.finance.yaml` does not pin the `embed` class: `intent: embed` reaches the registry default 7B (P3)~~ — fixed in `c3cb201`
+- ~~[B-076](#b-076) CLI prints "Routing profile not found:" for a profile that exists but names an unservable rung (P3)~~ — fixed in `c3cb201`
+- ~~[B-077](#b-077) Status/doctor report "policy loader unavailable" for a profile with a bad model rung, hiding the reason (P3)~~ — fixed in `c3cb201`
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1303,7 +1303,7 @@ must fail when the fix is reverted.
 ### B-075
 **`config/routing.finance.yaml` does not pin the `embed` class: a chat with `intent: embed` reaches the registry default 7B**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `c3cb201` · **Effort:** S
 - **Evidence:** `TASK_CLASSES` includes `embed` (router/classify.py:14-24) and an explicit
   intent of `embed` is accepted; the finance profile pins the other 8 classes only, so
   `Router.decide(..., intent="embed")` → `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`
@@ -1315,7 +1315,7 @@ must fail when the fix is reverted.
 ### B-076
 **The CLI says "Routing profile not found:" for a profile that exists but names an unservable rung**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `c3cb201` · **Effort:** S
 - **Evidence:** B-065's `RoutingPolicyError` subclasses `RoutingProfileNotFoundError` so
   `cli._routing_profile_required` (src/hearth/cli.py ~614-629) catches it and exits 2 — but
   prints the fixed prefix "Routing profile not found:" before the (correct) message.
@@ -1324,7 +1324,7 @@ must fail when the fix is reverted.
 ### B-077
 **Status / `doctor` report "policy loader unavailable" for a profile with a bad model rung**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `c3cb201` · **Effort:** S
 - **Evidence:** `status/probes.py:_policy_outcome` (~333-337) catches any exception from
   `load_policy` as `{"error": "policy loader unavailable"}`; since B-065 a bad rung raises
   `RoutingPolicyError`, so the routing row FAILs (correct outcome) with a reason that hides
@@ -1408,3 +1408,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `e8fcb8a` | **B-069.** Each LoRA adapter variant is its own counted, LRU-evicted resident at the model's full `ram_gb`. |
 | `36157af` | **B-070 (serving side).** `ModelPool.resolve("")`/`("auto")` and the router's default fall-through raise `UnregisteredDefaultModelError`. |
 | `1a872a2` | **B-071.** An abandoned `/v1/hearth/agent` stream cancels the run between steps and mid-generation (keepalive + `_close_on_disconnect` + `cancel_scope`). |
+| `c3cb201` | **B-075, B-076, B-077.** Finance profile pins `embed` (no 7B warmup); 'Routing profile unusable' label; status probe shows the routing error. |
