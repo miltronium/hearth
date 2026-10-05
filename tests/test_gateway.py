@@ -19,11 +19,14 @@ def test_health(client):
     assert body["backend"] == "echo"
 
 
-def test_list_models(client, settings):
+def test_list_models(client):
+    from hearth.registry import load_registry
+
     r = client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert settings.default_model in ids
+    # The default model has one source of truth, the registry (B-042).
+    assert load_registry().default_id in ids
     assert "echo" in ids
 
 

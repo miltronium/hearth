@@ -31,8 +31,10 @@ class Settings(BaseSettings):
     # this False (or pass the token); production keeps it on even on loopback.
     require_auth: bool = True
 
-    # Default local model id. In Phase 0 this is the single hardcoded MLX model.
-    default_model: str = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+    # The default model is deliberately NOT a field here. It lives in one place: the
+    # catalog's `default:` key (config/models.yaml), overridden by HEARTH_DEFAULT_MODEL,
+    # both resolved by `hearth.registry.Registry.default_id`. A `default_model` field used
+    # to sit here, read by nothing, while the registry served a different value (B-042).
 
     # Embedding backend selection (Phase 3, ARCHITECTURE §6):
     #   "hash" — offline, dependency-free hashing embedder (default; used by tests/skeleton).

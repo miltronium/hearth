@@ -64,10 +64,12 @@ class Registry:
         """The model served when a request names none.
 
         ``HEARTH_DEFAULT_MODEL`` wins over the catalog's ``default:`` key when it names a
-        model this registry actually holds. Without that, the two disagreed silently: the env
-        var reached ``Settings.default_model`` while every caller that asked the *registry*
-        got the YAML value, so setting it produced a result from a different model than the
-        one named — with nothing anywhere reporting the substitution. An override that names
+        model this registry actually holds. This property is the only reader of that
+        variable: ``Settings`` has no ``default_model`` field (it had one, read by nothing,
+        while every caller that asked the *registry* got the YAML value — so setting the
+        variable produced a result from a different model than the one named, with nothing
+        reporting the substitution; B-042). ``scripts/hearth_status.py`` lists it among the
+        names read outside Settings. An override that names
         an unregistered model is ignored rather than obeyed, because a typo must not take the
         catalog's default away; `resolve()` would raise later, far from the cause.
         """

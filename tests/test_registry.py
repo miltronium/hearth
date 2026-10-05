@@ -70,3 +70,28 @@ def test_an_override_naming_an_unregistered_model_is_ignored(monkeypatch):
     catalog_default = load_registry().default_id
     monkeypatch.setenv("HEARTH_DEFAULT_MODEL", "not/a-real-model")
     assert load_registry().default_id == catalog_default
+
+
+def test_the_default_model_has_one_source_of_truth(monkeypatch):
+    """B-042: Settings carried a ``default_model`` that nothing read, while the registry
+    served a different value. The registry is the only place the default model is decided;
+    a Settings field for it would be a second, silently disagreeing answer."""
+    from hearth.config import Settings
+
+    assert "default_model" not in Settings.model_fields
+
+    # And the variable still works through the registry, its one reader.
+    registry = load_registry()
+    other = next(e.id for e in registry.list() if e.id != registry.default_id)
+    monkeypatch.setenv("HEARTH_DEFAULT_MODEL", other)
+    assert load_registry().default_id == other
+
+
+def test_the_status_probe_counts_hearth_default_model_as_read():
+    """Without the Settings field, the status probe must still know the variable is read
+    (by the registry), or it would flag the correct name as SILENTLY IGNORED."""
+    from hearth.status.probes import probe_environment
+
+    section = probe_environment(environ={"HEARTH_DEFAULT_MODEL": "some/model"})
+    fact = next(f for f in section.facts if f.name == "hearth_env")
+    assert fact.data["ignored"] == []

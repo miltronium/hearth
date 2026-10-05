@@ -954,6 +954,7 @@ def probe_tests(*, root: Path) -> Section:
 # read by nothing and will be silently ignored (the HEARTH_MODEL/HEARTH_DEFAULT_MODEL trap).
 _EXTRA_ENV_NAMES = frozenset(
     {
+        "HEARTH_DEFAULT_MODEL",  # registry/__init__.py Registry.default_id (B-042)
         "HEARTH_ROUTING_YAML",
         "HEARTH_MODELS_YAML",
         "HEARTH_BASE_MODEL",
