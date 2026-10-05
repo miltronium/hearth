@@ -163,30 +163,53 @@ final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget":
 - `GET /v1/hearth/admin/health` — liveness (unauthenticated): the process is up. Says nothing
   about weights. Body: `status`, `version`, `backend`, `model` (the default id), plus
   `backend_fallback` when `auto` fell back to echo (below).
-- `GET /v1/hearth/admin/ready` — readiness (unauthenticated). **Ready means the default model can
-  serve a request now**: a load of it has completed with weights in memory at least once
-  (warmup or any request; residency granted without a load never counts), its most recent
-  load did not fail, and — for a backend that can check without loading (`mlx`) — its
-  weights still resolve on disk. Residency is reported separately, so a default that was
-  LRU-evicted to make room for another model stays `200` (it reloads on demand). With
-  `HEARTH_WARMUP=false` nothing loads until the first request, so a default whose weights
-  resolve on disk is `200` before that request; a backend that cannot check the disk stays
+- `GET /v1/hearth/admin/ready` — readiness (unauthenticated). **Ready means every model the
+  active routing profile can route an `auto` request to can serve now**: each task class's
+  rung (`local_model`), else `defaults.local_model`, else the registry default — the last only
+  if some class actually falls through to it, so a default a pinned ladder never serves is not
+  judged. Under an unpinned profile (the bundled `routing.yaml`) that is just the registry
+  default. A routing profile whose rung cannot serve at all (unregistered, not chat, or the
+  wrong backend) never gets this far: the server refuses to start on it. Each model is judged
+  on outcomes: a load of it has completed with weights in memory at least once (warmup or
+  any request; residency granted without a load never counts), its most recent load did not
+  fail, and — for a backend that can check without loading (`mlx`) — its weights still
+  resolve on disk. Residency is reported separately, so a model that was LRU-evicted to make
+  room for another stays `200` (it reloads on demand). A model whose weights resolve on disk
+  but that has not loaded yet — `HEARTH_WARMUP=false`, or warmup left it unloaded to stay
+  under the RAM ceiling — is `200` with a `detail`; a backend that cannot check the disk stays
   `503 loading` until its first load.
+
+  Warmup loads the most-used rung first (the 14B under `routing.finance.yaml`), then each
+  further rung that fits under `HEARTH_RAM_CEILING_GB` beside what it already loaded; it never
+  evicts a model it just warmed.
+
+  The top-level `status` aggregates the per-model verdicts: any `failed` → `503 failed`, with
+  a `reason` joining the failing models' reasons (each names its model id); else any
+  `loading` → `503 loading`; else `200 ready`. Per-model reasons and details:
 
   | code | `status` | `reason` / `detail` (examples) | meaning |
   |---|---|---|---|
-  | 200 | `ready` | — | the default holds weights now (`loaded: true`) |
+  | 200 | `ready` | — | the model holds weights now (`loaded: true`) |
   | 200 | `ready` | detail `'<id>' loaded before and is not resident now (evicted to make room); it reloads on demand` | `loaded: false`, weights on disk |
   | 200 | `ready` | detail `warmup disabled (HEARTH_WARMUP=false); '<id>' is on disk and loads on the first request` | `loaded: false`, never loaded yet |
-  | 503 | `loading` | `warmup in progress` | the startup warmup thread is loading the default weights |
+  | 200 | `ready` | detail `'<id>' is on disk and loads on the first request (warmup left it unloaded: it did not fit under the RAM ceiling beside the rungs loaded first)` | `loaded: false`, a lower rung warmup skipped |
+  | 503 | `loading` | `warmup in progress` | the startup warmup thread is loading the profile's rungs |
   | 503 | `loading` | `weights for '<id>' are not loaded (HEARTH_WARMUP is off) and the '<backend>' backend cannot verify them without loading` | a plugin/test backend without a disk probe, before its first load |
   | 503 | `failed` | `weights for '<id>' do not resolve on disk: ModelNotOnDiskError: …` | never pulled, or deleted after loading |
   | 503 | `failed` | `last load of '<id>' failed: …` / `warmup of '<id>' failed: …` | the load raised (corrupt checkpoint, mlx missing, over the RAM ceiling) |
   | 503 | `failed` | `HEARTH_DEFAULT_MODEL='<id>' is not in the model registry …` | the configured default names no registered model (`auto` would silently be served by the catalog default) |
-  | 503 | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
+  | 503 | `failed` | `'<id>' is not servable: …` | a judged model is registered but not a chat model of this backend |
 
-  Every body also carries `backend`, `model` (the default id), `loaded` (the default holds
-  weights right now) and `resident` (ids in memory). The `echo` backend is ready when chosen
+  Every body also carries `backend`, `model` (the primary model: the most-used rung, the one
+  warmup loads first — the registry default under an unpinned profile), `loaded` (the primary
+  holds weights right now), `resident` (ids in memory) and, except for the echo backend and a
+  `HEARTH_DEFAULT_MODEL` refusal, `models`: one entry per judged model with its `status`,
+  `loaded`, `serves` (the classes routed to it, e.g. `"class:chat"`, or
+  `"class:embed (registry default)"` for a class that falls through) and its `reason` or
+  `detail`. Measured [in-process, fake weights]: `routing.finance.yaml` with the 14B absent →
+  `503 {"status": "failed", "reason": "weights for 'mlx-community/Qwen2.5-14B-Instruct-4bit' do
+  not resolve on disk: …", "models": {"mlx-community/Qwen2.5-14B-Instruct-4bit": {"status":
+  "failed", …}, "mlx-community/Qwen2.5-3B-Instruct-4bit": {"status": "ready", …}, …}}`. The `echo` backend is ready when chosen
   explicitly (`HEARTH_BACKEND=echo`). When `HEARTH_BACKEND=auto` (the default) falls back to
   echo because `mlx_lm` is not importable — usually a venv pruned by a bare `uv run` — `/ready`
   is `503` with `status: "stub"`, `backend: "echo"` and a `reason` naming the repair command,

@@ -28,7 +28,7 @@ from ..observability.metrics import (
 )
 from ..providers.base import GenRequest, GenResult, ModelProvider
 from ..serving.pool import UnknownModelError, check_model
-from .classify import classify
+from .classify import TASK_CLASSES, classify
 from .policy import ClassRule, RoutingPolicy, RoutingPolicyError, get_policy
 
 logger = logging.getLogger("hearth.router")
@@ -585,6 +585,33 @@ class Router:
         return self._adapters
 
 
+def policy_rungs(policy: RoutingPolicy, default_id: str) -> dict[str, list[str]]:
+    """Every local model an ``auto`` request can be routed to → where each comes from.
+
+    Mirrors :meth:`Router._local_model` for a request naming no model, over every task
+    class: the class rung, else ``defaults.local_model``, else ``default_id`` (the registry
+    default). A remote class is included too — :meth:`Router.degrade_to_local` serves it
+    on the same rung when its escalation fails. Keys are model ids, ordered most-used first
+    (ties in task-class order); values name the classes, e.g. ``"class:chat"`` or
+    ``"class:chat (defaults.local_model)"``. The registry default appears only if some class
+    actually falls through to it — a default the profile never serves is not its model.
+    """
+    configured = policy.defaults.local_model
+    if configured and configured != "auto":
+        fallback, how = configured, "defaults.local_model"
+    else:
+        fallback, how = default_id, "registry default"
+    found: dict[str, list[str]] = {}
+    for task_class in TASK_CLASSES:
+        rung = policy.rule_for(task_class).local_model
+        if rung and rung != "auto":
+            found.setdefault(rung, []).append(f"class:{task_class}")
+        else:
+            found.setdefault(fallback, []).append(f"class:{task_class} ({how})")
+    order = {model_id: i for i, model_id in enumerate(found)}
+    return dict(sorted(found.items(), key=lambda kv: (-len(kv[1]), order[kv[0]])))
+
+
 def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=None) -> None:
     """Refuse a policy whose model rungs the ACTIVE backend cannot serve (B-065).
 
@@ -643,6 +670,7 @@ def _estimate_remote_cost(req: GenRequest) -> int:
 
 __all__ = [
     "check_policy_servable",
+    "policy_rungs",
     "AdapterChoice",
     "BudgetExhaustedError",
     "ProviderError",

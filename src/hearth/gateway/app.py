@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -34,7 +34,7 @@ from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router, check_policy_servable
-from ..router.route import AdapterChoice, UnknownAdapterError
+from ..router.route import AdapterChoice, UnknownAdapterError, policy_rungs
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
@@ -130,7 +130,8 @@ def create_app(
     app.state.manager = manager
     app.state.warmup = warmup_state
 
-    # Warm the default model so the first request is fast and /ready flips to 200. Runs on a
+    # Warm what the routing profile serves (most-used rung first, B-064) so the first request
+    # is fast and /ready flips to 200. Runs on a
     # background thread so serve starts listening at once (it never blocks on a load); the
     # load itself runs on the MLX thread. Never fatal: a failed warmup is logged loudly and
     # /ready reports 503 with the reason — a missing model shows up at startup, not on the
@@ -139,7 +140,7 @@ def create_app(
         warmup_state.running = True
         warmup_state.thread = threading.Thread(
             target=_warmup,
-            args=(provider, manager, registry, warmup_state),
+            args=(provider, manager, registry, warmup_state, router.policy),
             name="hearth-warmup",
             daemon=True,
         )
@@ -167,91 +168,32 @@ def create_app(
     def ready():
         """Readiness probe (distinct from liveness /health).
 
-        **Ready means the default model can serve a request now**, judged on outcomes:
+        **Ready means every model the active routing profile can route an ``auto`` request
+        to can serve now** (B-064) — each class rung, ``defaults.local_model``, and the
+        registry default only if some class falls through to it (see
+        :func:`~hearth.router.route.policy_rungs`). Under an unpinned profile that is just
+        the registry default, exactly as before. Each model is judged on outcomes:
 
         * its last load attempt did not fail, and a load of it has completed with weights in
           memory at least once (warmup, or any request) — residency granted without a load
           never counts (B-005); **and**
         * its weights still resolve on disk (for a backend that can check without loading),
-          so an evicted default reloads on demand (B-048).
+          so an evicted model reloads on demand (B-048). A model that is on disk but was not
+          loaded (warmup off, or left unloaded to stay under the RAM ceiling) is ready, with
+          a ``detail`` saying it loads on the first request (B-035).
 
-        With ``HEARTH_WARMUP=false`` nothing loads until the first request, so a default
-        whose weights resolve on disk is ready before that request (B-035) — reported with
-        ``loaded: false`` and a ``detail``. A backend that cannot check the disk stays 503
-        ``loading`` until its first load instead of being taken at its word.
-
-        Residency is reported separately: ``loaded`` (the default holds weights right now)
-        and ``resident`` (ids in memory). 503 ``loading`` while the first load runs; 503
-        ``failed`` with the ``reason`` when the load failed, the weights are gone, or
-        ``HEARTH_DEFAULT_MODEL`` names no servable model. The echo backend is ready when
-        chosen explicitly (nothing to load) and 503 ``stub`` when ``HEARTH_BACKEND=auto``
-        fell back to it because mlx_lm is not importable.
+        A backend that cannot check the disk stays 503 ``loading`` until its first load. The
+        body carries ``models`` — each judged model's ``status``, ``loaded``, the classes it
+        ``serves`` and its ``reason``/``detail`` — and the top-level ``status``/``reason``
+        aggregate them: any ``failed`` -> 503 ``failed`` naming the model(s); else any
+        ``loading`` -> 503 ``loading``; else 200. ``model``/``loaded`` are the primary model
+        (the most-used rung, the one warmup loads first). ``HEARTH_DEFAULT_MODEL`` naming no
+        registered model is 503 ``failed``. The echo backend is ready when chosen explicitly
+        and 503 ``stub`` when ``HEARTH_BACKEND=auto`` fell back to it.
         """
-        default_id = registry.default_id
-        loaded = _weights_loaded(manager, default_id)
-        payload: dict = {
-            "backend": provider.name,
-            "model": default_id,
-            "loaded": loaded,
-            "resident": manager.resident_ids(),
-        }
-
-        def respond(code: int, status: str, reason: str | None = None,
-                    detail: str | None = None) -> JSONResponse:
-            body = {**payload, "status": status}
-            if reason is not None:
-                body["reason"] = reason
-            if detail is not None:
-                body["detail"] = detail
-            return JSONResponse(status_code=code, content=body)
-
-        if provider.name == "echo":
-            # An echo that `auto` fell back to (mlx_lm not importable) is not inference: a
-            # pruned venv must not come up green answering every request with an echo
-            # labelled as a real model (B-006). An explicit HEARTH_BACKEND=echo is ready.
-            stub_reason = getattr(provider, "fallback_reason", None)
-            if stub_reason:
-                return respond(503, "stub", stub_reason)
-            return respond(200, "ready")
-        problem = _default_model_problem(provider, registry)
-        if problem is not None:
-            return respond(503, "failed", problem)
-        can_locate = bool(getattr(provider, "can_locate", False))
-        if can_locate:
-            missing = provider.weights_problem(default_id)
-            if missing is not None:
-                return respond(
-                    503, "failed", f"weights for {default_id!r} do not resolve on disk: "
-                    f"{missing}",
-                )
-        last_error = getattr(manager, "last_load_error", lambda _m: None)(default_id)
-        if last_error is not None:
-            return respond(503, "failed", f"last load of {default_id!r} failed: {last_error}")
-        if loaded:
-            return respond(200, "ready")
-        if getattr(manager, "loaded_once", lambda _m: False)(default_id):
-            return respond(
-                200, "ready",
-                detail=f"{default_id!r} loaded before and is not resident now (evicted to "
-                "make room); it reloads on demand",
-            )
-        if warmup_state.running:
-            return respond(503, "loading", "warmup in progress")
-        if warmup_state.error:
-            return respond(503, "failed", warmup_state.error)
-        if not settings.warmup:
-            if can_locate:
-                return respond(
-                    200, "ready",
-                    detail=f"warmup disabled (HEARTH_WARMUP=false); {default_id!r} is on "
-                    "disk and loads on the first request",
-                )
-            return respond(
-                503, "loading",
-                f"weights for {default_id!r} are not loaded (HEARTH_WARMUP is off) and "
-                f"the {provider.name!r} backend cannot verify them without loading",
-            )
-        return respond(503, "loading", f"weights for {default_id!r} are not loaded yet")
+        code, body = _readiness(provider, manager, registry, router.policy, settings,
+                                warmup_state)
+        return JSONResponse(status_code=code, content=body)
 
     @app.get("/v1/hearth/admin/models", dependencies=[auth])
     def admin_models() -> dict:
@@ -476,14 +418,22 @@ def _approx_tokens(text: str) -> int:
 
 @dataclass
 class _WarmupState:
-    """What the warmup thread found. Read by /ready; written by :func:`_warmup`."""
+    """What the warmup thread found. Read by /ready; written by :func:`_warmup`.
+
+    ``error`` is a failure that sinks every model (``HEARTH_DEFAULT_MODEL`` unregistered);
+    ``errors`` is per model; ``skipped`` holds rungs left unloaded to stay under the RAM
+    ceiling (they load on their first request).
+    """
 
     running: bool = False
     error: str | None = None
+    errors: dict[str, str] = field(default_factory=dict)
+    skipped: set[str] = field(default_factory=set)
+    plan: list[str] = field(default_factory=list)
     thread: threading.Thread | None = None
 
 
-def _default_model_problem(provider: ModelProvider, registry: Registry) -> str | None:
+def _default_model_problem(registry: Registry) -> str | None:
     """Why the configured default model cannot be the one serving, or ``None``.
 
     ``Registry.default_id`` ignores a ``HEARTH_DEFAULT_MODEL`` that names no registered
@@ -496,13 +446,145 @@ def _default_model_problem(provider: ModelProvider, registry: Registry) -> str |
         registry.require_default()
     except UnregisteredDefaultModelError as exc:
         return str(exc)
+    return None
+
+
+def _routed_models(provider: ModelProvider, registry: Registry, policy) -> dict[str, list[str]]:
+    """The models readiness judges and warmup loads -> the classes each serves, primary first.
+
+    A :class:`~hearth.serving.ModelPool` (a provider with its own ``manager``) holds one
+    provider per model id, so every rung is a different set of weights and each is judged.
+    Any other provider answers every id itself: one judgement, under the primary rung's id,
+    covers all classes.
+    """
+    rungs = policy_rungs(policy, registry.default_id)
+    if getattr(provider, "manager", None) is not None:
+        return rungs
+    primary = next(iter(rungs))
+    return {primary: [source for sources in rungs.values() for source in sources]}
+
+
+def _judge_model(
+    model_id: str,
+    provider: ModelProvider,
+    manager: ModelManager,
+    settings: Settings,
+    state: _WarmupState,
+) -> dict:
+    """One model's readiness: ``status`` (ready|loading|failed), ``loaded``, reason/detail."""
+    loaded = _weights_loaded(manager, model_id)
+    out: dict = {"status": "ready", "loaded": loaded}
+
+    def verdict(status: str, reason: str | None = None, detail: str | None = None) -> dict:
+        out["status"] = status
+        if reason is not None:
+            out["reason"] = reason
+        if detail is not None:
+            out["detail"] = detail
+        return out
+
     resolve = getattr(provider, "resolve", None)
     if callable(resolve):
         try:
-            resolve(registry.default_id)
+            resolve(model_id)
         except UnknownModelError as exc:
-            return f"default model is not servable: {exc}"
-    return None
+            return verdict("failed", f"{model_id!r} is not servable: {exc}")
+    can_locate = bool(getattr(provider, "can_locate", False))
+    if can_locate:
+        missing = provider.weights_problem(model_id)
+        if missing is not None:
+            return verdict(
+                "failed", f"weights for {model_id!r} do not resolve on disk: {missing}"
+            )
+    last_error = getattr(manager, "last_load_error", lambda _m: None)(model_id)
+    if last_error is not None:
+        return verdict("failed", f"last load of {model_id!r} failed: {last_error}")
+    if loaded:
+        return verdict("ready")
+    if getattr(manager, "loaded_once", lambda _m: False)(model_id):
+        return verdict(
+            "ready",
+            detail=f"{model_id!r} loaded before and is not resident now (evicted to make "
+            "room); it reloads on demand",
+        )
+    if model_id in state.errors:
+        return verdict("failed", state.errors[model_id])
+    if state.running and model_id not in state.skipped:
+        return verdict("loading", "warmup in progress")
+    if not settings.warmup:
+        if can_locate:
+            return verdict(
+                "ready",
+                detail=f"warmup disabled (HEARTH_WARMUP=false); {model_id!r} is on disk and "
+                "loads on the first request",
+            )
+        return verdict(
+            "loading",
+            f"weights for {model_id!r} are not loaded (HEARTH_WARMUP is off) and the "
+            f"{provider.name!r} backend cannot verify them without loading",
+        )
+    if model_id in state.skipped and can_locate:
+        return verdict(
+            "ready",
+            detail=f"{model_id!r} is on disk and loads on the first request (warmup left it "
+            "unloaded: it did not fit under the RAM ceiling beside the rungs loaded first)",
+        )
+    return verdict("loading", f"weights for {model_id!r} are not loaded yet")
+
+
+def _readiness(
+    provider: ModelProvider,
+    manager: ModelManager,
+    registry: Registry,
+    policy,
+    settings: Settings,
+    state: _WarmupState,
+) -> tuple[int, dict]:
+    """``(status_code, body)`` for ``/ready`` — see the route's docstring for the rules."""
+    routed = _routed_models(provider, registry, policy)
+    primary = next(iter(routed))
+    payload: dict = {
+        "backend": provider.name,
+        "model": primary,
+        "loaded": _weights_loaded(manager, primary),
+        "resident": manager.resident_ids(),
+    }
+
+    def respond(code: int, status: str, reason: str | None = None,
+                detail: str | None = None, models: dict | None = None) -> tuple[int, dict]:
+        body = {**payload, "status": status}
+        if reason is not None:
+            body["reason"] = reason
+        if detail is not None:
+            body["detail"] = detail
+        if models is not None:
+            body["models"] = models
+        return code, body
+
+    if provider.name == "echo":
+        # An echo that `auto` fell back to (mlx_lm not importable) is not inference: a
+        # pruned venv must not come up green answering every request with an echo
+        # labelled as a real model (B-006). An explicit HEARTH_BACKEND=echo is ready.
+        stub_reason = getattr(provider, "fallback_reason", None)
+        if stub_reason:
+            return respond(503, "stub", stub_reason)
+        return respond(200, "ready")
+    problem = _default_model_problem(registry) or state.error
+    if problem is not None:
+        return respond(503, "failed", problem)
+
+    models: dict[str, dict] = {}
+    for model_id, serves in routed.items():
+        models[model_id] = {
+            **_judge_model(model_id, provider, manager, settings, state), "serves": serves
+        }
+    for status in ("failed", "loading"):
+        hits = [m for m in models.values() if m["status"] == status]
+        if hits:
+            return respond(503, status, "; ".join(m["reason"] for m in hits), models=models)
+    details = [m["detail"] for m in models.values() if "detail" in m]
+    return respond(200, "ready", detail="; ".join(details) if details else None,
+                   models=models)
 
 
 def _weights_loaded(manager: ModelManager, model_id: str) -> bool:
@@ -515,37 +597,69 @@ def _weights_loaded(manager: ModelManager, model_id: str) -> bool:
 
 
 def _warmup(
-    provider: ModelProvider, manager: ModelManager, registry: Registry, state: _WarmupState
+    provider: ModelProvider,
+    manager: ModelManager,
+    registry: Registry,
+    state: _WarmupState,
+    policy=None,
 ) -> bool:
-    """Load the default model's weights now; record (never raise) a failure.
+    """Load the weights the routing profile serves now; record (never raise) a failure.
 
-    Returns whether warmup succeeded. A failed load (missing weights, MLX not installed)
-    must not take the server down — `hearth serve` stays up in degraded mode and `/ready`
-    reports 503 with the reason until a model actually loads (Phase 7 graceful
+    Loads the most-used rung first (B-064: it used to load the registry default, which a
+    pinned ladder may never serve), then each further rung that fits under the RAM ceiling
+    beside what is already loaded — warmup never evicts a model it just warmed. A rung that
+    does not fit is left to load on its first request. Returns whether every load it
+    attempted succeeded. A failed load must not take the server down — `hearth serve`
+    stays up in degraded mode and `/ready` reports 503 with the reason (Phase 7 graceful
     degradation). A pool loads through its own path so the load runs on the MLX thread.
     """
     state.running = True
-    model_id = registry.default_id
+    ok = True
     try:
-        problem = _default_model_problem(provider, registry)
+        problem = _default_model_problem(registry)
         if problem is not None:
-            raise RuntimeError(problem)
+            state.error = f"warmup refused: {problem}"
+            logger.error("%s — NOT READY; serving in degraded mode", state.error)
+            return False
+        if policy is None:
+            from ..router.policy import get_policy
+
+            policy = get_policy()
+        state.plan = list(_routed_models(provider, registry, policy))
         warm = getattr(provider, "warm", None)
-        if callable(warm) and getattr(provider, "manager", None) is manager:
-            warm(model_id)
-        else:
-            manager.get(model_id)
-        if not _weights_loaded(manager, model_id):
-            raise RuntimeError(f"warmup returned but {model_id!r} holds no weights")
-        state.error = None
-        logger.info("warmed default model %s", model_id)
-        return True
-    except Exception as exc:  # noqa: BLE001 — warmup is best-effort; never fatal
-        state.error = f"warmup of {model_id!r} failed: {type(exc).__name__}: {exc}"
-        logger.error("%s — NOT READY; serving in degraded mode", state.error)
-        return False
+        via_pool = callable(warm) and getattr(provider, "manager", None) is manager
+        for index, model_id in enumerate(state.plan):
+            if index > 0 and not _fits_beside_residents(manager, registry, model_id):
+                state.skipped.add(model_id)
+                logger.info("warmup left %s unloaded: it does not fit under the RAM ceiling "
+                            "beside the rungs already warmed; it loads on demand", model_id)
+                continue
+            try:
+                if via_pool:
+                    warm(model_id)
+                else:
+                    manager.get(model_id)
+                if not _weights_loaded(manager, model_id):
+                    raise RuntimeError(f"warmup returned but {model_id!r} holds no weights")
+                state.errors.pop(model_id, None)
+                logger.info("warmed %s", model_id)
+            except Exception as exc:  # noqa: BLE001 — warmup is best-effort; never fatal
+                ok = False
+                state.errors[model_id] = (
+                    f"warmup of {model_id!r} failed: {type(exc).__name__}: {exc}"
+                )
+                logger.error("%s — NOT READY; serving in degraded mode",
+                             state.errors[model_id])
+        return ok
     finally:
         state.running = False
+
+
+def _fits_beside_residents(manager: ModelManager, registry: Registry, model_id: str) -> bool:
+    """Whether loading ``model_id`` now would stay under the ceiling without evicting."""
+    entry = registry.get(model_id)
+    need = entry.ram_gb if entry is not None else 0.0
+    return manager.resident_ram_gb() + need <= manager.ram_ceiling_gb
 
 
 def _model_not_found(exc: UnknownModelError) -> JSONResponse:
