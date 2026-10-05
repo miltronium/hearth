@@ -204,8 +204,7 @@ def read_text_file(path: str | Path, settings: Settings | None = None) -> str:
     appears in the message.
     """
     reader, data, requested = _gated_bytes(path, settings, _READERS, "read")
-    with _quiet_parse():
-        return reader(data, requested)
+    return _parse_contained(reader, data, requested)
 
 
 def read_table(path: str | Path, settings: Settings | None = None) -> list[list[str]]:
@@ -224,8 +223,30 @@ def read_table(path: str | Path, settings: Settings | None = None) -> list[list[
     that means.
     """
     reader, data, requested = _gated_bytes(path, settings, _TABLE_READERS, "read as a table")
-    with _quiet_parse():
-        return reader(data, requested)
+    return _parse_contained(reader, data, requested)
+
+
+def _parse_contained(reader, data: bytes, requested: str):
+    """Run a format handler quietly, and let NO parser message out of it.
+
+    Handlers raise :class:`FileAccessError` (fixed text) for what they anticipate, but a
+    parser can also raise lazily, mid-iteration — openpyxl's read-only rows convert cells as
+    they are read, and a cell typed as a number holding ``SSN-123-45-6789`` raised
+    ``invalid literal for int() with base 10: 'SSN-123-45-6789'``, which the MCP server
+    returned verbatim to the calling (possibly cloud) agent. Any exception that is not a
+    FileAccessError is replaced — type name only, ``from None`` so the original message is
+    not even kept as chained context.
+    """
+    try:
+        with _quiet_parse():
+            return reader(data, requested)
+    except FileAccessError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a parser message may quote file content
+        raise FileAccessError(
+            f"file could not be parsed ({type(exc).__name__}; details withheld because "
+            f"parser messages can quote file content): {requested!r}"
+        ) from None
 
 
 # -- format handlers ------------------------------------------------------------------
