@@ -35,6 +35,7 @@ from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
+from ..router.route import AdapterChoice, UnknownAdapterError
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
@@ -263,6 +264,12 @@ def create_app(
             check_model(router.local, registry, req.model)
         except UnknownModelError as exc:
             return _model_not_found(exc)
+        # Same for an explicitly requested adapter: refused up front, never silently
+        # answered by base weights under the adapter's name (B-034).
+        try:
+            router.check_adapter(adapter)
+        except UnknownAdapterError as exc:
+            return _adapter_not_found(exc)
         messages = (
             json_instruction(req.messages)
             if response_format == "json_object"
@@ -295,6 +302,8 @@ def create_app(
             return _budget_error(str(exc))
         except UnknownModelError as exc:
             return _model_not_found(exc)
+        except UnknownAdapterError as exc:
+            return _adapter_not_found(exc)
         except ProviderError as exc:
             return _provider_error(str(exc))
 
@@ -327,7 +336,7 @@ def create_app(
                 served_by=rec.served_by,
                 backend=result.backend,
                 model=result.model,
-                adapter=adapter,
+                adapter=rec.adapter,  # what served (None = base weights), not the request
                 escalated=rec.escalated,
                 estimated_frontier_tokens_saved=rec.estimated_frontier_tokens_saved,
             ),
@@ -479,6 +488,21 @@ def _model_not_found(exc: UnknownModelError) -> JSONResponse:
                 "type": "invalid_request_error",
                 "param": "model",
                 "code": "model_not_found",
+            }
+        },
+    )
+
+
+def _adapter_not_found(exc: UnknownAdapterError) -> JSONResponse:
+    """404 for an explicitly requested adapter this server cannot serve (docs/API.md)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "hearth.adapter",
+                "code": "adapter_not_found",
             }
         },
     )
@@ -669,17 +693,17 @@ def _stream_sse(
 
     # Adapters layer over the local backend only; resolve the requested id (or the task's
     # promoted default) to a concrete path so streaming hot-swaps like non-streaming does.
-    adapter_path = (
-        None
+    choice = (
+        AdapterChoice()
         if decision.would_escalate
-        else router._resolve_adapter(adapter, decision.task_class, decision.model)
+        else router.select_adapter(adapter, decision.task_class, decision.model)
     )
     stream_req = GenRequest(
         messages=gen_req.messages,
         model=decision.model,
         max_tokens=gen_req.max_tokens,
         temperature=gen_req.temperature,
-        adapter=adapter_path,
+        adapter=choice.path,
     )
 
     # First chunk announces the assistant role (OpenAI convention).
@@ -700,6 +724,8 @@ def _stream_sse(
     # (the terminal StreamDelta). Never the request's or the decision's model: those name
     # what was asked for, which is exactly what used to be reported when another model ran.
     served_model: str | None = None
+    # The adapter path the answer was actually generated with (None after a base retry).
+    used_path: str | None = None
 
     def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
         nonlocal finish_reason, served_model
@@ -724,12 +750,15 @@ def _stream_sse(
         # Mirrors Router._generate: an adapter that fails before any text is retried once on
         # base weights, so a broken promoted adapter cannot fail /chat while the
         # non-streaming path quietly succeeds.
+        nonlocal used_path
+        used_path = stream_req.adapter
         try:
             yield from relay(router.local, stream_req, stream_req.model)
         except Exception as exc:  # noqa: BLE001
             if stream_req.adapter is None or parts:
                 raise
             logger.warning("stream failed with adapter; retrying on base weights: %s", exc)
+            used_path = None
             yield from relay(
                 router.local,
                 GenRequest(
@@ -754,7 +783,7 @@ def _stream_sse(
                     # is spend and an escalation that failed, so it is billed and recorded —
                     # not left to a log line — and nothing local is spliced onto its answer.
                     _record_failed_remote_stream(
-                        router, gen_req, decision, provider, "".join(parts), adapter,
+                        router, gen_req, decision, provider, "".join(parts), None,
                         f"provider {provider.name!r} failed mid-stream: {exc}",
                         (time.perf_counter() - started) * 1000.0,
                     )
@@ -765,14 +794,13 @@ def _stream_sse(
                 escalation_failed = f"provider {provider.name!r} failed: {exc}"
                 decision = router.degrade_to_local(gen_req, decision, exc)
                 provider = router.local
+                choice = router.select_adapter(adapter, decision.task_class, decision.model)
                 stream_req = GenRequest(
                     messages=gen_req.messages,
                     model=decision.model,
                     max_tokens=gen_req.max_tokens,
                     temperature=gen_req.temperature,
-                    adapter=router._resolve_adapter(
-                        adapter, decision.task_class, decision.model
-                    ),
+                    adapter=choice.path,
                 )
                 yield from relay_local(stream_req)
     except UnknownModelError as exc:
@@ -793,7 +821,7 @@ def _stream_sse(
         # Recorded before the error event goes out: a failed request (and, after a failed
         # escalation, a prompt the remote may already hold) must reach the metrics.
         router.record_failure(
-            gen_req, decision, provider, exc, started=started, adapter=adapter,
+            gen_req, decision, provider, exc, started=started, adapter=choice.id,
             escalation_failed=escalation_failed,
             completion_tokens=_estimate_stream_tokens(gen_req, "".join(parts))[1]
             if parts else 0,
@@ -805,6 +833,8 @@ def _stream_sse(
     # A provider that cannot say which model ran (third-party, plain stream()) falls back to
     # its bound model id if it has one, and only then to the decision.
     model_served = served_model or getattr(provider, "model_id", None) or decision.model
+    # The adapter that actually served — not the one requested (B-034).
+    served_adapter = router.served_adapter(provider, choice, used_path)
 
     prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
@@ -832,7 +862,7 @@ def _stream_sse(
                 escalated=decision.would_escalate,
                 escalation_reason=decision.reason if decision.would_escalate else None,
                 escalation_failed=escalation_failed,
-                adapter=adapter,
+                adapter=served_adapter,
                 estimated_frontier_tokens_saved=saved,
             )
         )
@@ -850,7 +880,7 @@ def _stream_sse(
                 served_by=served_by,
                 backend=provider.name,
                 model=model_served,
-                adapter=adapter,
+                adapter=served_adapter,
                 escalated=decision.would_escalate,
                 estimated_frontier_tokens_saved=saved,
             ),

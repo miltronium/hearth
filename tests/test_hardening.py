@@ -176,11 +176,21 @@ def test_bad_adapter_degrades_to_base(tmp_path):
     settings = Settings(backend="echo", home=tmp_path / ".hearth", require_auth=False, warmup=False)
     provider = AdapterSensitiveProvider()
     policy = _local_policy()
+    # A registered adapter whose load fails at generation time. (An UNREGISTERED id is now a
+    # 404 before anything runs — B-034, tests/test_gateway_adapter_telemetry.py.)
+    from hearth.registry import AdapterStore
+
+    store = AdapterStore(path=tmp_path / "adapters.json")
+    store.register(
+        "some-adapter-id", base_model="", task="chat", train_run_id="r",
+        adapter_path="/adapters/broken",
+    )
     router = Router(
         local_provider=provider,
         policy=policy,
         budget=BudgetAccountant(policy.defaults.remote_budget_tokens_per_day),
         metrics=MetricsStore(),
+        adapters=store,
     )
     client = TestClient(create_app(provider=provider, settings=settings, router=router))
     r = client.post(
@@ -191,6 +201,7 @@ def test_bad_adapter_degrades_to_base(tmp_path):
             "hearth": {"adapter": "some-adapter-id"},
         },
     )
-    # The router can't resolve the id to a path (no store) → base weights → success.
+    # The adapter fails to load → retried on base weights → success, and no adapter claimed.
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "base ok"
+    assert r.json()["hearth"]["adapter"] is None

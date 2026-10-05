@@ -81,6 +81,20 @@ not a 404: the load fails and the request gets `503` `provider_unavailable` whos
 names the `hearth models pull <id>` to run (HEARTH never downloads on load). The CLI applies
 the same check: `hearth run --model <unknown>` / `hearth agent --model <unknown>` exit 2.
 
+**`hearth.adapter` reports what served.** The response's `hearth.adapter` is the adapter
+whose weights actually generated the answer: the requested id, or — when none was
+requested — the task class's promoted adapter (the default path, unchanged). It is `null`
+when base weights answered: no adapter selected, the request escalated to a remote, the
+adapter failed to load and the request was retried on base weights, or the backend ignores
+adapters (`echo`). An explicitly requested adapter that is not registered (or is retired) is
+refused before anything runs, exactly like an unknown model:
+
+```jsonc
+// HTTP 404
+{ "error": { "message": "adapter 'no-such-adapter' cannot be served: unknown adapter: 'no-such-adapter'",
+             "type": "invalid_request_error", "param": "hearth.adapter", "code": "adapter_not_found" } }
+```
+
 ### `POST /v1/embeddings`
 
 Standard OpenAI embeddings shape. `model: "auto"` selects the configured local embedder.

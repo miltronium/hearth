@@ -23,7 +23,7 @@ from hearth.providers.base import Capabilities, GenRequest, GenResult, Message, 
 from hearth.providers.echo import EchoProvider
 from hearth.router import ProviderError, Router
 from hearth.router.policy import ClassRule, Defaults, RemoteConfig, RoutingPolicy
-from hearth.router.route import REASON_REMOTE_FAILURE
+from hearth.router.route import REASON_REMOTE_FAILURE, AdapterChoice
 
 PROMPT = "prove this step by step"  # classifies as `reason`
 
@@ -253,7 +253,9 @@ class AdapterSensitiveLocal(_Provider):
 def _adapter_client(tmp_path) -> TestClient:
     client = _client(tmp_path, DeadRemote, local=AdapterSensitiveLocal())
     router = client.app.state.router
-    router._resolve_adapter = lambda requested, task_class, model=None: "/adapters/broken"
+    router.select_adapter = lambda requested, task_class, model=None: AdapterChoice(
+        id="broken", path="/adapters/broken"
+    )
     return client
 
 

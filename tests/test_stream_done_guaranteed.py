@@ -86,7 +86,7 @@ def test_an_unexpected_error_before_the_first_chunk_still_ends_with_done(tmp_pat
     def explode(*a, **k):
         raise RuntimeError("adapter store corrupt")
 
-    router._resolve_adapter = explode
+    router.select_adapter = explode
     events = _events(_post(client).text)
     assert events[-1] == "[DONE]"
     errors = [e for e in events if isinstance(e, dict) and "error" in e]
