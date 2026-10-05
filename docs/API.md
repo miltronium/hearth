@@ -232,10 +232,16 @@ final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget":
     "ram_ceiling_gb": 24.0, "resident_ram_gb": 6.5,
     "resident": [ { "model": "mlx-community/Qwen2.5-3B-Instruct-4bit", "ram_gb": 2.0,
                     "provider_model": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+                    "adapter": null,
                     "loaded": true,
                     "loaded_path": "/Users/…/.hearth/models/models--mlx-community--Qwen2.5-3B-Instruct-4bit/snapshots/…",
                     "generations": 5 } ] }
   ```
+
+  Each LoRA adapter variant is its own resident (`model` `<id>@adapter:<path>`, `adapter` set,
+  `ram_gb` the base model's full size): mlx_lm materialises base+adapter as a whole model, so a
+  variant costs a full reload and is counted, LRU-evicted and refused against
+  `ram_ceiling_gb` like any model.
 
   `loaded_path` is the directory `mlx_lm.load` actually read and `generations` counts the
   generations that instance ran — evidence of which weights answered, independent of anything

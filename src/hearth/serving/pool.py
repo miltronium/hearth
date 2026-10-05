@@ -14,8 +14,9 @@ checked thing (which weights ran) were different objects: ``CLAUDE.md`` §3.
   non-chat entry, or an entry for another backend raises :class:`UnknownModelError` — never a
   silent fallback to the default. ``"auto"``/empty resolve to the registry default (the router
   has already applied the per-class ladder by the time a request arrives here);
-* keeps one provider per model id resident in a :class:`~hearth.serving.ModelManager`, LRU
-  under ``settings.ram_ceiling_gb``;
+* keeps one provider per model id — and one per (model, LoRA adapter) variant, each a full
+  base reload sized at the model's ``ram_gb`` (B-069) — resident in a
+  :class:`~hearth.serving.ModelManager`, LRU under ``settings.ram_ceiling_gb``;
 * runs residency lookup, loading, eviction *and* generation inside a single job on the
   process's one MLX thread (``providers/mlx.py``). Because that thread runs one job at a
   time, a model cannot be evicted between being picked for a request and generating it — and
@@ -40,7 +41,7 @@ from ..providers.base import (
     StreamDelta,
     iter_stream,
 )
-from ..providers.mlx import iterate_on_mlx_thread, run_on_mlx_thread
+from ..providers.mlx import iterate_on_mlx_thread, run_on_mlx_thread, variant_key
 from .manager import ModelManager
 
 AUTO_MODEL_IDS = ("", "auto")
@@ -157,6 +158,8 @@ class ModelPool:
         # whose default was evicted — or never loaded because warmup is off — can still say
         # truthfully whether the default can be loaded. ``None``: this pool cannot tell.
         self._locate = locate
+        # manager key -> (model id, adapter path) for adapter variants (see _key).
+        self._variants: dict[str, tuple[str, str]] = {}
         self.manager = ModelManager(self._make, ram_ceiling_gb=ram_ceiling_gb)
 
     # -- registry ------------------------------------------------------------------------
@@ -177,9 +180,33 @@ class ModelPool:
         """Every id :meth:`resolve` accepts other than ``auto``: chat models of this backend."""
         return servable_ids(self.registry, self._backend)
 
-    def _make(self, model_id: str) -> ModelProvider:
+    def _make(self, key: str) -> ModelProvider:
+        model_id, adapter = self._variants.get(key, (key, None))
         entry = self.registry.get(model_id)
-        return self._factory(model_id, entry.ram_gb if entry is not None else 4.5)
+        provider = self._factory(model_id, entry.ram_gb if entry is not None else 4.5)
+        if adapter is not None:
+            # The provider's own default variant (MLXProvider.adapter): it loads base+adapter
+            # as its ONE set of weights and is sized at the model's full ram_gb (B-069).
+            provider.adapter = adapter
+        return provider
+
+    def _key(self, model_id: str, adapter: str | None) -> str:
+        """The manager key for ``model_id`` with ``adapter`` layered over it.
+
+        Every adapter variant is its own resident (B-069). mlx_lm materialises base+adapter
+        as a full model per variant, so a 14B serving three adapters holds four 14Bs of
+        weights; keyed together under one id the manager counted 9 GB for ~36 GB, never
+        evicted a variant, and never refused one. As separate residents each is sized,
+        LRU-evicted and refused like any model. (Sharing base weights is not done: mlx_lm's
+        ``remove_lora_layers`` restores only plain ``LoRALinear`` layers — a DoRA/embedding/
+        full-weight adapter could not be cleanly swapped out, and a leftover adapter would
+        answer with weights nobody asked for.) The base model keeps the bare id, so
+        readiness and the admin view address it exactly as before.
+        """
+        key = variant_key(model_id, adapter)
+        if adapter:
+            self._variants.setdefault(key, (model_id, adapter))
+        return key
 
     # -- residency -----------------------------------------------------------------------
 
@@ -226,9 +253,10 @@ class ModelPool:
     def generate(self, req: GenRequest) -> GenResult:
         resolved = self.resolve(req.model)
         concrete = replace(req, model=resolved)
+        key = self._key(resolved, req.adapter)
 
         def job() -> GenResult:
-            return self.manager.get(resolved).generate(concrete)
+            return self.manager.get(key).generate(concrete)
 
         return run_on_mlx_thread(job)
 
@@ -236,9 +264,8 @@ class ModelPool:
         # Resolve eagerly: an unknown id raises here, before a caller has started a response.
         resolved = self.resolve(req.model)
         concrete = replace(req, model=resolved)
-        return iterate_on_mlx_thread(
-            lambda: iter_stream(self.manager.get(resolved), concrete)
-        )
+        key = self._key(resolved, req.adapter)
+        return iterate_on_mlx_thread(lambda: iter_stream(self.manager.get(key), concrete))
 
     def stream(self, req: GenRequest) -> Iterator[str]:
         for delta in self.stream_deltas(req):

@@ -317,6 +317,16 @@ def audit_resolution(model_id: str, allow_downloads: bool) -> tuple[object, list
     return audit_connects(resolve_local_model, model_id, allow_downloads=allow_downloads)
 
 
+def variant_key(model_id: str, adapter: str | None) -> str:
+    """The residency key for ``model_id`` with ``adapter`` layered over it (``None`` = base).
+
+    The base keeps the bare id; a variant is ``<id>@adapter:<path>``. One definition, used by
+    :class:`~hearth.serving.ModelPool` (to key the ModelManager) and by
+    :class:`MLXProvider` (to recognise its own key), so the two cannot disagree.
+    """
+    return model_id if not adapter else f"{model_id}@adapter:{adapter}"
+
+
 class MLXProvider:
     """Loads a single model via ``mlx-lm`` and serves streaming/non-streaming completions.
 
@@ -324,7 +334,11 @@ class MLXProvider:
     keeps exactly one resident base model; ADR-003). LoRA adapters are hot-swappable per
     request (Phase 4): :meth:`generate`/:meth:`stream` accept an optional ``adapter`` path
     that layers over the base weights; each distinct adapter path is loaded once and cached
-    alongside the base so switching between them is cheap (ARCHITECTURE §5).
+    alongside the base so switching between them is cheap (ARCHITECTURE §5). Each cached
+    variant is a FULL model in memory (mlx_lm loads base+adapter), so under a
+    :class:`~hearth.serving.ModelPool` every variant is its own provider (``adapter`` set),
+    sized and evicted by the ModelManager (B-069); driving several variants through one
+    bare instance is for scripts and tests only.
     """
 
     name = "mlx"
@@ -351,8 +365,12 @@ class MLXProvider:
 
     @property
     def is_loaded(self) -> bool:
-        """True only when this instance currently holds base weights in memory."""
-        return "" in self._cache
+        """True only when this instance holds its own variant's weights in memory.
+
+        Its own variant is the base weights, or base+``self.adapter`` for a provider a
+        :class:`~hearth.serving.ModelPool` built for one adapter variant (B-069).
+        """
+        return (self.adapter or "") in self._cache
 
     def load(self, model_id: str | None = None) -> None:
         """Load the base weights now, on the MLX thread (warmup / ModelManager admission).
@@ -360,11 +378,15 @@ class MLXProvider:
         Raises whatever the load raises (:class:`ModelNotOnDiskError`, a corrupt checkpoint,
         mlx-lm missing) so a caller — readiness, a request — sees the real failure.
         """
-        if model_id is not None and model_id != self.model_id:
+        if model_id is not None and model_id not in self._own_keys():
             raise ModelMismatchError(
                 f"provider for {self.model_id!r} was asked to load {model_id!r}"
             )
-        run_on_mlx_thread(self._load_variant, None)
+        run_on_mlx_thread(self._load_variant, self.adapter)
+
+    def _own_keys(self) -> tuple[str, str]:
+        """The ids this instance answers to: its model id and its residency key."""
+        return self.model_id, variant_key(self.model_id, self.adapter)
 
     def preflight(self, model_id: str | None = None) -> None:
         """Raise if a load of the base weights cannot start — WITHOUT loading anything.
@@ -373,11 +395,13 @@ class MLXProvider:
         downloads are opted in), so :class:`ModelNotOnDiskError` surfaces here, before the
         :class:`~hearth.serving.ModelManager` evicts any resident to make room (B-072).
         """
-        if model_id is not None and model_id != self.model_id:
+        if model_id is not None and model_id not in self._own_keys():
             raise ModelMismatchError(
                 f"provider for {self.model_id!r} was asked to preflight {model_id!r}"
             )
         resolve_local_model(self.model_id)
+        if self.adapter and not Path(self.adapter).expanduser().exists():
+            raise FileNotFoundError(f"The adapter path does not exist: {self.adapter}")
 
     def unload(self, model_id: str | None = None) -> None:
         """Drop every cached variant and return the memory to the allocator (MLX thread)."""
@@ -424,8 +448,8 @@ class MLXProvider:
         loaded = load(path, **kwargs)
         self._ensure_stop_tokens(loaded[1])
         self._cache[key] = loaded
-        if not adapter:
-            self.loaded_path = path
+        if not adapter or adapter == self.adapter:
+            self.loaded_path = path  # the base weights this instance's own variant read
         logger.info("loaded %s from %s%s", self.model_id, path,
                     f" with adapter {adapter}" if adapter else "")
         return loaded
@@ -600,7 +624,7 @@ class MLXProvider:
             return ResourceEstimate(ram_gb=self._ram_gb)
         from ..registry import get_registry
 
-        entry = get_registry().get(model_id or self.model_id)
+        entry = get_registry().get(self.model_id)
         return ResourceEstimate(ram_gb=entry.ram_gb if entry is not None else 4.5)
 
     def _terminator_markers(self) -> list[str]:

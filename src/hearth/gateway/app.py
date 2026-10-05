@@ -214,6 +214,9 @@ def create_app(
                     "model": r.model_id,
                     "ram_gb": r.ram_gb,
                     "provider_model": getattr(r.provider, "model_id", None),
+                    # The LoRA adapter this resident layers over the base (None = base): each
+                    # variant is a full reload, counted separately (B-069).
+                    "adapter": getattr(r.provider, "adapter", None),
                     "loaded": getattr(r.provider, "is_loaded", None),
                     "loaded_path": getattr(r.provider, "loaded_path", None),
                     "generations": getattr(r.provider, "generations", None),
