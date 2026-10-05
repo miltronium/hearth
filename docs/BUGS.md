@@ -409,7 +409,8 @@ must fail when the fix is reverted.
 ### B-011
 **The MLX embedder cannot work: the default id 404s, and mlx-lm has no BERT architecture**
 
-- **Priority:** P2 · **Status:** open · **Effort:** M
+- **Priority:** P2 · **Status:** open (the `config.py` default id was fixed in `d4eb825`;
+  the BERT architecture problem below is not) · **Effort:** M
 - **Evidence:**
   - `config.py:44` `embed_model = "mlx-community/bge-small-en-v1.5-mlx"`.
     `config/models.yaml:65-67` says that id "404s upstream" and registers
@@ -889,6 +890,8 @@ must fail when the fix is reverted.
 - **Fix:** real header detection (modal width + every cell label-like); preamble counted, never
   printed; no confident header → no names; error type only. Tests plant a marker in every
   non-header cell and assert none appears in the output.
+  **Superseded:** that label heuristic still printed values (B-063); replaced by an allowlist
+  in `a4ad61c`.
 
 ### B-045
 **An unedited `prereg init` template, or `must_beat_baselines: []`, could gate a promotion**
@@ -1102,7 +1105,13 @@ must fail when the fix is reverted.
 ### B-063
 **`hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerless all-text file, or JSON keys that are values pass `_looks_like_label`**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `a4ad61c` · **Effort:** S–M
+- **Fix:** no heuristic left. A header cell prints only if every word is in a fixed column
+  vocabulary (`VOCAB`; no digits), else `(withheld)`; header row = first row with ≥2 such
+  names (JSON: the key row); preamble counted as `skip_rows`, never printed; files print as
+  ids `F1..Fn` (`--index-out` writes the id→path list locally); refusals print fixed reasons.
+  Tests: the reviewer's three files (`tests/fixtures/peek/`) and a property test over 150
+  random tables (no random token or 3+ digit run may appear); 6 mutants killed.
 - **Evidence:** Reviewer: printed "Jane Q Public", "Premier Checking", "SECRETMERCHANT ONE" then "No cell values were printed". Heuristic label detection cannot distinguish text values from labels; tests only used rows containing a date and an amount. File names/paths also printed verbatim (may carry account numbers). (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-064
@@ -1126,7 +1135,10 @@ must fail when the fix is reverted.
 ### B-067
 **`doctor --offline` says SAFE with a plugin embedder or vector store, which receive every RAG chunk and query**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Priority:** P1 · **Status:** **FIXED** in `74e5943` · **Effort:** S–M
+- **Fix:** fatal `embedder` / `vector_store` rows judge the exact type returned by the real
+  `select_embedder` / `select_vector_store`: built-ins pass; a plugin (even a subclass of a
+  built-in) or an unresolvable name FAILs. The reviewer's command is now UNSAFE, exit 1.
 - **Evidence:** doctor.py FAILs a plugin backend (~398-411) but not HEARTH_EMBEDDER / HEARTH_VECTOR_STORE plugins. Reviewer: `HEARTH_EMBEDDER=evil-cloud-embedder HEARTH_VECTOR_STORE=evil-store hearth doctor --offline` → SAFE. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-068
@@ -1162,7 +1174,10 @@ must fail when the fix is reverted.
 ### B-073
 **Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; config embed_model default is the 404 id; failed record `adapter` field differs by path**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S–M
+- **Priority:** P3 · **Status:** **FIXED (2 of 3)** in `d4eb825` — the example resolves
+  `HEARTH_ROUTING_YAML` with `resolve_routing_selection` and exits 2 on a missing named
+  profile; `embed_model` defaults to the registered `-bf16` id. **Open:** the failed record's
+  `adapter` field differing between route.py ~266 and app.py ~889 · **Effort:** S–M
 - **Evidence:** run_finance_ladder.py ~400-402 (B-008 bypass); config.py ~46; route.py ~266 vs app.py ~889. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ---
@@ -1226,3 +1241,6 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `2c8f5f9` | **B-037.** `docs/API.md` matches the app's routes and error envelopes; `tests/test_api_doc_routes.py` checks both ways. |
 | `05c4db5` | Docs: `docs/GUIDE.md` has no pending-change markers left; B-003/006/031/033–036/046–049 described as merged, with measured output. |
 | `3951d2e` | **B-059, B-060.** Unknown HEARTH_BACKEND → exit 2 / doctor FAIL; unknown intent → 422 / exit 2 / UnknownIntentError. |
+| `a4ad61c` | **B-063.** `hearth_peek.py` prints only allowlisted column names, counts, type guesses and file ids; no heuristic, no file names; property-tested. |
+| `74e5943` | **B-067.** `doctor --offline` FAILs a plugin (or unresolvable) embedder / vector store, judged on the type the real selector returns. |
+| `d4eb825` | **B-073 (2 of 3).** Finance example uses the shared routing resolver and exits on a missing profile; `embed_model` default is the registered `-bf16` id. |
