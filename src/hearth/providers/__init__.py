@@ -77,6 +77,10 @@ def _auto_fallback_stub() -> EchoProvider:
     return stub
 
 
+class UnknownBackendError(ValueError):
+    """``HEARTH_BACKEND`` names no built-in backend and no installed provider plugin."""
+
+
 def select_provider(settings: Settings | None = None) -> ModelProvider:
     """Return the active provider for this process based on configuration."""
     settings = settings or get_settings()
@@ -96,10 +100,17 @@ def select_provider(settings: Settings | None = None) -> ModelProvider:
     plugin = load_plugin(PROVIDER_GROUP, settings.backend)
     if plugin is not None:
         return plugin
-    raise ValueError(
+    raise UnknownBackendError(
         f"Unknown HEARTH_BACKEND: {settings.backend!r} "
         "(use auto|mlx|echo, or install a plugin registering this name under hearth.providers)"
     )
 
 
-__all__ = ["mlx_pool", "select_provider", "EchoProvider", "MLXProvider", "ModelProvider"]
+__all__ = [
+    "mlx_pool",
+    "select_provider",
+    "UnknownBackendError",
+    "EchoProvider",
+    "MLXProvider",
+    "ModelProvider",
+]

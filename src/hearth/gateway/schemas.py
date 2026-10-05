@@ -25,6 +25,14 @@ class HearthRequestOptions(BaseModel):
     adapter: str | None = None
 
 
+    @field_validator("intent")
+    @classmethod
+    def _intent_is_a_task_class(cls, value: str | None) -> str | None:
+        # B-060: a named intent that is not a task class is a 422, not silently ignored.
+        from ..router.classify import check_intent
+
+        return check_intent(value)
+
 class ResponseFormat(BaseModel):
     """OpenAI ``response_format``. ``type`` is kept a plain ``str`` on purpose.
 
@@ -199,6 +207,14 @@ class RouteRequest(BaseModel):
     intent: str | None = None
     allow_escalation: bool = True
 
+
+    @field_validator("intent")
+    @classmethod
+    def _intent_is_a_task_class(cls, value: str | None) -> str | None:
+        # B-060: a named intent that is not a task class is a 422, not silently ignored.
+        from ..router.classify import check_intent
+
+        return check_intent(value)
 
 class RouteResponse(BaseModel):
     """What the router *would* do, without executing (docs/API.md)."""

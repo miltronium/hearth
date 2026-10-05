@@ -46,6 +46,30 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+class UnknownIntentError(ValueError):
+    """An explicit intent that names no task class (B-060)."""
+
+    def __init__(self, intent: str) -> None:
+        self.intent = intent
+        super().__init__(
+            f"unknown intent {intent!r}; use one of: {', '.join(TASK_CLASSES)}"
+        )
+
+
+def check_intent(intent: str | None) -> str | None:
+    """Normalise an explicit intent, or raise :class:`UnknownIntentError`.
+
+    ``None``/blank means "no hint". A named intent that is not a task class used to be
+    silently ignored and the request classified by keyword rules instead — the caller
+    asked for one class and got whatever the rules picked, with a 200.
+    """
+    if intent is None or not intent.strip():
+        return None
+    if intent.strip().lower() not in TASK_CLASSES:
+        raise UnknownIntentError(intent)
+    return intent.strip().lower()
+
+
 def classify(messages: list[Message], intent: str | None = None) -> tuple[str, str]:
     """Return ``(task_class, method)`` for a request.
 
@@ -55,8 +79,9 @@ def classify(messages: list[Message], intent: str | None = None) -> tuple[str, s
 
     Falls back to ``chat`` when no rule matches. Never calls a model in Phase 2.
     """
-    if intent and intent.lower() in TASK_CLASSES:
-        return intent.lower(), METHOD_INTENT
+    intent = check_intent(intent)
+    if intent is not None:
+        return intent, METHOD_INTENT
 
     last_user = _last_user_text(messages).lower()
     for task_class, keywords in _RULES:

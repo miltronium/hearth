@@ -81,6 +81,19 @@ def run_checks(settings: Settings | None = None) -> list[Check]:
         )
     )
 
+    # The backend the commands would actually build (B-059): construct it, as they do,
+    # rather than pattern-matching the setting. An unknown HEARTH_BACKEND makes every
+    # model-using command refuse to start, so it is fatal here, not a footnote.
+    from .providers import UnknownBackendError, select_provider
+
+    try:
+        provider = select_provider(settings)
+        checks.append(Check(
+            "backend", True, f"HEARTH_BACKEND={settings.backend} -> {provider.name}", fatal=True
+        ))
+    except UnknownBackendError as exc:
+        checks.append(Check("backend", False, str(exc), fatal=True))
+
     # State dir writable
     try:
         ensure_home(settings)

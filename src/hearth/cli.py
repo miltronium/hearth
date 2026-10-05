@@ -446,7 +446,8 @@ def serve(
     _require_registered_default()
     get_or_create_token(settings)  # ensure a token exists for bearer auth
     _log_hearth_to_stderr()
-    provider = select_provider(settings)
+    with _backend_required():
+        provider = select_provider(settings)
 
     bind_host = host or settings.host
     bind_port = port or settings.port
@@ -529,6 +530,13 @@ def run(
     is missing.
     """
     _require_registered_default()
+    from .router.classify import UnknownIntentError, check_intent
+
+    try:  # B-060: an unknown --intent is an error, not silently replaced by keyword rules
+        intent = check_intent(intent)
+    except UnknownIntentError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from None
     if file is not None:
         text = file.read_text()
     elif prompt is not None:
@@ -540,10 +548,10 @@ def run(
         raise typer.Exit(code=1)
 
     settings = get_settings()
-    provider = select_provider(settings)
+    with _backend_required():
+        provider = select_provider(settings)
     _require_known_model(provider, model)
-    # `intent` is recorded here for parity with the API's hearth.intent hint; the router
-    # that consumes it arrives in Phase 2. Surface it so `--intent` is observably wired.
+    # Surface the hint so `--intent` is observably wired (the router consumes it below).
     if intent:
         console.print(f"[dim]intent={intent}[/dim]")
     with _routing_profile_required():
@@ -616,6 +624,24 @@ def _routing_profile_required():
         yield
     except RoutingProfileNotFoundError as exc:
         console.print(f"[red]Routing profile not found:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=2) from None
+
+
+@contextmanager
+def _backend_required():
+    """Exit 2 with the provider factory's own message when HEARTH_BACKEND is unknown (B-059).
+
+    Wraps the code that actually builds the provider, so the error caught is the one
+    ``select_provider`` raised — it used to end every model-using command in a traceback.
+    """
+    from rich.markup import escape
+
+    from .providers import UnknownBackendError
+
+    try:
+        yield
+    except UnknownBackendError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=2) from None
 
 
@@ -780,7 +806,8 @@ def agent(
         notes.append("read_file/list_files will refuse every path — no roots resolved")
 
     tools = local_toolset(settings=settings, rag=rag, finance=store, collection=collection)
-    provider = select_provider(settings)
+    with _backend_required():
+        provider = select_provider(settings)
     _require_known_model(provider, model)
     # "auto" rather than the registry default: pinning the default bypassed the per-class
     # ladder. Each step's served model is in the transcript, read off the provider that ran.
@@ -871,7 +898,7 @@ def mcp() -> None:
     try:
         from .mcp import server
 
-        with _routing_profile_required():
+        with _routing_profile_required(), _backend_required():
             server.run()
     except ModuleNotFoundError as exc:
         # The `mcp` SDK is an optional extra (server.py imports it lazily at run time, so
@@ -1236,7 +1263,8 @@ def rag_query(
 
     if answer:  # --answer generates with the default model; retrieval alone does not
         _require_registered_default()
-    provider = select_provider(get_settings())
+    with _backend_required():
+        provider = select_provider(get_settings())
     with _routing_profile_required():
         index = RagIndex(router=Router(local_provider=provider))
     # Emptiness first: no embedding (the mlx embedder cannot load today, B-011) and no
@@ -1516,7 +1544,8 @@ def eval_adapter(
 
     base_model = base or entry.base_model
     # Fresh Settings() (not the lru_cached get_settings) so HEARTH_BACKEND is read per call.
-    provider = select_provider(Settings())
+    with _backend_required():
+        provider = select_provider(Settings())
     # The evaluated model must be the one that generates. Before ModelPool every eval ran
     # the registry default whatever `base_model` said; now a pool refuses an unservable base
     # (a single-model provider — echo, a plugin — has nothing to select between).

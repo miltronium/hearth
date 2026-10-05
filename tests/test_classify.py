@@ -17,10 +17,15 @@ def test_intent_hint_short_circuits():
     assert method == "intent"
 
 
-def test_invalid_intent_falls_through_to_rules():
-    cls, method = classify(_user("summarize this document"), intent="not-a-class")
-    assert cls == "summarize"
-    assert method == "rules"
+def test_an_invalid_intent_is_refused_not_replaced_by_rules():
+    """B-060: it used to fall through to keyword rules — the caller named one class and
+    silently got whatever the rules picked."""
+    import pytest
+
+    from hearth.router.classify import UnknownIntentError
+
+    with pytest.raises(UnknownIntentError, match="not-a-class"):
+        classify(_user("summarize this document"), intent="not-a-class")
 
 
 def test_rule_keywords_map_to_classes():
