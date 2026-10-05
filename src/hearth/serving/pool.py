@@ -345,7 +345,15 @@ class ModelPool:
         resolved = self.resolve(req.model)
         concrete = replace(req, model=resolved)
         key = self._key(resolved, req.adapter)
-        return iterate_on_mlx_thread(lambda: iter_stream(self._get(key), concrete))
+
+        def make() -> Iterator[StreamDelta]:
+            # Same guard as generate(): a stream abandoned while queued behind another job
+            # loads nothing. Without it the provider's own check ran only after
+            # manager.get() had already loaded (and possibly evicted for) the weights.
+            raise_if_cancelled()
+            return iter_stream(self._get(key), concrete)
+
+        return iterate_on_mlx_thread(make)
 
     def stream(self, req: GenRequest) -> Iterator[str]:
         for delta in self.stream_deltas(req):
