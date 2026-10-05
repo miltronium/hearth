@@ -40,6 +40,7 @@ from ..providers.base import (
     ResourceEstimate,
     StreamDelta,
     iter_stream,
+    raise_if_cancelled,
 )
 from ..providers.mlx import iterate_on_mlx_thread, run_on_mlx_thread, variant_key
 from .manager import ModelManager
@@ -261,6 +262,7 @@ class ModelPool:
         key = self._key(resolved, req.adapter)
 
         def job() -> GenResult:
+            raise_if_cancelled()  # abandoned while queued: do not load weights for it
             return self.manager.get(key).generate(concrete)
 
         return run_on_mlx_thread(job)

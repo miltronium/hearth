@@ -176,7 +176,10 @@ in the provider contract, the wire shape does not have to move.
 | `max_observation_chars` | 4 000 | (per-observation cap; truncation is marked in the text) |
 
 Plus two terminal failures that are not budgets: `provider_error` (the backend could not
-generate) and `egress_refused` (§4).
+generate) and `egress_refused` (§4) — and `cancelled`: whoever owned the run went away (an
+abandoned `POST /v1/hearth/agent` stream, §9.2). `Agent(cancel=<threading.Event>)` is checked
+before every step; a generation already in flight stops at its next token when the caller
+wraps `run()` in `hearth.providers.base.cancel_scope(event)`.
 
 Three properties matter more than the numbers:
 
@@ -554,6 +557,14 @@ terminal `[DONE]` sentinel, an OpenAI-style `error` envelope for a mid-stream fa
 
 Streaming is not a nicety: at ~12 tok/s an eight-step run is minutes, and a blocking request
 would be indistinguishable from a hung one.
+
+**An abandoned stream stops the run.** While a step runs, a `: keepalive` SSE comment is sent
+every second (clients and the chat page ignore comment lines). Starlette notices a disconnect
+only between body chunks, so this is what lets the server see the client leave mid-step; it
+then sets the run's cancellation flag, the in-flight generation stops at its next token, the
+loop starts no further step, and the run ends as `cancelled` with the cut-short generation
+recorded as a failed request in the metrics. Before, the run kept the single MLX thread busy
+for up to its whole budget while chat queued behind it.
 
 **How steps are streamed without a second reading of the run.** The loop is synchronous, so the
 run goes on a worker thread and steps arrive over a queue. The route subclasses `Agent` and

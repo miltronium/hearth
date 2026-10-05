@@ -7,6 +7,7 @@ Install it with: ``uv sync --extra mlx --extra mcp --extra dev --extra files``.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import queue
@@ -26,6 +27,7 @@ from .base import (
     ResourceEstimate,
     StreamDelta,
     normalize_finish_reason,
+    raise_if_cancelled,
 )
 
 T = TypeVar("T")
@@ -61,7 +63,10 @@ def run_on_mlx_thread(fn: Callable[..., T], *args, **kwargs) -> T:
     """Run ``fn`` on the MLX thread and return its result (re-raising its exception)."""
     if on_mlx_thread():  # re-entrant: submitting to our own single worker would deadlock
         return fn(*args, **kwargs)
-    return _MLX_EXECUTOR.submit(fn, *args, **kwargs).result()
+    # The job runs in a copy of the caller's context, so the caller's cancellation scope
+    # (providers/base.py:cancel_scope) is visible to the generation loop on this thread.
+    context = contextvars.copy_context()
+    return _MLX_EXECUTOR.submit(context.run, fn, *args, **kwargs).result()
 
 
 def iterate_on_mlx_thread(make: Callable[[], Iterator[T]]) -> Iterator[T]:
@@ -94,7 +99,7 @@ def iterate_on_mlx_thread(make: Callable[[], Iterator[T]]) -> Iterator[T]:
         except BaseException as exc:  # noqa: BLE001 — re-raised on the consumer's thread
             out.put((False, exc))
 
-    _MLX_EXECUTOR.submit(pump)
+    _MLX_EXECUTOR.submit(contextvars.copy_context().run, pump)
     try:
         while True:
             ok, item = out.get()
@@ -553,6 +558,7 @@ class MLXProvider:
 
     def _stream_deltas_here(self, req: GenRequest) -> Iterator[StreamDelta]:
         self._check_model(req)
+        raise_if_cancelled()  # a job queued behind others may already be abandoned
         self._ensure_loaded(req.adapter)
         from mlx_lm import stream_generate
 
@@ -573,6 +579,9 @@ class MLXProvider:
                 prompt=prompt,
                 max_tokens=req.max_tokens,
             ):
+                # Per token: an abandoned caller (agent route, B-071) stops the generation
+                # here instead of holding the one MLX thread to max_tokens.
+                raise_if_cancelled()
                 raw_reason[0] = getattr(response, "finish_reason", None)
                 yield response.text
 

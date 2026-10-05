@@ -40,9 +40,9 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
-from ..providers.base import FINISH_LENGTH, GenRequest, Message
+from ..providers.base import FINISH_LENGTH, GenerationCancelledError, GenRequest, Message
 from ..router.route import ProviderError, Router
 from .protocol import FinalAnswer, ProtocolError, ToolCall, parse_action, render_system_prompt
 from .tools import (
@@ -70,6 +70,8 @@ STOPPED_INVALID_OUTPUT = "invalid_output"
 STOPPED_PROVIDER_ERROR = "provider_error"
 #: A generation was not served locally. Terminal, and a bug worth waking someone for.
 STOPPED_EGRESS_REFUSED = "egress_refused"
+#: The caller went away (an abandoned HTTP stream): the run was stopped, not finished.
+STOPPED_CANCELLED = "cancelled"
 
 StopReason = Literal[
     "answered",
@@ -79,6 +81,7 @@ StopReason = Literal[
     "invalid_output",
     "provider_error",
     "egress_refused",
+    "cancelled",
 ]
 
 STOP_REASONS: tuple[StopReason, ...] = (
@@ -89,6 +92,7 @@ STOP_REASONS: tuple[StopReason, ...] = (
     STOPPED_INVALID_OUTPUT,
     STOPPED_PROVIDER_ERROR,
     STOPPED_EGRESS_REFUSED,
+    STOPPED_CANCELLED,
 )
 
 #: What one turn resolved to, for the transcript.
@@ -337,6 +341,7 @@ class Agent:
         guidance: str = "",
         vetted_only: bool = True,
         clock: Callable[[], float] = time.monotonic,
+        cancel: _Flag | None = None,
     ) -> None:
         self.router = router
         self.registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
@@ -355,6 +360,10 @@ class Agent:
         self.temperature = temperature
         self.guidance = guidance
         self._clock = clock
+        # Set by whoever can abandon the run (the HTTP route when its client disconnects,
+        # B-071). Checked before every step; the in-flight generation sees it through
+        # providers.base.cancel_scope, which the caller wraps around run().
+        self._cancel = cancel
 
     # -- the loop ---------------------------------------------------------------------
 
@@ -391,6 +400,10 @@ class Agent:
             )
 
         while True:
+            if self._cancel is not None and self._cancel.is_set():
+                return finish(
+                    STOPPED_CANCELLED, "the caller went away; the run was stopped"
+                )
             # Bounds are checked *before* starting a turn, so the run never begins a step it
             # cannot pay for and the reported totals are the ones actually spent.
             if len(steps) >= self.budget.max_iterations:
@@ -427,6 +440,11 @@ class Agent:
                 )
                 logger.error("agent run aborted: %s", exc)
                 return finish(STOPPED_EGRESS_REFUSED, str(exc))
+            except GenerationCancelledError as exc:
+                steps.append(
+                    Step(index=index, kind="invalid", model_output="", error=str(exc))
+                )
+                return finish(STOPPED_CANCELLED, str(exc))
 
             prompt_tokens += turn.prompt_tokens
             completion_tokens += turn.completion_tokens
@@ -584,6 +602,13 @@ class Agent:
             value=value,
             seconds=self._clock() - started,
         )
+
+
+class _Flag(Protocol):
+    """A cancellation flag (``threading.Event`` in practice; typed structurally so this
+    package needs no threading import — tests/test_agent_no_network.py)."""
+
+    def is_set(self) -> bool: ...
 
 
 @dataclass(frozen=True)

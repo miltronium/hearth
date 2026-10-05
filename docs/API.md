@@ -149,7 +149,9 @@ A missing or empty collection returns `"chunks": []` without embedding the query
 
 The bounded, read-only agent loop, streamed as SSE: a start event, one event per step, a
 final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget": {...}}`
-(unknown fields are refused). Full contract, events and budgets:
+(unknown fields are refused). While a step runs the stream carries a `: keepalive` SSE comment
+every second; a client that disconnects stops the run (the in-flight generation ends at its
+next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
 [docs/AGENT.md](AGENT.md) §9.
 
 ### Admin (`/v1/hearth/admin/`)

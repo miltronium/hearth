@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
@@ -45,6 +46,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from ..agent import Agent, AgentRun, Budget, Step, local_toolset
 from ..mcp.files import allowed_roots
+from ..providers.base import cancel_scope
 from ..serving import UnknownModelError, check_model
 from .auth import require_token
 from .schemas import (
@@ -64,6 +66,11 @@ logger = logging.getLogger("hearth.gateway.agent")
 MAX_ITERATIONS_CEILING: Final[int] = 12
 MAX_SECONDS_CEILING: Final[float] = 600.0
 MAX_TOTAL_TOKENS_CEILING: Final[int] = 48_000
+
+#: Longest gap between body chunks while a step runs: a ``: keepalive`` SSE comment is sent
+#: when no step arrives within it, so a client disconnect is noticed (and the run cancelled)
+#: within about this long rather than after the step in flight finishes (B-071).
+HEARTBEAT_SECONDS: Final[float] = 1.0
 
 #: How much of a step's observation goes on the wire. The loop has already capped it at
 #: ``Budget.max_observation_chars`` for the *model*; this second, smaller cap is for the
@@ -121,26 +128,35 @@ def register_agent_route(app: FastAPI) -> None:
         # The chat stream's backstop (B-007): any exception the generator itself raises —
         # building a step or terminal event — still ends with an error event and [DONE].
         # Imported here because app.py imports this module.
-        from .app import _guarantee_done
+        from .app import _close_on_disconnect, _guarantee_done
 
+        # Set when the client goes away (B-071): the loop checks it before every step, and
+        # the in-flight generation sees it through cancel_scope and stops at the next token.
+        cancel = threading.Event()
         return StreamingResponse(
-            _guarantee_done(_stream_agent(
-                agent_factory=lambda on_step: _StreamingAgent(
-                    state.router,
-                    registry,
-                    on_step=on_step,
-                    budget=budget,
-                    model=req.model,
-                    # Hardcoded. Not a default, not a setting, not a request field: the one
-                    # place this could be relaxed is this literal, and it is greppable.
-                    vetted_only=True,
-                ),
-                task=req.task,
-                start=start,
-                applied=applied,
-                warnings=warnings,
-                reachable=_is_reachable(tool_names, roots),
-            )),
+            _close_on_disconnect(
+                _guarantee_done(_stream_agent(
+                    agent_factory=lambda on_step: _StreamingAgent(
+                        state.router,
+                        registry,
+                        on_step=on_step,
+                        budget=budget,
+                        model=req.model,
+                        # Hardcoded. Not a default, not a setting, not a request field: the
+                        # one place this could be relaxed is this literal, and it is
+                        # greppable.
+                        vetted_only=True,
+                        cancel=cancel,
+                    ),
+                    task=req.task,
+                    start=start,
+                    applied=applied,
+                    warnings=warnings,
+                    reachable=_is_reachable(tool_names, roots),
+                    cancel=cancel,
+                )),
+                on_close=cancel.set,
+            ),
             media_type="text/event-stream",
         )
 
@@ -259,14 +275,18 @@ def _stream_agent(
     applied: AgentBudgetApplied,
     warnings: list[str],
     reachable: bool,
+    cancel: threading.Event | None = None,
 ) -> Iterator[str]:
     """Yield the start event, one event per step as it happens, a terminal event, ``[DONE]``.
 
     The loop is synchronous and a generator cannot be resumed from a callback, so the run goes
-    on a worker thread and steps arrive over a queue. The thread is a daemon and the run is
-    bounded by ``max_seconds``, so a client that disconnects mid-run cannot leave work behind
-    that outlives the process.
+    on a worker thread and steps arrive over a queue. ``cancel`` stops it when the client goes
+    away (B-071): the route's ``_close_on_disconnect`` sets it, and so does closing this
+    generator; the loop checks it before every step and the in-flight generation (run under
+    :func:`~hearth.providers.base.cancel_scope`) stops at its next token. Without it an
+    abandoned run held the single MLX thread for up to its whole budget.
     """
+    cancel = cancel if cancel is not None else threading.Event()
     yield _sse(start)
 
     if not reachable:
@@ -293,7 +313,8 @@ def _stream_agent(
 
     def work() -> None:
         try:
-            result["run"] = agent_factory(events.put).run(task)
+            with cancel_scope(cancel):
+                result["run"] = agent_factory(events.put).run(task)
         except Exception as exc:  # noqa: BLE001 — reported to the client, not swallowed
             logger.exception("agent run failed")
             result["error"] = exc
@@ -303,12 +324,24 @@ def _stream_agent(
     _RUNNER.submit(work)
 
     streamed: set[int] = set()
-    while True:
-        item = events.get()
-        if item is _DONE:
-            break
-        streamed.add(item.index)
-        yield _sse(_step_event(item))
+    try:
+        while True:
+            try:
+                item = events.get(timeout=HEARTBEAT_SECONDS)
+            except queue.Empty:
+                # A step can take minutes. Starlette notices a disconnect only between body
+                # chunks (its threadpool hop cannot be interrupted), so without a chunk here
+                # an abandoned run was cancelled only after the step in flight finished. An
+                # SSE comment line is ignored by every client (and by /chat's parser).
+                yield ": keepalive\n\n"
+                continue
+            if item is _DONE:
+                break
+            streamed.add(item.index)
+            yield _sse(_step_event(item))
+    except GeneratorExit:
+        cancel.set()  # closed mid-run: nobody is reading the rest of it
+        raise
 
     error = result.get("error")
     if error is not None:

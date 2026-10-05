@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 
 from fastapi import Depends, FastAPI, Query
@@ -774,7 +774,9 @@ def _sse(payload: object) -> str:
     return f"data: {payload.model_dump_json(exclude_none=True)}\n\n"
 
 
-async def _close_on_disconnect(stream: Iterator[str]) -> AsyncIterator[str]:
+async def _close_on_disconnect(
+    stream: Iterator[str], on_close: Callable[[], None] | None = None
+) -> AsyncIterator[str]:
     """Relay a sync SSE generator, and CLOSE it however the response ends.
 
     Starlette drives a sync body from a threadpool and, when the client disconnects, simply
@@ -783,11 +785,17 @@ async def _close_on_disconnect(stream: Iterator[str]) -> AsyncIterator[str]:
     close) never runs and the MLX thread keeps generating to ``max_tokens`` while every
     other request queues behind it. Measured against Coder-14B: a stream abandoned 1.6 s in
     made the next 0.5 s request take 69.8 s — the full generation.
+
+    ``on_close`` runs first, synchronously, however the response ends: the agent route
+    passes its cancellation flag's ``set`` here, because closing its generator alone cannot
+    reach a run already executing on a worker thread (B-071).
     """
     try:
         async for chunk in iterate_in_threadpool(stream):
             yield chunk
     finally:
+        if on_close is not None:
+            on_close()
         # Not awaited: this runs inside a cancelled task. A helper thread closes the
         # generator as soon as any in-flight next() on a pool thread has returned.
         threading.Thread(

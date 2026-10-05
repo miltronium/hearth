@@ -8,7 +8,10 @@ and :mod:`hearth.providers.mlx` (real Apple Silicon inference).
 
 from __future__ import annotations
 
+import contextvars
+import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -137,6 +140,42 @@ class ModelProvider(Protocol):
     # third-party providers keep satisfying it: a backend that knows why streaming ended
     # also implements ``stream_deltas(req) -> Iterator[StreamDelta]``. Callers reach it
     # through :func:`iter_stream`, which falls back to :meth:`stream` for the rest.
+
+
+class GenerationCancelledError(RuntimeError):
+    """The caller that wanted this generation has gone away; it was stopped part-way (B-071).
+
+    Not a provider failure: the router neither wraps it as a 503 nor retries it on base
+    weights, and the agent loop ends its run with ``stopped_reason == "cancelled"``.
+    """
+
+
+# The cancellation flag of the work currently running in this context. Set by whoever owns a
+# unit of work that a client can abandon (the agent route); read by the generation loop. The
+# MLX thread runs each job inside a copy of the submitting thread's context
+# (providers/mlx.py), so a flag set around ``router.route`` on the agent's thread is the flag
+# the token loop on the MLX thread sees.
+_CANCEL: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "hearth_generation_cancel", default=None
+)
+
+
+@contextmanager
+def cancel_scope(event: threading.Event):
+    """Run the enclosed generations under ``event``: once it is set they stop at the next
+    token (or before loading) with :class:`GenerationCancelledError`."""
+    token = _CANCEL.set(event)
+    try:
+        yield event
+    finally:
+        _CANCEL.reset(token)
+
+
+def raise_if_cancelled() -> None:
+    """Raise :class:`GenerationCancelledError` if the current scope's flag is set."""
+    event = _CANCEL.get()
+    if event is not None and event.is_set():
+        raise GenerationCancelledError("generation cancelled: the client went away")
 
 
 def iter_stream(provider: ModelProvider, req: GenRequest) -> Iterator[StreamDelta]:

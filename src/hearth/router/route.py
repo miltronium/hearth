@@ -26,7 +26,7 @@ from ..observability.metrics import (
     estimated_tokens_saved,
     get_metrics,
 )
-from ..providers.base import GenRequest, GenResult, ModelProvider
+from ..providers.base import GenerationCancelledError, GenRequest, GenResult, ModelProvider
 from ..providers.echo import is_stub_backend
 from ..serving.pool import UnknownModelError, check_model
 from .classify import TASK_CLASSES, classify
@@ -250,8 +250,9 @@ class Router:
         escalation_failed: str | None = None
         try:
             result, used_path = self._generate(provider, decision, req, choice.path)
-        except UnknownModelError as exc:
-            # A rung nobody serves: the client gets a 404 — and the record says so (B-066).
+        except (UnknownModelError, GenerationCancelledError) as exc:
+            # A rung nobody serves (the client gets a 404), or a caller that went away
+            # mid-generation (B-071): either way the record says so (B-066).
             self.record_failure(
                 req, decision, provider, exc, started=started, adapter=choice.id
             )
@@ -273,7 +274,7 @@ class Router:
             provider = self.local
             try:
                 result, used_path = self._generate(self.local, decision, req, choice.path)
-            except (ProviderError, UnknownModelError) as local_exc:
+            except (ProviderError, UnknownModelError, GenerationCancelledError) as local_exc:
                 # Both failed. The remote was CALLED and may already hold the prompt
                 # (docs/PRIVACY.md), so this is exactly the request the audit trail must
                 # not lose: record the failed escalation and the failed fallback, re-raise
@@ -453,9 +454,9 @@ class Router:
         )
         try:
             return provider.generate(gen), adapter_path
-        except UnknownModelError:
-            # The request named a model nobody serves. That is the caller's error (a 404),
-            # not a provider outage to retry or wrap as a 503.
+        except (UnknownModelError, GenerationCancelledError):
+            # The request named a model nobody serves — the caller's error (a 404) — or the
+            # caller went away (B-071). Neither is a provider outage to retry or wrap as 503.
             raise
         except Exception as exc:  # noqa: BLE001 — degrade rather than 500 the request
             if adapter_path is not None:
