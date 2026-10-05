@@ -299,7 +299,21 @@ class ModelPool:
         return self.provider_for(model_id)
 
     def evict(self, model_id: str) -> bool:
-        return run_on_mlx_thread(self.manager.evict, model_id)
+        """Evict ``model_id`` AND every adapter variant layered over it (B-107).
+
+        Each variant is a full copy of the base's weights (B-069), so evicting only the bare
+        id left e.g. a 9 GB 14B+adapter resident after "evict the 14B". An exact variant key
+        evicts just that variant. Returns whether anything was resident.
+        """
+
+        def job() -> bool:
+            keys = [model_id] + [
+                key for key, (base, _adapter) in self._variants.items() if base == model_id
+            ]
+            evicted = [self.manager.evict(key) for key in keys]
+            return any(evicted)
+
+        return run_on_mlx_thread(job)
 
     @property
     def can_locate(self) -> bool:
