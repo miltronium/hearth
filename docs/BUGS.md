@@ -101,8 +101,23 @@ must fail when the fix is reverted.
 - ~~[B-056](#b-056) `rag query` embeds before checking the collection is empty (P2)~~ — fixed in `0f72c06`
 - ~~[B-057](#b-057) `serve`'s stderr log handler: stale stream, suppressed by any foreign handler (P3)~~ — fixed in `258ff98`
 - ~~[B-058](#b-058) `doctor --offline` `serving_resolution` says `~/.hearth/models` under any `HEARTH_HOME` (P3)~~ — fixed in `f014ff6`
-- [B-059](#b-059) An unknown `HEARTH_BACKEND` ends every command in a traceback (P3)
-- [B-060](#b-060) An unknown `hearth.intent` / `--intent` is silently ignored (P3)
+- ~~[B-059](#b-059) An unknown `HEARTH_BACKEND` ends every command in a traceback (P3)~~ — fixed in `3951d2e`
+- ~~[B-060](#b-060) An unknown `hearth.intent` / `--intent` is silently ignored (P3)~~ — fixed in `3951d2e`
+
+**Added 2026-10-05 (adversarial review of the day's merges)**
+- [B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)
+- [B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)
+- [B-063](#b-063) `hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerles… (P0)
+- [B-064](#b-064) `/ready` judges only the registry default; under a routing ladder the default may never se… (P1)
+- [B-065](#b-065) Routing validation gaps: `defaults.local_model` is never validated; a class rung may name … (P1)
+- [B-066](#b-066) Failure accounting gaps: an unservable ladder rung (404 / stream error event) writes no Re… (P1)
+- [B-067](#b-067) `doctor --offline` says SAFE with a plugin embedder or vector store, which receive every R… (P1)
+- [B-068](#b-068) The auto→echo fallback stub labels its echo with the requested real model and credits toke… (P2)
+- [B-069](#b-069) LoRA adapter variants are full base reloads the ModelManager never counts (P2)
+- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2)
+- [B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)
+- [B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)
+- [B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -1045,7 +1060,7 @@ must fail when the fix is reverted.
 ### B-059
 **An unknown `HEARTH_BACKEND` ends every command in a traceback**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `3951d2e` · **Effort:** S
 - **Evidence:** Measured: `HEARTH_BACKEND=bogus hearth run hi` → a Rich traceback ending
   `ValueError: Unknown HEARTH_BACKEND: 'bogus' (use auto|mlx|echo, or install a plugin …)`,
   exit 1. Raised at `src/hearth/providers/__init__.py:99` (`select_provider`); no CLI command
@@ -1059,7 +1074,7 @@ must fail when the fix is reverted.
 ### B-060
 **An unknown `hearth.intent` / `--intent` is silently ignored**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `3951d2e` · **Effort:** S
 - **Evidence:** `src/hearth/router/classify.py:58` uses the intent only if it is in
   `TASK_CLASSES`, else falls through to keyword rules. Measured [in-process]:
   `POST /v1/hearth/route` with `"intent": "bogus"` → 200 `{"class": "chat", "method":
@@ -1071,6 +1086,84 @@ must fail when the fix is reverted.
   hearth.intent`) over HTTP, exit 2 at the CLI, naming the valid classes.
 - **Acceptance test:** an unknown intent → 400 / exit 2; a valid one still routes with
   `method: "intent"`; revert → fails.
+
+### B-061
+**`hearth adapters promote --report` accepts a hand-written report: nothing ties it to the adapter, and a prereg committed seconds earlier in any repo passes**
+
+- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Evidence:** cli.py adapters promote (~1875-1990) recomputes the gate from the report's per_example vectors but never checks the report's candidate/task against ADAPTER_ID's entry; prereg.py verify_committed (~209) accepts any repo and records rev-parse HEAD, not the introducing commit. Reviewer repro promoted `bogus-ad` (no golden set, no model run, task mismatch, adapter_path=/nonexistent) → `gate: verified`. Mutations deleting the mismatches/verify_committed checks in this command fail 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-062
+**Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 disables every gate clause**
+
+- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Evidence:** prereg.py (~198-201); eval.py comparisons (~513, 549, 557) are False under NaN; negative margin makes the baseline clause vacuous. Reviewer: a candidate at 0.033 vs base 1.0 PASSES with reasons=() — defeats B-045, the n≥5 floor and min_n=30 (CLAUDE.md §7). Works through `hearth eval --promote` too. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-063
+**`hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerless all-text file, or JSON keys that are values pass `_looks_like_label`**
+
+- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Evidence:** Reviewer: printed "Jane Q Public", "Premier Checking", "SECRETMERCHANT ONE" then "No cell values were printed". Heuristic label detection cannot distinguish text values from labels; tests only used rows containing a date and an amount. File names/paths also printed verbatim (may carry account numbers). (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-064
+**`/ready` judges only the registry default; under a routing ladder the default may never serve**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Evidence:** app.py readiness (~185-249) vs Router._local_model (route.py ~439-462). Finance profile with the 14B absent: /ready 200 while model=auto → 503 not on disk; warmup loads a 7B the profile never serves. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-065
+**Routing validation gaps: `defaults.local_model` is never validated; a class rung may name an embed model or echo**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Evidence:** policy.py (~210-213, ~234). Typo'd defaults.local_model → policy loads, /ready 200, model=auto → 404; embed/echo rung → 404 at request time. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-066
+**Failure accounting gaps: an unservable ladder rung (404 / stream error event) writes no RequestRecord; that stream branch's [DONE] is untested; BudgetExhausted is never recorded**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Evidence:** route.py ~415-418 re-raises UnknownModelError around record_failure; app.py ~871-884 no record; mutations deleting [DONE] in that branch fail 0 tests. A remote failure then local UnknownModelError leaves the escalation unrecorded (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-067
+**`doctor --offline` says SAFE with a plugin embedder or vector store, which receive every RAG chunk and query**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Evidence:** doctor.py FAILs a plugin backend (~398-411) but not HEARTH_EMBEDDER / HEARTH_VECTOR_STORE plugins. Reviewer: `HEARTH_EMBEDDER=evil-cloud-embedder HEARTH_VECTOR_STORE=evil-store hearth doctor --offline` → SAFE. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-068
+**The auto→echo fallback stub labels its echo with the requested real model and credits token savings**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Evidence:** echo.py ~40, ~59 report req.model. /ready is 503 (correct) but POST model=Qwen-14B → 200 `model: ...14B`, text "[echo] hi", metrics credit estimated_frontier_tokens_saved. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-069
+**LoRA adapter variants are full base reloads the ModelManager never counts**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Evidence:** MLXProvider._load_variant (mlx.py ~335-361) loads base+adapter per variant into _cache; 14B + 3 adapters ≈ 36 GB real vs resident_ram_gb 9.0 — above the 24 GB ceiling and the 30.15 GB working set. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-070
+**B-047 enforced at CLI call sites, not where the model is chosen**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Evidence:** mlx_pool().resolve("") with a bogus HEARTH_DEFAULT_MODEL → catalog default (warning only). Not gated: `hearth eval`, example scripts, direct API users; a mutation deleting eval's `_require_known_model` fails 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-071
+**An abandoned agent run keeps the single MLX thread busy for up to its budget**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Evidence:** agent_route.py wraps with _guarantee_done but not _close_on_disconnect, and closing would not stop work(); chat queues behind it (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-072
+**ModelManager evicts residents before knowing the new load will succeed**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S–M
+- **Evidence:** manager.py _admit (~145-149): a request for a registered-but-not-pulled model evicts working residents, then fails (PLAUSIBLE). (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-073
+**Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; config embed_model default is the 404 id; failed record `adapter` field differs by path**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S–M
+- **Evidence:** run_finance_ladder.py ~400-402 (B-008 bypass); config.py ~46; route.py ~266 vs app.py ~889. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ---
 
@@ -1132,3 +1225,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `f014ff6` | **B-058.** `doctor --offline` `serving_resolution` names the models dir the resolver searched. |
 | `2c8f5f9` | **B-037.** `docs/API.md` matches the app's routes and error envelopes; `tests/test_api_doc_routes.py` checks both ways. |
 | `05c4db5` | Docs: `docs/GUIDE.md` has no pending-change markers left; B-003/006/031/033–036/046–049 described as merged, with measured output. |
+| `3951d2e` | **B-059, B-060.** Unknown HEARTH_BACKEND → exit 2 / doctor FAIL; unknown intent → 422 / exit 2 / UnknownIntentError. |
