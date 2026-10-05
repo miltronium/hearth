@@ -82,17 +82,27 @@ def _wait_until_still(read, seconds: float = 3.0) -> None:
     raise AssertionError(f"still running after {seconds}s ({read()} and counting)")
 
 
+@pytest.mark.parametrize("close", ["closed", "close-unreachable"])
 @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
 def test_an_abandoned_agent_stream_stops_the_in_flight_generation_and_the_run(
-    endless, tmp_path, local_policy, monkeypatch, spec_version
+    endless, tmp_path, local_policy, monkeypatch, spec_version, close
 ):
     """Driven through Starlette's own ``StreamingResponse.__call__``, in both of its modes:
     ASGI < 2.4 (a disconnect message cancels the response's task group) and >= 2.4 (the
     next ``send`` raises OSError). Either way the server learns of the disconnect only
-    between body chunks."""
+    between body chunks.
+
+    ``close-unreachable`` (B-111): two mechanisms stop the run — the route's
+    ``on_close=cancel.set`` (run synchronously when the response ends) and the generator's
+    own ``GeneratorExit`` handler (run when the helper thread manages to ``close()`` it).
+    With both live, deleting ``on_close`` left every test green. Here the close never
+    reaches the generator, so only ``on_close`` can stop the generation."""
     from starlette.requests import ClientDisconnect
 
     from hearth.gateway import app as app_mod
+
+    if close == "close-unreachable":
+        monkeypatch.setattr(app_mod, "_close_when_idle", lambda stream: None)
 
     root = tmp_path / "statements"
     root.mkdir()
