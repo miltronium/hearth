@@ -776,6 +776,37 @@ def default_judge(prompt: str, candidate: str, reference: str) -> bool:
     )
 
 
+def parse_golden_jsonl(text: str, task: str) -> GoldenSet:
+    """Parse a golden set from JSONL text of ``{"prompt", "expected"}`` rows.
+
+    An optional header line (``kind == hearth.dataset.header`` or ``hearth.golden.header``)
+    is skipped, so a file produced by ``hearth.training.dataset`` and a bare hand-written
+    list both work. A ``hearth.golden.header`` may carry a ``version`` label; the set's
+    identity is always its content sha. Raises :class:`ValueError` on a malformed row or an
+    empty set.
+    """
+    examples = []
+    version = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if not isinstance(obj, dict):
+            raise ValueError("each golden row must be a JSON object")
+        if obj.get("kind") == "hearth.dataset.header":
+            continue
+        if obj.get("kind") == "hearth.golden.header":
+            version = str(obj.get("version", ""))
+            continue
+        if "prompt" not in obj or "expected" not in obj:
+            raise ValueError('each golden row needs "prompt" and "expected" fields')
+        examples.append(GoldenExample(prompt=obj["prompt"], expected=obj["expected"]))
+    if not examples:
+        raise ValueError("golden set is empty")
+    return GoldenSet(task=task, examples=examples, version=version)
+
+
 def as_golden_set(
     task: str, pairs: Sequence[tuple[str, str]], *, version: str = ""
 ) -> GoldenSet:
@@ -811,6 +842,7 @@ __all__ = [
     "exact_match_score",
     "normalize_prompt",
     "objective_metric_for",
+    "parse_golden_jsonl",
     "require_distinct",
     "score_candidate",
     "token_f1_score",

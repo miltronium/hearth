@@ -92,3 +92,69 @@ def test_B_prereg_init_and_check_refuse_a_golden_set_with_repeats(world):
     result = runner.invoke(app, ["prereg", "check", str(world.prereg), "--golden",
                                  str(world.golden)], env=world.env)
     assert result.exit_code == 1 and "repeats 3 prompt(s)" in _flat(result)
+
+
+# -- D / E: an edit hidden from `git diff` by the index (B-078) ---------------------------
+
+
+def test_D_an_assume_unchanged_prereg_edit_is_refused(world):
+    """Commit an honest bar, edit the working tree, hide the edit from `git diff`."""
+    world.write_prereg()
+    honest = yaml.safe_load(world.prereg.read_text())
+    real_sha = honest["golden_sha"]
+    honest["golden_sha"] = "0" * 64  # the committed bar pins a different golden set
+    world.prereg.write_text(yaml.safe_dump(honest))
+    world.commit("golden.jsonl", "prereg.yaml")
+    honest["golden_sha"] = real_sha  # after seeing the score: move the bar...
+    world.prereg.write_text(yaml.safe_dump(honest))
+    pe._git(world.repo, "update-index", "--assume-unchanged", "prereg.yaml")  # ...and hide it
+    assert pe._git(world.repo, "status", "--porcelain") == ""  # git itself is fooled
+    world.eval_report()
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "uncommitted modifications" in _flat(result)
+    assert world.status() == "candidate"
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1 and "uncommitted modifications" in _flat(result)
+    assert world.status() == "candidate"
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_E_a_golden_set_edited_and_hidden_from_git_is_refused(world, flag):
+    """Committed golden = 40 items the candidate loses; working tree = the cherry-picked set."""
+    lose = [{"prompt": f"p{i}", "expected": "Z"} for i in range(40)]
+    world.golden.write_text("".join(json.dumps(r) + "\n" for r in lose))
+    world.commit("golden.jsonl")
+    world.golden.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS))
+    pe._git(world.repo, "update-index", flag, "golden.jsonl")
+    world.write_prereg()
+    world.commit("prereg.yaml")
+    assert '"Z"' in pe._git(world.repo, "show", "HEAD:golden.jsonl")
+    payload = world.eval_report()
+    assert payload["golden_git"]["committed"] is False
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "golden set was not committed" in _flat(result)
+    assert world.status() == "candidate"
+    result = world.eval("extract-1", "--prereg", str(world.prereg), "--promote")
+    assert result.exit_code == 1 and "golden set was not committed" in _flat(result)
+
+
+def test_E_a_report_claiming_a_committed_golden_set_is_checked_against_the_blob(world):
+    """A key-holder re-signs `golden_git.committed: true`: promotion re-reads the blob itself."""
+    lose = [{"prompt": f"p{i}", "expected": "Z"} for i in range(40)]
+    world.golden.write_text("".join(json.dumps(r) + "\n" for r in lose))
+    world.commit("golden.jsonl")
+    world.golden.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in pe.ROWS))
+    world.write_prereg()
+    world.commit("prereg.yaml")
+    payload = world.eval_report()
+    del payload["signature"]
+    golden_commit = pe._git(world.repo, "log", "-1", "--format=%H", "--", "golden.jsonl")
+    payload["golden_git"].update(committed=True, commit=golden_commit, rel_path="golden.jsonl",
+                                 reason="committed and unmodified")
+    world.write_report(payload, resign=True)
+    result = world.promote()
+    assert result.exit_code == 1, _flat(result)
+    assert "what was scored is not what was committed" in _flat(result)
+    assert world.status() == "candidate"

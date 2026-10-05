@@ -22,7 +22,7 @@ from __future__ import annotations
 from ..registry.adapters import AdapterEntry, AdapterError, AdapterStore, adapter_weights_sha
 from .eval import EvalReport
 
-REPORT_SCHEMA = "hearth.eval-report/2"
+REPORT_SCHEMA = "hearth.eval-report/3"
 
 
 def report_problems(

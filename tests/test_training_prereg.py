@@ -325,3 +325,41 @@ def test_a_prereg_with_a_duplicated_key_is_refused(tmp_path, bar):
     )
     with pytest.raises(PreRegError, match="duplicate key"):
         load_prereg(path)
+
+
+def test_check_provenance_refuses_a_prereg_that_changed_after_it_was_parsed(tmp_path):
+    """B-078: the bar enforced must be the bytes verified, not an earlier read of the file."""
+    from hearth.training.prereg import check_provenance
+
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    registration = load_prereg(path)
+    _write(tmp_path, _prereg_body(hypothesis="a different claim"))
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    assert verify_committed(path).committed
+    with pytest.raises(PreRegError, match="changed between being read and being verified"):
+        check_provenance(registration, measured_at="2999-01-01T00:00:00+00:00",
+                         golden_git={}, golden_sha=GOLDEN.sha)
+
+
+def test_verify_committed_compares_bytes_not_the_index(tmp_path):
+    """`--assume-unchanged` makes `git diff` lie; the blob comparison does not."""
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    _write(tmp_path, _prereg_body(hypothesis="moved after the fact"))
+    _git(tmp_path, "update-index", "--assume-unchanged", "prereg.yaml")
+    status = verify_committed(path)
+    assert status.committed is False
+    assert "uncommitted modifications" in status.reason
+
+
+def test_verify_committed_refuses_a_staged_but_uncommitted_file(tmp_path):
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    status = verify_committed(path)
+    assert status.committed is False
+    assert "not in any commit" in status.reason

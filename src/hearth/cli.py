@@ -208,29 +208,14 @@ def _load_golden_set(path: Path, task: str):
     and a bare hand-written list both work. A ``hearth.golden.header`` may carry a
     ``version`` label, which rides along in the report; the set's *identity* is always its
     content sha, so an unversioned file is still pinnable (LEARNING_plan §3.1).
+
+    The parser is :func:`hearth.training.eval.parse_golden_jsonl` — the one promotion uses
+    to re-derive the golden set from the committed blob (B-078), so the file scored and the
+    blob re-checked are read by a single definition.
     """
-    import json
+    from .training.eval import parse_golden_jsonl
 
-    from .training.eval import GoldenExample, GoldenSet
-
-    examples = []
-    version = ""
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        obj = json.loads(line)
-        if obj.get("kind") == "hearth.dataset.header":
-            continue
-        if obj.get("kind") == "hearth.golden.header":
-            version = str(obj.get("version", ""))
-            continue
-        if "prompt" not in obj or "expected" not in obj:
-            raise ValueError('each golden row needs "prompt" and "expected" fields')
-        examples.append(GoldenExample(prompt=obj["prompt"], expected=obj["expected"]))
-    if not examples:
-        raise ValueError("golden set is empty")
-    return GoldenSet(task=task, examples=examples, version=version)
+    return parse_golden_jsonl(Path(path).read_text(encoding="utf-8"), task=task)
 
 
 def _agent_payload(run: Any, tools: tuple[str, ...]) -> dict[str, Any]:
@@ -1522,6 +1507,7 @@ def eval_adapter(
         baseline_reports,
         check_determinism,
         evaluate_gate,
+        parse_golden_jsonl,
         require_distinct,
         score_candidate,
     )
@@ -1566,8 +1552,12 @@ def eval_adapter(
         )
         raise typer.Exit(code=1) from None
 
+    # Read the golden set ONCE: these bytes are what is scored AND what is compared with the
+    # committed blob (B-078), so a file swapped between the git check and the scoring
+    # cannot be measured under the committed one's name.
     try:
-        golden_set = _load_golden_set(golden, task=entry.task)
+        golden_bytes = Path(golden).read_bytes()
+        golden_set = parse_golden_jsonl(golden_bytes.decode("utf-8"), task=entry.task)
         require_distinct(golden_set)
     except (OSError, ValueError) as exc:
         console.print(f"[red]Golden set error:[/red] {exc}")
@@ -1602,6 +1592,9 @@ def eval_adapter(
     _require_known_model(provider, base_model)
     config = EvalConfig.for_system(system, temperature=temperature, max_tokens=max_tokens)
     measured_at = datetime.now(tz=UTC).isoformat(timespec="seconds")
+    # Where the golden set stands at measurement time, for the bytes being scored: promotion
+    # requires them to be the committed blob, in the prereg's repository (check_provenance).
+    golden_git = golden_git_status(golden, data=golden_bytes)
 
     def _generate_with(adapter_path: str | None):
         def _gen(prompt: str) -> str:
@@ -1733,9 +1726,6 @@ def eval_adapter(
         f"config={candidate.config_fingerprint}[/dim]"
     )
 
-    # Where the golden set stands in git at measurement time: promotion requires it committed
-    # in the same repository as the pre-registration (training.prereg.check_provenance).
-    golden_git = golden_git_status(golden)
 
     if report_json is not None:
         payload = {
@@ -1791,7 +1781,8 @@ def eval_adapter(
         )
         raise typer.Exit(code=1)
     try:
-        status = check_provenance(registration, measured_at=measured_at, golden_git=golden_git)
+        status = check_provenance(registration, measured_at=measured_at, golden_git=golden_git,
+                                  golden_sha=candidate.golden_sha)
     except PreRegError as exc:
         console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
@@ -2129,7 +2120,9 @@ def adapters_promote(
             registration,
             measured_at=str(payload.get("measured_at") or ""),
             golden_git=dict(payload.get("golden_git") or {}),
+            golden_sha=candidate.golden_sha,
         )
+
     except PreRegError as exc:
         console.print(f"[red]Promotion refused:[/red] {exc}")
         raise typer.Exit(code=1) from None
