@@ -40,12 +40,25 @@ def _env(tmp_path) -> dict[str, str]:
     }
 
 
+BASE = "mlx-community/Qwen2.5-3B-Instruct-4bit"  # registered in config/models.yaml
+
+
+def _weights(tmp_path, adapter_id: str) -> str:
+    """A stand-in adapter directory: eval hashes these bytes; promotion re-hashes them."""
+    path = tmp_path / "adapters" / adapter_id
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "adapters.safetensors").write_bytes(f"weights of {adapter_id}".encode())
+    (path / "adapter_config.json").write_text('{"rank": 8}')
+    return str(path)
+
+
 def _seed_adapter(tmp_path, adapter_id="extract-1", task="extract", promote=False):
     from hearth.registry import AdapterStore
 
     store = AdapterStore(path=tmp_path / ".hearth" / "adapters.json")
     store.register(
-        adapter_id, base_model="org/base", task=task, train_run_id="r", adapter_path="/a/x"
+        adapter_id, base_model=BASE, task=task, train_run_id="r",
+        adapter_path=_weights(tmp_path, adapter_id),
     )
     if promote:
         store.promote(adapter_id, gate_passed=True)
@@ -72,7 +85,9 @@ def _git(tmp_path, *args: str) -> None:
 
 
 def _committed_prereg(tmp_path, rows, *, task="extract", name="prereg.yaml", **bar) -> str:
-    """Write a matching pre-registration and commit it to a throwaway repo."""
+    """Write a matching pre-registration and commit it — with the golden set, when one has
+    been written — to a throwaway repo. Promotion requires the prereg to live in the
+    repository that versions the golden set, both committed before the measurement."""
     _git(tmp_path, "init", "-q")
     body = {
         "task": task,
@@ -89,6 +104,8 @@ def _committed_prereg(tmp_path, rows, *, task="extract", name="prereg.yaml", **b
     path = tmp_path / name
     path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
     _git(tmp_path, "add", name)
+    if (tmp_path / "golden.jsonl").exists():
+        _git(tmp_path, "add", "golden.jsonl")
     _git(tmp_path, "commit", "-qm", "prereg")
     return str(path)
 

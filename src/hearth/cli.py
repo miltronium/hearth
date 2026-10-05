@@ -1479,9 +1479,12 @@ def eval_adapter(
     the base model when none is promoted. To pass, it must clear the significance level
     (exact McNemar or paired bootstrap), exceed the margin, have at least min_n examples,
     and beat the empty / majority-label / copy-input baselines. --promote additionally
-    requires a --prereg that is git-committed, unmodified and matches this run; its bar
-    overrides --alpha / --margin / --min-n. Real scores need HEARTH_BACKEND=mlx; the echo
-    backend runs the plumbing only.
+    requires a --prereg that is git-committed, unmodified, matches this run, was committed
+    before the run started, and lives in the git repository that holds the committed
+    golden set; its bar overrides --alpha / --margin / --min-n. The adapter's weights are
+    hashed before scoring (no weights, no eval) and --report-json signs the report with
+    this install's key, so adapters promote can tell it from a hand-written one. Real
+    scores need HEARTH_BACKEND=mlx; the echo backend runs the plumbing only.
 
     Examples:
       hearth eval ADAPTER_ID --golden golden.jsonl
@@ -1493,15 +1496,18 @@ def eval_adapter(
     Env: HEARTH_BACKEND, HEARTH_HOME, HEARTH_MODELS_YAML.
 
     Exit: without --promote, 0 once the gate was measured, whether it passed or failed
-    (read the gate: line); 1 when it refused to measure (unknown adapter, bad golden set
-    or prereg, temperature above 0, non-determinism). With --promote, 0 only when the
-    adapter was promoted, else 1.
+    (read the gate: line); 1 when it refused to measure (unknown adapter, missing adapter
+    weights, bad golden set or prereg, a bar looser than the gate allows, temperature
+    above 0, non-determinism). With --promote, 0 only when the adapter was promoted,
+    else 1.
     """
     import json as _json
     from datetime import UTC, datetime
 
     from .config import Settings
     from .registry import AdapterError
+    from .registry.adapters import adapter_weights_sha
+    from .training.attest import AttestationError, load_key, sign
     from .training.eval import (
         EvalConfig,
         GateProvenanceError,
@@ -1510,7 +1516,14 @@ def eval_adapter(
         evaluate_gate,
         score_candidate,
     )
-    from .training.prereg import PreRegError, load_prereg, verify_committed
+    from .training.prereg import (
+        PreRegError,
+        check_provenance,
+        golden_git_status,
+        load_prereg,
+        provenance_proof,
+    )
+    from .training.promotion import REPORT_SCHEMA
 
     if temperature > 0.0 and not allow_sampling:
         console.print(
@@ -1528,6 +1541,17 @@ def eval_adapter(
         candidate_path = store.resolve_path(adapter_id, allow_candidate=True)
     except AdapterError as exc:
         console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    # Hash the weights BEFORE scoring: this digest is what the report (and the promotion
+    # proof) say was measured, and promotion re-hashes the disk against it (B-061). No
+    # weights means the "candidate" would be scored as the bare base model.
+    try:
+        candidate_weights = adapter_weights_sha(candidate_path)
+    except AdapterError as exc:
+        console.print(
+            f"[red]Refusing to measure:[/red] {exc} — an adapter with no weights would be "
+            "scored as the base model."
+        )
         raise typer.Exit(code=1) from None
 
     try:
@@ -1601,10 +1625,17 @@ def eval_adapter(
     # The incumbent. No promoted adapter for the task does NOT mean "anything wins": the
     # base model becomes the incumbent and has to be beaten (LEARNING_plan F2).
     incumbent_entry = store.promoted_for(entry.task)
+    incumbent_weights = ""
     if incumbent_entry is not None and incumbent_entry.id != adapter_id:
         incumbent_id = incumbent_entry.id
         incumbent_role = "incumbent"
-        incumbent = _score(store.resolve_path(incumbent_id), f"{base_model}+{incumbent_id}")
+        incumbent_path = store.resolve_path(incumbent_id)
+        try:
+            incumbent_weights = adapter_weights_sha(incumbent_path)
+        except AdapterError as exc:
+            console.print(f"[red]Refusing to measure the incumbent {incumbent_id!r}:[/red] {exc}")
+            raise typer.Exit(code=1) from None
+        incumbent = _score(incumbent_path, f"{base_model}+{incumbent_id}")
     else:
         incumbent_id = base_model
         incumbent_role = "base"
@@ -1679,16 +1710,35 @@ def eval_adapter(
         f"config={candidate.config_fingerprint}[/dim]"
     )
 
+    # Where the golden set stands in git at measurement time: promotion requires it committed
+    # in the same repository as the pre-registration (training.prereg.check_provenance).
+    golden_git = golden_git_status(golden)
+
     if report_json is not None:
         payload = {
+            "schema": REPORT_SCHEMA,
+            "candidate_id": adapter_id,
+            "task": entry.task,
+            "base_model": base_model,
+            "adapter_path": entry.adapter_path,
+            "candidate_weights_sha": candidate_weights,
+            "measured_at": measured_at,
+            "golden_git": golden_git,
             "candidate": candidate.to_json(),
             "incumbent": incumbent.to_json(),
             "incumbent_role": incumbent_role,
             "incumbent_id": incumbent_id,
-            "candidate_id": adapter_id,
+            "incumbent_weights_sha": incumbent_weights,
             "baselines": {k: v.to_json() for k, v in baselines.items()},
             "gate": gate.as_proof(),
         }
+        # Signed with this install's key so `adapters promote --report` can tell a report
+        # this command wrote from one a human typed (B-061; training/attest.py).
+        try:
+            payload = sign(payload, load_key(Settings().home, create=True))
+        except (AttestationError, OSError) as exc:
+            console.print(f"[red]Cannot sign the eval report:[/red] {exc}")
+            raise typer.Exit(code=1) from None
         Path(report_json).parent.mkdir(parents=True, exist_ok=True)
         Path(report_json).write_text(
             _json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1710,18 +1760,37 @@ def eval_adapter(
             "scaffold one with `hearth prereg init`."
         )
         raise typer.Exit(code=1)
-    status = verify_committed(registration.path)
-    if not status.committed:
-        console.print(f"[red]Promotion refused:[/red] {status.reason}")
+    if base_model != entry.base_model:
+        console.print(
+            f"[red]Promotion refused:[/red] measured on base {base_model!r}, but "
+            f"{adapter_id!r} is registered on {entry.base_model!r} — an adapter is promoted "
+            "on the base it serves on."
+        )
         raise typer.Exit(code=1)
+    try:
+        status = check_provenance(registration, measured_at=measured_at, golden_git=golden_git)
+    except PreRegError as exc:
+        console.print(f"[red]Promotion refused:[/red] {exc}")
+        raise typer.Exit(code=1) from None
     if not gate.passed:
         console.print(f"[red]Promotion refused:[/red] {gate.reason}")
         raise typer.Exit(code=1)
+    # The bytes promoted must be the bytes measured.
+    try:
+        unchanged = adapter_weights_sha(candidate_path) == candidate_weights
+    except AdapterError:
+        unchanged = False
+    if not unchanged:
+        console.print(
+            f"[red]Promotion refused:[/red] {adapter_id!r}'s weights changed during the eval."
+        )
+        raise typer.Exit(code=1)
 
     proof = dict(registration.as_proof())
-    proof["prereg_committed"] = True
-    proof["prereg_commit"] = status.commit
+    proof.update(provenance_proof(status, golden_git))
     proof["measured_at"] = candidate.measured_at
+    proof["candidate_weights_sha"] = candidate_weights
+    proof["evidence"] = "measured"
     try:
         store.promote(adapter_id, gate=gate, proof=proof)
     except AdapterError as exc:
@@ -1915,7 +1984,7 @@ def adapters_list(
 def adapters_promote(
     adapter_id: str = typer.Argument(..., help="Adapter id to promote."),
     report: Path = typer.Option(
-        None, "--report", help="Eval report JSON written by `hearth eval --report-json`."
+        None, "--report", help="Signed eval report written by `hearth eval --report-json`."
     ),
     prereg: Path = typer.Option(
         None, "--prereg", help="Committed pre-registration YAML declaring the bar."
@@ -1927,14 +1996,18 @@ def adapters_promote(
         None, "--incumbent-score", hidden=True, help="REMOVED — a typed score is not evidence."
     ),
 ) -> None:
-    """Promote a candidate from a measured eval report and a committed pre-registration.
+    """Promote a candidate from a signed eval report and a committed pre-registration.
 
-    The gate is recomputed here from the report's per-example vectors under the bar in
-    the committed pre-registration: the report is evidence, not a verdict. Both --report
-    (from hearth eval --report-json) and --prereg are required. The usual one-step path
-    is hearth eval ADAPTER --golden G --prereg P --promote. The old --candidate-score /
-    --incumbent-score flags are removed: a typed score names no golden set, metric or
-    model, so it is not evidence.
+    The report must be one hearth eval --report-json wrote on this install: it is
+    HMAC-signed with a per-install key (HEARTH_HOME/eval-report.key, 0600), and an
+    unsigned or edited report is refused. It must also be evidence for THIS adapter: same
+    id, task, base model and weights path, weights on disk that still hash to what was
+    measured, and an incumbent that is still the incumbent. The gate is then recomputed
+    from the report's per-example vectors under the committed pre-registration's bar.
+    The prereg must have been committed before the measurement started, in the git
+    repository that holds the (committed) golden set. The usual one-step path is hearth
+    eval ADAPTER --golden G --prereg P --promote. The old --candidate-score /
+    --incumbent-score flags are removed: a typed score is not evidence.
 
     Examples:
       hearth adapters promote ADAPTER_ID --report r.json \\
@@ -1942,14 +2015,23 @@ def adapters_promote(
 
     Env: HEARTH_HOME.
 
-    Exit: 0 promoted; 1 refused (missing or unusable report, uncommitted or mismatched
+    Exit: 0 promoted; 1 refused (unsigned, edited or unusable report, a report about a
+    different adapter or stale weights/incumbent, an uncommitted, late or mismatched
     prereg, gate failed); 2 the removed typed-score flags were used.
     """
     import json as _json
 
+    from .config import Settings
     from .registry import AdapterError, GateNotPassedError
+    from .training.attest import load_key, verify
     from .training.eval import EvalReport, GateProvenanceError, evaluate_gate
-    from .training.prereg import PreRegError, load_prereg, verify_committed
+    from .training.prereg import (
+        PreRegError,
+        check_provenance,
+        load_prereg,
+        provenance_proof,
+    )
+    from .training.promotion import report_problems
 
     if candidate_score is not None or incumbent_score is not None:
         console.print(
@@ -1967,8 +2049,13 @@ def adapters_promote(
         )
         raise typer.Exit(code=1)
 
+    # The signature is checked before a single number in the report is read: an unsigned
+    # or edited report is not evidence, whatever it claims (B-061; training/attest.py).
     try:
         payload = _json.loads(Path(report).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("the report is not a JSON object")
+        report_sha = verify(payload, load_key(Settings().home))
         candidate = EvalReport.from_json(payload["candidate"])
         incumbent = EvalReport.from_json(payload["incumbent"])
         baselines = {
@@ -1979,22 +2066,47 @@ def adapters_promote(
         console.print(f"[red]Unusable eval report:[/red] {exc}")
         raise typer.Exit(code=1) from None
 
+    store = _adapter_store()
+    entry = store.get(adapter_id)
+    if entry is None:
+        console.print(f"[red]Unknown adapter:[/red] {adapter_id!r}")
+        raise typer.Exit(code=1)
+    problems = report_problems(
+        payload,
+        adapter_id=adapter_id,
+        entry=entry,
+        store=store,
+        candidate=candidate,
+        incumbent=incumbent,
+    )
+    if problems:
+        console.print(
+            f"[red]Promotion refused:[/red] the report is not evidence for {adapter_id!r} — "
+            + "; ".join(problems)
+        )
+        raise typer.Exit(code=1)
+
     try:
         registration = load_prereg(prereg)
     except PreRegError as exc:
         console.print(f"[red]Pre-registration error:[/red] {exc}")
         raise typer.Exit(code=1) from None
-    status = verify_committed(registration.path)
-    if not status.committed:
-        console.print(f"[red]Promotion refused:[/red] {status.reason}")
-        raise typer.Exit(code=1)
-    problems = registration.mismatches(candidate)
+    problems = list(registration.mismatches(candidate))
     if problems:
         console.print(
             "[red]Promotion refused:[/red] the report is not the registered experiment — "
             + "; ".join(problems)
         )
         raise typer.Exit(code=1)
+    try:
+        status = check_provenance(
+            registration,
+            measured_at=str(payload.get("measured_at") or ""),
+            golden_git=dict(payload.get("golden_git") or {}),
+        )
+    except PreRegError as exc:
+        console.print(f"[red]Promotion refused:[/red] {exc}")
+        raise typer.Exit(code=1) from None
 
     missing = [b for b in registration.must_beat_baselines if b not in baselines]
     if missing:
@@ -2022,11 +2134,13 @@ def adapters_promote(
         raise typer.Exit(code=1) from None
 
     proof = dict(registration.as_proof())
-    proof["prereg_committed"] = True
-    proof["prereg_commit"] = status.commit
+    proof.update(provenance_proof(status, dict(payload.get("golden_git") or {})))
     proof["measured_at"] = candidate.measured_at
+    proof["candidate_weights_sha"] = payload.get("candidate_weights_sha")
+    proof["evidence"] = "signed-report"
+    proof["report_sha"] = report_sha
     try:
-        _adapter_store().promote(adapter_id, gate=gate, proof=proof)
+        store.promote(adapter_id, gate=gate, proof=proof)
     except GateNotPassedError:
         console.print(f"[red]Promotion refused:[/red] {gate.reason}")
         raise typer.Exit(code=1) from None
