@@ -68,6 +68,19 @@ must fail when the fix is reverted.
 - [B-031](#b-031) `hearth doctor --offline` renders a non-fatal WARN row as FAIL (P3)
 - [B-032](#b-032) `train_lora_real.sh` runs `uv run --no-sync` from the caller's cwd (P3)
 
+**Added 2026-10-05 (found by the docs agent and the B-008 merge check)**
+- [B-033](#b-033) `hearth serve` with a missing named routing profile prints a full traceback (P2)
+- [B-034](#b-034) Unknown adapter: the response claims the adapter it did not use (P1)
+- [B-035](#b-035) `HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx (P2)
+- [B-036](#b-036) `hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback (P2)
+- [B-037](#b-037) `docs/API.md` documents endpoints that do not exist, and the wrong error envelope (P2)
+- [B-038](#b-038) `docs/PRIVACY.md` "Formats" row says text/CSV only (P3)
+- [B-039](#b-039) `training/dataset.py` promises headerless datasets, then refuses them (P3)
+- [B-040](#b-040) Example docs give install/run commands that prune the venv (P2)
+- [B-041](#b-041) `docs/RUNBOOK_training.md` still teaches the removed `--candidate-score` promote path (P2)
+- [B-042](#b-042) `Settings.default_model` is never read (P3)
+- [B-043](#b-043) `hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2 (P3)
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -719,6 +732,105 @@ must fail when the fix is reverted.
   project and could report "mlx-lm is not installed" for a correctly synced venv.
 - **Fix outline:** `cd` to the repo root (as `hearth_private.sh` does), or pass
   `--project "$REPO_ROOT"` to each `uv run`.
+
+### B-033
+**`hearth serve` with a missing named routing profile prints a full traceback**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** Measured: `HEARTH_ROUTING_YAML=config/no-such.yaml hearth serve` exits 1 with the right message, but only after a Rich traceback from `cli.py` `serve` → `create_app` raising `RoutingProfileNotFoundError` (introduced by `2550766`, B-008).
+- **Impact:** Fails safe (server refuses to start) but buries the one-line fix under a traceback.
+- **Fix outline:** Catch `RoutingProfileNotFoundError` in `serve` (and `run`/`agent`/`mcp`), print the message, exit 2.
+- **Acceptance test:** Missing profile → exit 2, output contains the fix line and no 'Traceback'.
+
+### B-034
+**Unknown adapter: the response claims the adapter it did not use**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Evidence:** Measured in-process: `hearth.adapter="no-such-adapter"` → server logs "adapter 'no-such-adapter' unresolved; serving base weights", response says `hearth.adapter: "no-such-adapter"`, 200. Telemetry echoes the request (`gateway/app.py` ~251 non-stream, ~633 stream) instead of the adapter that loaded.
+- **Impact:** A client (or the eval/A-B flow) believes an adapter served that never did — the CLAUDE.md §3 bug class.
+- **Fix outline:** Report the resolved adapter path/id (or null) from the generation, and decide whether an explicitly requested unknown adapter should be a 404 rather than a silent base-weights fallback.
+- **Acceptance test:** Request an unknown adapter: response must not name it as served (null or 404); revert → test fails.
+
+### B-035
+**`HEARTH_WARMUP=false` leaves `/ready` at 503 "loading" forever on mlx**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs agent, measured in-process on the pre-B-005 code (`gateway/app.py` ~117, ~142); the B-005 work (item 2) rewrites readiness — re-verify after it merges.
+- **Impact:** Orchestrators that gate on `/ready` never route traffic to a server that is serving fine.
+- **Fix outline:** With warmup off, `/ready` should report "not warmed (warmup disabled)" distinctly, or load lazily-on-first-request and then go ready.
+- **Acceptance test:** With HEARTH_WARMUP=false, after one served request `/ready` is 200 (or a documented distinct state).
+
+### B-036
+**`hearth rag ingest` with `HEARTH_EMBEDDER=mlx` ends in a traceback**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** `src/hearth/cli.py` rag ingest (~line 740) has no handler for `EmbeddingUnavailableError` (checked: no `except` in the command body). The embedder itself cannot work (B-011).
+- **Impact:** A clean, actionable error becomes a stack trace.
+- **Fix outline:** Catch `EmbeddingUnavailableError` in `rag ingest`/`rag query`, print it, exit 1.
+- **Acceptance test:** With the mlx embedder unavailable, exit 1 and no 'Traceback'.
+
+### B-037
+**`docs/API.md` documents endpoints that do not exist, and the wrong error envelope**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** Checked: `docs/API.md` names `/v1/hearth/classify`, `/v1/hearth/summarize`, `/v1/hearth/train/`, `/v1/hearth/train/{run_id}`; no route defines them (`grep @app.(get|post)` in `src/hearth/gateway`). Docs agent also reports `/admin/models/{id}/load|unload` and `/admin/adapters/...`, and that the real 401 is nested under `detail` (`gateway/auth.py:34`).
+- **Impact:** Integrators build against an API that 404s.
+- **Fix outline:** Regenerate the endpoint list from the FastAPI app (`app.routes`) and add a test that every documented path exists.
+- **Acceptance test:** A doc/route drift test fails when API.md names a path the app does not serve.
+
+### B-038
+**`docs/PRIVACY.md` "Formats" row says text/CSV only**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs agent: `src/hearth/mcp/files.py:566-575` also reads `.json`, `.xlsx`, `.pdf`.
+- **Impact:** Understates what the path-taking tools can read.
+- **Fix outline:** Update the row from the code.
+- **Acceptance test:** —
+
+### B-039
+**`training/dataset.py` promises headerless datasets, then refuses them**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs agent: `src/hearth/training/dataset.py:182` docstring vs `load_dataset` raising "dataset task must be non-empty".
+- **Impact:** Doc/code disagreement in the training path.
+- **Fix outline:** Either support headerless files with an explicit `--task`, or fix the docstring.
+- **Acceptance test:** A headerless file either loads with `--task` or the docstring no longer claims it does.
+
+### B-040
+**Example docs give install/run commands that prune the venv**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** Checked: `examples/claude_code_mcp.md:17,24,52,105` use `uv sync --extra mcp` and bare `uv run hearth ...`; `examples/cmux/hearth.mcp.json:8` says `uv sync --extra mlx --extra mcp` (prunes dev/files). The 54b152f sweep excluded `examples/`.
+- **Impact:** Following the MCP setup example uninstalls mlx (CLAUDE.md §1).
+- **Fix outline:** Apply the one-command sync and `uv run --no-sync` to `examples/`.
+- **Acceptance test:** grep finds no single-extra `uv sync` or bare `uv run` in examples/.
+
+### B-041
+**`docs/RUNBOOK_training.md` still teaches the removed `--candidate-score` promote path**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs agent: `docs/RUNBOOK_training.md:182,198,204` (a current runbook). `hearth adapters promote` rejects those flags (cli.py, see B-015).
+- **Impact:** Following the runbook fails at the promotion step.
+- **Fix outline:** Rewrite the promotion section around `hearth eval --promote --prereg ...` (CLAUDE.md §7).
+- **Acceptance test:** Every command in the runbook's promotion section runs (or is marked as needing real weights).
+
+### B-042
+**`Settings.default_model` is never read**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Checked: no reader of `.default_model` in `src/` (only a docstring in `registry/__init__.py:68`); the registry reads `HEARTH_DEFAULT_MODEL` from `os.environ` directly.
+- **Impact:** A dead setting invites a second source of truth.
+- **Fix outline:** Remove the field, or make the registry read it from Settings.
+- **Acceptance test:** —
+
+### B-043
+**`hearth_peek.py` output no longer matches the sample in `RUNBOOK_finance.md` §2**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** Reported by the docs agent.
+- **Impact:** Cosmetic doc drift.
+- **Fix outline:** Refresh the sample from a synthetic run.
+- **Acceptance test:** —
 
 ---
 
