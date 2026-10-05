@@ -144,10 +144,9 @@ class ModelManager:
     def _admit(self, model_id: str) -> ModelProvider:
         provider = self._factory(model_id)
         ram_gb = max(0.0, provider.footprint(model_id).ram_gb)
-        if ram_gb > self.ram_ceiling_gb:
-            raise ModelTooLargeError(
-                f"{model_id} needs {ram_gb} GB > ceiling {self.ram_ceiling_gb} GB"
-            )
+        too_large = self.size_problem(model_id, ram_gb)
+        if too_large is not None:
+            raise ModelTooLargeError(too_large)
         # Nothing is evicted until the load is known to be able to start (B-072). A
         # provider's ``preflight`` checks what it can without loading (MLX: the weights
         # resolve on disk); it raises on a load that cannot work, leaving every resident in
@@ -172,6 +171,18 @@ class ModelManager:
             self.ram_ceiling_gb,
         )
         return provider
+
+    def size_problem(self, model_id: str, ram_gb: float) -> str | None:
+        """Why a model of ``ram_gb`` can NEVER be admitted under this ceiling, or ``None``.
+
+        The one comparison :meth:`_admit` refuses on (:class:`ModelTooLargeError`), exposed
+        so readiness judges a rung by the same rule that will refuse its every request
+        (B-100) rather than by a copy of it.
+        """
+        ram_gb = max(0.0, ram_gb)
+        if ram_gb > self.ram_ceiling_gb:
+            return f"{model_id} needs {ram_gb} GB > ceiling {self.ram_ceiling_gb} GB"
+        return None
 
     def _evict_until_fits(self, incoming_ram_gb: float) -> None:
         """Evict LRU residents until ``incoming_ram_gb`` fits under the ceiling.

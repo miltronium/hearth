@@ -180,6 +180,9 @@ def create_app(
         :func:`~hearth.router.route.policy_rungs`). Under an unpinned profile that is just
         the registry default, exactly as before. Each model is judged on outcomes:
 
+        * it fits under the RAM ceiling at all (``HEARTH_RAM_CEILING_GB``): a rung larger
+          than the whole ceiling is refused on every request, so it is ``failed`` whether
+          or not warmup ran (B-100); **and**
         * its last load attempt did not fail, and a load of it has completed with weights in
           memory at least once (warmup, or any request) — residency granted without a load
           never counts (B-005); **and**
@@ -498,6 +501,17 @@ def _judge_model(
             resolve(model_id)
         except UnknownModelError as exc:
             return verdict("failed", f"{model_id!r} is not servable: {exc}")
+    # A rung larger than the whole RAM ceiling can never load: the manager refuses it on
+    # every request (ModelTooLargeError -> 503), warmup on or off. Judged with the manager's
+    # own rule over the footprint it will size the load by (B-100).
+    too_large = _size_problem(model_id, provider, manager)
+    if too_large is not None:
+        return verdict(
+            "failed",
+            f"{model_id!r} can never load under this RAM ceiling ({too_large}); every request "
+            "routed to it fails — raise HEARTH_RAM_CEILING_GB or route its classes to a "
+            "smaller model",
+        )
     can_locate = bool(getattr(provider, "can_locate", False))
     if can_locate:
         missing = provider.weights_problem(model_id)
@@ -594,6 +608,24 @@ def _readiness(
     details = [m["detail"] for m in models.values() if "detail" in m]
     return respond(200, "ready", detail="; ".join(details) if details else None,
                    models=models)
+
+
+def _size_problem(model_id: str, provider: ModelProvider, manager: ModelManager) -> str | None:
+    """Why ``model_id`` can never be admitted by ``manager``, or ``None``.
+
+    Sized by ``provider.footprint`` — what the manager's admission sizes the load by (a
+    pool's per-model providers report the same registry ``ram_gb`` the pool does). A manager
+    without :meth:`~hearth.serving.ModelManager.size_problem` or a provider that cannot size
+    the model is not judged here: its load outcome still is.
+    """
+    size_problem = getattr(manager, "size_problem", None)
+    if not callable(size_problem):
+        return None
+    try:
+        ram_gb = provider.footprint(model_id).ram_gb
+    except Exception:  # noqa: BLE001 — an unsizable model is judged by its load instead
+        return None
+    return size_problem(model_id, ram_gb)
 
 
 def _weights_loaded(manager: ModelManager, model_id: str) -> bool:
