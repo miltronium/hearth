@@ -235,7 +235,11 @@ class Router:
         served (``None`` for base weights, a remote, or an adapter that failed and was
         retried on base) — never merely the one requested.
         """
-        self.check_adapter(adapter)
+        try:
+            self.check_adapter(adapter)
+        except UnknownAdapterError as exc:
+            self.record_refused(req, exc, intent=intent, adapter=adapter)  # B-106
+            raise
         started = time.perf_counter()
         decision = self.decide(req, intent=intent, allow_escalation=allow_escalation)
         # Records a denied escalation (BudgetExhaustedError) before raising it (B-066).
@@ -245,7 +249,13 @@ class Router:
         # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
         choice = AdapterChoice()
         if not decision.would_escalate:
-            choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            try:
+                choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            except UnknownAdapterError as exc:  # unservable since check_adapter (B-106)
+                self.record_failure(
+                    req, decision, provider, exc, started=started, adapter=adapter
+                )
+                raise
 
         escalation_failed: str | None = None
         try:
@@ -270,11 +280,14 @@ class Router:
             # AND that an escalation was attempted and failed (``escalation_failed``).
             escalation_failed = str(exc)
             decision = self.degrade_to_local(req, decision, exc)
-            choice = self.select_adapter(adapter, decision.task_class, decision.model)
+            choice = AdapterChoice(id=adapter)  # what the record names if selection fails
             provider = self.local
             try:
+                choice = self.select_adapter(adapter, decision.task_class, decision.model)
                 result, used_path = self._generate(self.local, decision, req, choice.path)
-            except (ProviderError, UnknownModelError, GenerationCancelledError) as local_exc:
+            except (
+                ProviderError, UnknownModelError, UnknownAdapterError, GenerationCancelledError
+            ) as local_exc:
                 # Both failed. The remote was CALLED and may already hold the prompt
                 # (docs/PRIVACY.md), so this is exactly the request the audit trail must
                 # not lose: record the failed escalation and the failed fallback, re-raise
@@ -414,6 +427,31 @@ class Router:
             logger.error("could not record failed request (%s): %s", exc, rec_exc)
             return None
         return record
+
+    def record_refused(
+        self,
+        req: GenRequest,
+        exc: Exception,
+        *,
+        intent: str | None = None,
+        adapter: str | None = None,
+    ) -> RequestRecord | None:
+        """Record a request refused before anything ran — an unservable adapter (a 404).
+
+        Such a request used to leave no record at all (B-106): ``hearth stats`` could not
+        see a client hammering a retired adapter. The record is attributed to the LOCAL
+        decision for the request (adapters only layer over local; nothing left the
+        machine), with ``failed`` set. Never raises.
+        """
+        started = time.perf_counter()
+        try:
+            decision = self.decide(req, intent=intent, allow_escalation=False)
+        except Exception as dec_exc:  # noqa: BLE001 — the refusal itself must still surface
+            logger.error("could not record refused request (%s): %s", exc, dec_exc)
+            return None
+        return self.record_failure(
+            req, decision, self.local, exc, started=started, adapter=adapter
+        )
 
     def degrade_to_local(
         self, req: GenRequest, decision: RouteDecision, exc: Exception
@@ -577,9 +615,13 @@ class Router:
         if requested:
             self.check_adapter(requested)
             store = self._adapter_store()
-            return AdapterChoice(
-                id=requested, path=store.resolve_path(requested, allow_candidate=True)
-            )
+            try:
+                path = store.resolve_path(requested, allow_candidate=True)
+            except Exception as exc:  # noqa: BLE001 — retired/removed since check_adapter
+                raise UnknownAdapterError(
+                    requested, f"adapter {requested!r} cannot be served: {exc}"
+                ) from exc
+            return AdapterChoice(id=requested, path=path)
         store = self._adapter_store()
         if store is None:
             return AdapterChoice()

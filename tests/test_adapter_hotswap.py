@@ -154,7 +154,10 @@ def test_unresolvable_explicit_adapter_is_refused_not_served_as_base(tmp_path):
     with pytest.raises(UnknownAdapterError, match="does-not-exist"):
         router.route(_req(), intent="extract", adapter="does-not-exist")
     assert provider.seen_adapters == []  # nothing ran
-    assert router.metrics.rollup()["requests"] == 0
+    # ...but the refusal is a failed request in the metrics, not an invisible one (B-106).
+    (rec,) = list(router.metrics._records)
+    assert rec.failed and "does-not-exist" in rec.failed
+    assert (rec.adapter, rec.served_by, rec.escalated) == ("does-not-exist", "local", False)
 
 
 def test_record_names_the_adapter_that_served(tmp_path):
