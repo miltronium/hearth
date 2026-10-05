@@ -149,9 +149,17 @@ class RagIndex:
         k: int = 6,
         answer: bool = False,
     ) -> QueryResult:
-        """Embed ``query``, retrieve the top-``k`` chunks, optionally answer locally."""
-        vector = self.embedder.embed([query])[0]
-        chunks = self.store.query(collection, vector, k)
+        """Embed ``query``, retrieve the top-``k`` chunks, optionally answer locally.
+
+        An empty (or missing) collection is answered without embedding: there is nothing
+        to compare against, and an embedder that cannot load (B-011) would otherwise turn
+        "no chunks" into an error.
+        """
+        if self.store.count(collection) == 0:
+            chunks: list[Chunk] = []
+        else:
+            vector = self.embedder.embed([query])[0]
+            chunks = self.store.query(collection, vector, k)
         if not answer:
             return QueryResult(chunks=chunks)
         return QueryResult(chunks=chunks, answer=self._answer(query, chunks))

@@ -165,6 +165,12 @@ def test_an_unavailable_embedder_exits_1_with_its_message(argv, tmp_path):
     doc = tmp_path / "doc.txt"
     doc.write_text("some text worth embedding\n")
     argv = [a.format(doc=doc) for a in argv]
+    if argv[1] == "query":
+        # A query embeds only when the collection has chunks (an empty one says "No chunks"
+        # without embedding, below), so index the default collection with the hash embedder.
+        seeded = CliRunner().invoke(app, ["rag", "ingest", str(doc)], env=_env(tmp_path))
+        assert seeded.exit_code == 0, seeded.output
+        get_settings.cache_clear()  # the seed run cached HEARTH_EMBEDDER=hash
     result = CliRunner().invoke(app, argv, env=_env(
         tmp_path, HEARTH_EMBEDDER="mlx", HEARTH_EMBED_MODEL=ABSENT_EMBEDDER
     ))
@@ -173,3 +179,33 @@ def test_an_unavailable_embedder_exits_1_with_its_message(argv, tmp_path):
     flat = " ".join(result.output.split())
     assert "Embedder unavailable" in flat
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("answer", [False, True], ids=["query", "query-answer"])
+def test_an_empty_collection_says_no_chunks_even_when_the_embedder_cannot_load(tmp_path, answer):
+    """`rag query` embedded the query before looking at the collection, so with the mlx
+    embedder (B-011) an empty collection was an "Embedder unavailable" error instead of
+    "No chunks"."""
+    argv = ["rag", "query", "hello", "--collection", "empty"] + (["--answer"] if answer else [])
+    result = CliRunner().invoke(app, argv, env=_env(
+        tmp_path, HEARTH_EMBEDDER="mlx", HEARTH_EMBED_MODEL=ABSENT_EMBEDDER
+    ))
+    assert result.exit_code == 0, (result.output, result.exception)
+    flat = " ".join(result.output.split())
+    assert "No chunks in collection 'empty'" in flat
+    assert "Embedder unavailable" not in flat
+
+
+def test_rag_index_does_not_embed_for_an_empty_collection(tmp_path):
+    """The library path too (HTTP /v1/hearth/rag/query and MCP use RagIndex.query)."""
+    from hearth.memory import RagIndex
+    from hearth.memory.store import SQLiteVectorStore
+
+    class Exploding:
+        dim = 4
+
+        def embed(self, texts):
+            raise AssertionError("embedded a query for an empty collection")
+
+    index = RagIndex(embedder=Exploding(), store=SQLiteVectorStore(root=tmp_path / "rag"))
+    assert index.query("nothing-here", "hello").chunks == []

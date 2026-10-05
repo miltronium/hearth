@@ -1227,6 +1227,11 @@ def rag_query(
     provider = select_provider(get_settings())
     with _routing_profile_required():
         index = RagIndex(router=Router(local_provider=provider))
+    # Emptiness first: no embedding (the mlx embedder cannot load today, B-011) and no
+    # --answer generation for a collection that has nothing to retrieve.
+    if index.store.count(collection) == 0:
+        console.print(f"[yellow]No chunks in collection[/yellow] {collection!r}.")
+        raise typer.Exit(code=0)
     with _embedder_required():
         result = index.query(collection, query, k=k, answer=answer)
 
