@@ -91,7 +91,40 @@ def run_checks(settings: Settings | None = None) -> list[Check]:
         detail = f"{settings.home}: {exc}"
     checks.append(Check("state_dir", writable, detail, fatal=True))
 
+    default_model = check_default_model()
+    if default_model is not None:
+        checks.append(default_model)
+
     return checks
+
+
+def check_default_model(registry=None) -> Check | None:
+    """WARN when ``HEARTH_DEFAULT_MODEL`` is set but ignored (B-029); ``None`` otherwise.
+
+    The registry applies the variable only when it names a registered model, and falls back
+    to the catalog default otherwise — so a typo or an unregistered id serves a different
+    model than the operator named. Asked of the registry itself (``default_id`` /
+    ``ignored_default_override``), so the model named here is the one that serves.
+    Non-fatal: the fallback is a working, registered model; the problem is the surprise.
+    """
+    if registry is None:
+        from .registry import load_registry
+
+        try:
+            registry = load_registry()
+        except Exception as exc:  # noqa: BLE001 — an unreadable catalog is reported, not raised
+            return Check("default_model", False, f"WARN: model registry unreadable: {exc}")
+    ignored = registry.ignored_default_override
+    if ignored is None:
+        return None
+    return Check(
+        "default_model",
+        False,
+        f"WARN: HEARTH_DEFAULT_MODEL={ignored!r} is not in the model registry "
+        f"(config/models.yaml) and is IGNORED — {registry.default_id!r} will serve instead. "
+        "Register it, or fix the id.",
+        fatal=False,
+    )
 
 
 def all_fatal_passed(checks: list[Check]) -> bool:
@@ -348,8 +381,10 @@ def run_offline_checks(
     model_checks, on_disk = _check_models(settings, policy, registry)
     builtin = settings.backend.lower() in _BUILTIN_BACKENDS
     loopback = _is_loopback(settings.host)
+    default_model = check_default_model(registry)
     return [
         routing,
+        *([default_model] if default_model is not None else []),
         Check(
             "backend",
             builtin,

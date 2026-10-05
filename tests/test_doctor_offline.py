@@ -258,3 +258,26 @@ def test_cli_exits_nonzero_when_unsafe_and_zero_when_safe(machine, monkeypatch, 
     unsafe = runner.invoke(app, ["doctor", "--offline"], env={"COLUMNS": "250"})
     assert unsafe.exit_code == 1, unsafe.output
     assert "UNSAFE offline" in unsafe.output and "routing_profile" in unsafe.output
+
+
+UNREGISTERED = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+
+
+def test_an_unregistered_default_model_override_is_a_warning_naming_both_ids(
+    machine, monkeypatch
+):
+    """B-029: the registry ignores an unregistered HEARTH_DEFAULT_MODEL; doctor says so."""
+    monkeypatch.setenv("HEARTH_DEFAULT_MODEL", UNREGISTERED)
+    checks, safe = machine.run()
+    warn = checks["default_model"]
+    assert not warn.ok and not warn.fatal
+    assert warn.detail.startswith("WARN")
+    assert UNREGISTERED in warn.detail and DEFAULT in warn.detail  # ignored id + what serves
+    assert machine.registry.default_id == DEFAULT
+    assert safe  # a surprise, not an offline-safety failure: the verdict is unchanged
+
+
+def test_a_registered_default_model_override_raises_no_warning(machine, monkeypatch):
+    monkeypatch.setenv("HEARTH_DEFAULT_MODEL", SMALL)
+    checks, _ = machine.run()
+    assert "default_model" not in checks

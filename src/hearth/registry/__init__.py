@@ -7,12 +7,15 @@ CLI read from here so the catalog can change without code edits.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger("hearth.registry")
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class Registry:
         self._entries = entries
         self._by_id = {e.id: e for e in entries}
         self._default = default
+        self._warned_overrides: set[str] = set()
 
     def list(self) -> list[ModelEntry]:
         """Return all catalog entries in declaration order."""
@@ -70,7 +74,27 @@ class Registry:
         override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
         if override and override in self._by_id:
             return override
+        if override and override not in self._warned_overrides:
+            # Once per registry per value: serve startup asks for this, and so does every
+            # request that names no model (B-029). `hearth doctor` reports it too.
+            self._warned_overrides.add(override)
+            logger.warning(
+                "HEARTH_DEFAULT_MODEL=%r is not in the model registry and is IGNORED; "
+                "serving the catalog default %r instead",
+                override,
+                self._default,
+            )
         return self._default
+
+    @property
+    def ignored_default_override(self) -> str | None:
+        """``HEARTH_DEFAULT_MODEL`` when it is set but :attr:`default_id` ignores it.
+
+        The same test :attr:`default_id` applies, read from the same place, so a report
+        built on this cannot disagree with the model that actually serves.
+        """
+        override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
+        return override if override and override not in self._by_id else None
 
 
 def default_registry_path() -> Path:
