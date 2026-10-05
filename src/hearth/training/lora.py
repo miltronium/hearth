@@ -96,6 +96,13 @@ def train(
     is passed in by the caller for determinism (the CLI derives one from a timestamp).
     """
     config.validate()
+    if runner is None:
+        # Real path: fail on a missing [mlx] extra or a base that is not on disk BEFORE
+        # laying out the run dir, so a failed `hearth train` leaves nothing behind (B-026).
+        _require_mlx_lm()
+        from ..providers.mlx import resolve_local_model
+
+        resolve_local_model(config.base_model)
     run_dir = _prepare_run_dir(config)
     args = _build_args(config, run_dir)
     run = runner or _mlx_lm_runner
@@ -214,13 +221,8 @@ def runner_invocation(
     return command, model_load_env(allow_downloads)
 
 
-def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
-    """Default runner: shell out to ``python -m mlx_lm.lora`` (needs the ``[mlx]`` extra).
-
-    Tests inject a fake runner for training; the launch itself is covered by faking
-    ``subprocess.run`` (tests/test_offline_load_paths.py). Raising with the fix hint mirrors
-    :class:`hearth.providers.mlx.MLXUnavailableError`.
-    """
+def _require_mlx_lm() -> None:
+    """Raise with the install hint unless ``mlx_lm`` is importable (no import is done)."""
     import importlib.util
 
     if importlib.util.find_spec("mlx_lm") is None:
@@ -228,6 +230,16 @@ def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
             "mlx-lm is not installed. Install the training backend with: "
             "uv sync --extra mlx --extra mcp --extra dev --extra files"
         )
+
+
+def _mlx_lm_runner(args: list[str], run_dir: Path) -> Path:
+    """Default runner: shell out to ``python -m mlx_lm.lora`` (needs the ``[mlx]`` extra).
+
+    Tests inject a fake runner for training; the launch itself is covered by faking
+    ``subprocess.run`` (tests/test_offline_load_paths.py). Raising with the fix hint mirrors
+    :class:`hearth.providers.mlx.MLXUnavailableError`.
+    """
+    _require_mlx_lm()
     # Resolve before the preflight: a base that is not on disk fails here, in a second.
     command, env = runner_invocation(args)
     _preflight_batch_size(args, run_dir)

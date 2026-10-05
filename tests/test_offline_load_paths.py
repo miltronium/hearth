@@ -179,6 +179,36 @@ def test_cli_train_reports_a_missing_base_cleanly(isolated, tmp_path, launches):
     assert launches == []
 
 
+def test_train_on_a_model_not_on_disk_creates_no_run_dir(isolated, tmp_path, launches):
+    """B-026: the base is resolved before any directory is laid out."""
+    config = _lora_config(tmp_path)
+    with pytest.raises(ModelNotOnDiskError):
+        train(config)
+    assert not config.output_dir.exists(), sorted(config.output_dir.rglob("*"))
+
+
+def test_cli_train_on_a_model_not_on_disk_leaves_the_train_root_empty(
+    isolated, tmp_path, launches
+):
+    """B-026 through the CLI, with the DEFAULT output dir (<HEARTH_HOME>/train/<run-id>)."""
+    from typer.testing import CliRunner
+
+    from hearth.cli import app
+    from hearth.training.dataset import write_dataset
+
+    home, _ = isolated
+    data = write_dataset(_lora_config(tmp_path).dataset, tmp_path / "data.jsonl")
+    result = CliRunner().invoke(
+        app,
+        ["train", "--task", "extract", "--base", REPO, "--data", str(data), "--no-register"],
+        env={"COLUMNS": "300", "HEARTH_HOME": str(home)},
+    )
+    assert result.exit_code == 1, result.output
+    train_root = home / "train"
+    assert not train_root.exists(), sorted(train_root.rglob("*"))
+    assert launches == []
+
+
 # --- hearth models convert (mlx_lm convert in a child process) ------------------------------
 
 
