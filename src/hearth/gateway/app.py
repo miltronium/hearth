@@ -380,6 +380,8 @@ def create_app(
             try:
                 parse_json_object(result.text, result.finish_reason)
             except InvalidJsonResponseError as exc:
+                # The client gets an error, so the request is a failure in the metrics too.
+                router.metrics.mark_failed(rec, f"invalid_json_response: {exc}")
                 return _json_mode_error(str(exc), exc.content, result.finish_reason)
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -910,25 +912,25 @@ def _stream_sse(
     # metrics store, an injected store that raises) must not drop the stream with no [DONE]:
     # the client still gets the final chunk, then a named error event, then [DONE].
     accounting_error: str | None = None
+    stream_record: RequestRecord | None = None
     try:
         if served_by == "remote":
             router.budget.spend(prompt_tokens + completion_tokens)
-        router.metrics.record(
-            RequestRecord(
-                task_class=decision.task_class,
-                backend=provider.name,
-                model=model_served,
-                served_by=served_by,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms,
-                escalated=decision.would_escalate,
-                escalation_reason=decision.reason if decision.would_escalate else None,
-                escalation_failed=escalation_failed,
-                adapter=served_adapter,
-                estimated_frontier_tokens_saved=saved,
-            )
+        stream_record = RequestRecord(
+            task_class=decision.task_class,
+            backend=provider.name,
+            model=model_served,
+            served_by=served_by,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=latency_ms,
+            escalated=decision.would_escalate,
+            escalation_reason=decision.reason if decision.would_escalate else None,
+            escalation_failed=escalation_failed,
+            adapter=served_adapter,
+            estimated_frontier_tokens_saved=saved,
         )
+        router.metrics.record(stream_record)
     except Exception as exc:  # noqa: BLE001 — accounting must not kill a delivered answer
         accounting_error = f"{type(exc).__name__}: {exc}"
         logger.error("stream served but accounting failed: %s", accounting_error)
@@ -966,6 +968,11 @@ def _stream_sse(
         try:
             parse_json_object(text, finish_reason)
         except InvalidJsonResponseError as exc:
+            if stream_record is not None:
+                try:
+                    router.metrics.mark_failed(stream_record, f"invalid_json_response: {exc}")
+                except Exception as mark_exc:  # noqa: BLE001 — the [DONE] still goes out
+                    logger.error("could not mark stream failed: %s", mark_exc)
             yield _sse(
                 {
                     "error": {

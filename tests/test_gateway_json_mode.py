@@ -275,3 +275,27 @@ def test_parse_json_object_error_names_truncation_only_when_truncated():
 def test_parse_json_object_unwraps_fences():
     assert parse_json_object('```json\n{"a": 1}\n```', "stop") == {"a": 1}
     assert parse_json_object('```\n{"a": 1}\n```', "stop") == {"a": 1}
+
+
+# -- the metrics agree with what the client got -------------------------------------------------
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_invalid_json_answer_counts_as_a_failure_not_a_served_request(scripted, stream):
+    """The client received an error, so the rollup must not count the request as served.
+
+    Before, JSON mode rejected the object AFTER the router had recorded a success, so
+    `hearth stats` showed a served request for every 422 / invalid_json error event.
+    """
+    provider, client = scripted("Sure! Here are the totals.")
+    _chat(client, stream=stream, response_format={"type": "json_object"})
+    roll = client.app.state.router.metrics.rollup()
+    assert roll["requests"] == 1
+    assert roll["failed"] == 1
+    assert roll["backend_mix"] == {}  # served-answer mix counts only real answers
+
+
+def test_a_valid_json_answer_is_still_a_served_request(scripted):
+    provider, client = scripted('{"total": 3}')
+    _chat(client, response_format={"type": "json_object"})
+    roll = client.app.state.router.metrics.rollup()
+    assert roll["failed"] == 0 and roll["requests"] == 1

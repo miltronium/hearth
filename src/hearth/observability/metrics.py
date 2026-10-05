@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 # Class-aware savings multipliers (ARCHITECTURE §8). Replaces Phase 0's flat
@@ -86,6 +86,21 @@ class MetricsStore:
     def record(self, rec: RequestRecord) -> None:
         with self._lock:
             self._records.append(rec)
+
+    def mark_failed(self, rec: RequestRecord, reason: str) -> None:
+        """Re-mark an already-recorded request as failed (same record, ``failed`` set).
+
+        For a failure discovered after the generation was recorded — JSON mode rejecting
+        an unparseable object is the case: the client got an error, so the request must not
+        count as served. Replaces the record in place (matched by identity) so the rollup
+        counts it once, as a failure; a record no longer in the ring is a no-op.
+        """
+        failed = replace(rec, failed=reason)
+        with self._lock:
+            for i, r in enumerate(self._records):
+                if r is rec:
+                    self._records[i] = failed
+                    return
 
     def _since(self, since_s: float | None) -> list[RequestRecord]:
         cutoff = 0.0 if since_s is None else time.time() - since_s
