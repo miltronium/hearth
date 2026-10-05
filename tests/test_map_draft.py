@@ -528,24 +528,32 @@ def test_a_failing_parse_withholds_the_message_that_quotes_the_cell(tmp_path, ca
     assert not out.exists()
 
 
-def test_the_total_is_kept_out_of_stdout_unless_asked_for(tmp_path, capsys, monkeypatch):
-    """The sum is a figure; stdout is what gets pasted into a chat window. Opt in for it."""
+def test_the_total_never_reaches_stdout_and_show_total_is_refused(tmp_path, capsys, monkeypatch):
+    """The sum is a figure computed from the values; stdout is what gets pasted into a chat.
+
+    ``--show-total`` used to print it on request, which made the closing "no value printed"
+    line conditional. It is now refused (exit 2, nothing on stdout); the sum lives only in the
+    local draft file (B-074).
+    """
     monkeypatch.setenv("HEARTH_FILE_ROOTS", str(tmp_path))
     _write(tmp_path, "bal.csv", US_WITH_BALANCE)
     out = tmp_path / "mappings"
 
     md.main([str(tmp_path), "--out", str(out), "--no-model"])
     quiet = capsys.readouterr().out
-    assert "written into the draft" in quiet
-    assert "1935.13" not in quiet
+    assert "written into the draft only" in quiet
+    assert "622.37" not in quiet
 
-    md.main([str(tmp_path), "--out", str(out), "--no-model", "--force", "--show-total"])
-    loud = capsys.readouterr().out
-    assert "sum of amounts -" in loud or "sum of amounts " in loud
+    assert md.main([str(tmp_path), "--out", str(out), "--no-model", "--force",
+                    "--show-total"]) == 2
+    refused = capsys.readouterr()
+    assert refused.out == ""
+    assert "--show-total was removed" in refused.err
+    assert "622.37" not in refused.err
 
-    # Either way the figure is recorded in the draft itself, where a reviewer needs it.
+    # The figure is recorded in the draft itself, where a reviewer needs it.
     draft = next(out.glob("*.yaml")).read_text(encoding="utf-8")
-    assert "sum of amounts" in draft
+    assert "sum of amounts : 622.37" in draft
 
 
 def test_the_column_profile_never_renders_its_values(tmp_path, settings):
