@@ -1,11 +1,13 @@
-"""B-066: every request that ends in an error writes a RequestRecord.
+"""B-066 / B-073: every request that ends in an error writes a RequestRecord — and the
+failed record's ``adapter`` means the same thing on every path.
 
 Before: a local rung nobody could serve (404 / stream ``model_not_found`` event), a denied
 escalation (429 / stream ``budget_exhausted`` event), and a remote failure followed by a local
 UnknownModelError all reached the client as errors with **no record** — so ``hearth stats``
 read them as zero traffic, and the last one lost the fact that the remote had been called
 (and may hold the prompt). The stream branch's ``[DONE]`` was untested: deleting it failed
-nothing.
+nothing. The failed record's ``adapter`` was the *requested* id on the plain path and the
+*selected* id (requested or promoted) on the streaming path.
 
 The fakes below raise from the provider itself, so these assert on the client's response and
 the metrics store's contents — not on which branch the code took.
@@ -24,6 +26,7 @@ from hearth.gateway import create_app
 from hearth.observability.budget import BudgetAccountant
 from hearth.observability.metrics import MetricsStore
 from hearth.providers.base import Capabilities, GenRequest, GenResult, Message, ResourceEstimate
+from hearth.registry import AdapterStore
 from hearth.router import BudgetExhaustedError, Router
 from hearth.router.classify import TASK_CLASSES
 from hearth.router.policy import ClassRule, Defaults, RemoteConfig, RoutingPolicy
@@ -52,6 +55,17 @@ class UnservableLocal(_Provider):
 
     def stream(self, req: GenRequest) -> Iterator[str]:
         raise UnknownModelError(req.model, f"The model {req.model!r} cannot be served here")
+        yield  # pragma: no cover
+
+
+class DeadLocal(_Provider):
+    name = "mlx"
+
+    def generate(self, req: GenRequest) -> GenResult:
+        raise RuntimeError("weights missing")
+
+    def stream(self, req: GenRequest) -> Iterator[str]:
+        raise RuntimeError("weights missing")
         yield  # pragma: no cover
 
 
@@ -91,10 +105,10 @@ def _remote_policy() -> RoutingPolicy:
     )
 
 
-def _router(local, policy, *, budget: int = 1_000_000) -> Router:
+def _router(local, policy, *, budget: int = 1_000_000, adapters=None) -> Router:
     return Router(
         local_provider=local, policy=policy, budget=BudgetAccountant(budget),
-        metrics=MetricsStore(), remote_factory=DeadRemote,
+        metrics=MetricsStore(), remote_factory=DeadRemote, adapters=adapters,
     )
 
 
@@ -228,3 +242,31 @@ def test_stream_records_the_failed_escalation_when_the_local_fallback_404s(tmp_p
     assert events[-2]["error"]["code"] == "model_not_found"
     (rec,) = _records(router)
     assert rec.failed and rec.escalation_failed and "unreachable" in rec.escalation_failed
+
+
+# -- B-073: the failed record's `adapter` is the same on both paths --------------------------
+
+
+def _store(tmp_path, name: str) -> AdapterStore:
+    store = AdapterStore(path=tmp_path / f"adapters-{name}.json")
+    store.register("chat-p", base_model="", task="chat", train_run_id="r",
+                   adapter_path="/a/chat-p")
+    store.promote("chat-p", gate_passed=True)
+    store.register("ab-1", base_model="", task="chat", train_run_id="r", adapter_path="/a/ab-1")
+    return store
+
+
+@pytest.mark.parametrize("requested", [None, "ab-1"])
+def test_failed_record_adapter_is_the_selected_adapter_on_both_paths(tmp_path, requested):
+    """``adapter`` on a failed record = the adapter selected for the attempt that failed
+    (an explicit request, else the promoted default), on the plain AND streaming paths."""
+    expected = requested or "chat-p"
+    seen = []
+    for stream in (False, True):
+        router = _router(DeadLocal(), _local_policy(), adapters=_store(tmp_path, str(stream)))
+        hearth = {"adapter": requested} if requested else {}
+        _post(_client(tmp_path, router), CHAT, stream=stream, **hearth)
+        (rec,) = _records(router)
+        assert rec.failed
+        seen.append(rec.adapter)
+    assert seen == [expected, expected]

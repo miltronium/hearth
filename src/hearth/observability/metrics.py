@@ -66,6 +66,10 @@ class RequestRecord:
     # fallback failed too and nothing was served. Holds the remote's error. Without it a frontier
     # outage would read in the metrics as a policy that simply never escalated.
     escalation_failed: str | None = None
+    # A served record: the adapter that actually generated the answer (None = base weights,
+    # a base retry, a remote, or a backend that ignores adapters). A failed record: the
+    # adapter SELECTED for the attempt that failed (explicit request, else the promoted
+    # default) — the same on the plain and streaming paths (B-073).
     adapter: str | None = None
     estimated_frontier_tokens_saved: int = 0
     # Set when the client got an ERROR instead of an answer (the local provider failed, or a

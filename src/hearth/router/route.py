@@ -259,7 +259,7 @@ class Router:
             if not decision.would_escalate:
                 # A plain local failure: the client gets a 503, and the record says so.
                 self.record_failure(
-                    req, decision, provider, exc, started=started, adapter=adapter
+                    req, decision, provider, exc, started=started, adapter=choice.id
                 )
                 raise
             # The remote failed (unreachable, offline, SDK missing, rejected the call).
@@ -279,7 +279,7 @@ class Router:
                 # — a 404 from the local rung included (B-066).
                 self.record_failure(
                     req, decision, self.local, local_exc, started=started,
-                    adapter=adapter, escalation_failed=escalation_failed,
+                    adapter=choice.id, escalation_failed=escalation_failed,
                 )
                 raise
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -369,7 +369,9 @@ class Router:
 
         Shared by :meth:`route` and the gateway's streaming path. ``served_by`` names the
         tier that was tried and failed; ``backend_mix`` does not count it (nothing was
-        served). ``backend`` overrides ``provider.name`` when no
+        served). ``adapter`` is the adapter SELECTED for the attempt that failed (an explicit
+        request, else the promoted default; ``None`` for base weights or a remote) — the
+        same meaning on every path (B-073). ``backend`` overrides ``provider.name`` when no
         provider was built (a denied escalation); ``escalated`` overrides
         ``decision.would_escalate``. Never raises: a metrics store that fails here must not
         replace the provider's error the client is about to receive with its own.
