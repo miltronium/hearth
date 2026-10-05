@@ -92,16 +92,23 @@ scanned 1 file(s) under ~/hearth-statements/incoming
        3  Balance                            number-like
        4  Type                               text
 
-No cell values were printed. Header names are safe to share; values are not.
+No cell values were printed: only header cells that read as labels, and type
+guesses. Preamble lines and value-like cells were withheld.
+Values are not safe to share.
 You need 1 column mapping(s), one per format above.
 ```
 
 `hearth_peek.py` also takes directories (walked recursively) and groups files by header
 signature. Twenty exports from one bank show up as one format that needs one mapping. A file
-it cannot read is listed under `── could not read ──` with the reason, and the exit code is 1.
-If the file has preamble lines above the real header (the case `skip_rows` is for), the
-"header" row it prints is the first preamble line, which is a cell value and not a header.
-Check that row before you share the output.
+it cannot read is listed under `── could not read ──` with the reason (for unexpected errors,
+only the error type — a parser's message can quote file content), and the exit code is 1.
+
+Preamble lines above the real header (account name/number, statement period — the case
+`skip_rows` is for) are detected and **not printed**: the file line reads e.g. `(46 rows, 5
+preamble line(s) above the header skipped, not shown)`. The number of preamble lines is your
+`skip_rows`. A header is only shown if every cell reads as a label (no dates, amounts, runs of
+4+ digits, e-mail addresses or long text); otherwise the file says `no header row identified`
+and no names are printed — open that file locally to write its mapping.
 
 That output is safe to read aloud, put in a note, or paste to a cloud agent for help writing
 the YAML. Write the mapping into `~/hearth-statements/mappings/acme-checking.yaml`:

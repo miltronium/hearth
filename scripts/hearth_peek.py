@@ -42,6 +42,49 @@ DEFAULT_EXTS = TABLE_EXTS | TEXT_EXTS
 
 _DATE = re.compile(r"^\s*\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
 _MONEY = re.compile(r"^\s*[-+(]?\s*[$€£]?\s*[\d,]+\.?\d*\s*\)?-?\s*$")
+_DIGIT_RUN = re.compile(r"\d{4,}")
+_HEADER_SCAN = 30  # how far down a file the real header may sit below a preamble
+WITHHELD = "(withheld: looks like a value)"
+NO_HEADER = "(header not identified: withheld)"
+
+
+def _looks_like_label(cell: str) -> bool:
+    """True if a cell reads as a column NAME rather than a value.
+
+    Deliberately conservative: anything date- or money-shaped, long, carrying a run of four
+    or more digits (account and card numbers, years, amounts), or an e-mail is treated as a
+    value. A real header that trips this is shown as withheld — a missing label costs the
+    operator a glance at the file; a printed value costs the whole premise of this script.
+    """
+    c = cell.strip()
+    return bool(c) and not (
+        _DATE.match(c)
+        or _MONEY.match(c)
+        or _DIGIT_RUN.search(c)
+        or "@" in c
+        or len(c) > 40
+    )
+
+
+def _find_header(rows: list[list[str]]) -> tuple[int | None, int]:
+    """Return (header row index or None, table width).
+
+    The width is the most common count of non-empty cells among rows with two or more. The
+    header is the first row, within the first ``_HEADER_SCAN``, that has exactly that many
+    non-empty cells and whose every non-empty cell looks like a label. Bank exports often put
+    an account-name/number preamble above the header (what a mapping's ``skip_rows`` is for);
+    taking ``rows[0]`` printed that preamble — cell values — as "headers".
+    """
+    counts = [sum(1 for c in r if c.strip()) for r in rows]
+    widths = [n for n in counts if n >= 2]
+    if not widths:
+        return None, max((len(r) for r in rows), default=0)
+    width = max(set(widths), key=widths.count)
+    for i, row in enumerate(rows[:_HEADER_SCAN]):
+        cells = [c for c in row if c.strip()]
+        if counts[i] == width and all(_looks_like_label(c) for c in cells):
+            return i, width
+    return None, width
 
 
 def _guess(cells: list[str]) -> str:
@@ -78,16 +121,33 @@ def _inspect(path: Path) -> tuple[tuple[str, ...] | None, dict]:
         rows = read_table(path)
         if not rows:
             return (), {"kind": "table", "rows": 0, "columns": []}
-        header, data = rows[0], rows[1:]
-        width = max(len(r) for r in rows)
+        at, _width = _find_header(rows)
+        if at is None:
+            header: list[str] = []
+            data = rows
+            preamble = 0
+        else:
+            header, data, preamble = rows[at], rows[at + 1 :], at
+        span = max((len(r) for r in [header, *data]), default=0)
         columns = []
-        for i in range(width):
-            name = header[i] if i < len(header) else "(no header)"
+        for i in range(span):
+            if at is None:
+                name = NO_HEADER
+            elif i < len(header) and _looks_like_label(header[i]):
+                name = header[i].strip()
+            elif i < len(header) and header[i].strip():
+                # Unreachable while _find_header requires every header cell to be a label;
+                # kept as the backstop if that rule is ever loosened.
+                name = WITHHELD
+            else:
+                name = "(no header)"
             columns.append((i, name, _guess([r[i] for r in data if i < len(r)])))
         return tuple(c[1] for c in columns), {
             "kind": "table",
             "rows": len(data),
             "columns": columns,
+            "preamble": preamble,
+            "header_found": at is not None,
         }
     # Text documents (PDF and friends) have no header row to group on. Report only that the
     # text layer exists and roughly how much of it — never any of the text itself.
@@ -125,7 +185,10 @@ def main() -> int:
             refused.append((path, str(exc)))
             continue
         except Exception as exc:  # a malformed file should not abort the sweep
-            refused.append((path, f"{type(exc).__name__}: {exc}"))
+            # The exception TYPE only: a parser's message can quote the bytes or line it
+            # choked on, which would be file content.
+            reason = f"{type(exc).__name__} (message withheld: may quote file content)"
+            refused.append((path, reason))
             continue
         if signature is None:
             texts.append((path, details))
@@ -151,7 +214,15 @@ def main() -> int:
                 shown = path.relative_to(common)
             except ValueError:
                 shown = path
-            print(f"     {shown}  ({details['rows']} rows)")
+            skipped = details.get("preamble", 0)
+            note = (
+                f", {skipped} preamble line(s) above the header skipped, not shown"
+                if skipped
+                else ""
+            )
+            if not details.get("header_found", True):
+                note += ", no header row identified"
+            print(f"     {shown}  ({details['rows']} rows{note})")
         print()
         print(f"     {'#':>3}  {'header':<34} {'looks like'}")
         print(f"     {'-' * 3}  {'-' * 34} {'-' * 40}")
@@ -179,7 +250,12 @@ def main() -> int:
             print(f"     {shown}\n       {reason}")
         print()
 
-    print("No cell values were printed. Header names are safe to share; values are not.")
+    # True by construction: the only file-derived strings printed above are header cells that
+    # passed _looks_like_label, and type CLASSES. Preamble rows, data rows, cells that look like
+    # values, and parser error messages are never printed.
+    print("No cell values were printed: only header cells that read as labels, and type")
+    print("guesses. Preamble lines and value-like cells were withheld.")
+    print("Values are not safe to share.")
     if groups:
         print(f"You need {len(groups)} column mapping(s), one per format above.")
     return 0 if not refused else 1
