@@ -368,6 +368,7 @@ class Router:
         completion_tokens: int = 0,
         backend: str | None = None,
         escalated: bool | None = None,
+        model: str | None = None,
     ) -> RequestRecord | None:
         """Record a request that ended in an error instead of an answer (``failed`` set).
 
@@ -377,14 +378,25 @@ class Router:
         request, else the promoted default; ``None`` for base weights or a remote) — the
         same meaning on every path (B-073). ``backend`` overrides ``provider.name`` when no
         provider was built (a denied escalation); ``escalated`` overrides
-        ``decision.would_escalate``. Never raises: a metrics store that fails here must not
+        ``decision.would_escalate``. ``model`` defaults to :func:`generating_model` of the
+        provider that was tried — the same identity a success would have reported (B-101).
+        Never raises: a metrics store that fails here must not
         replace the provider's error the client is about to receive with its own.
         """
         prompt_tokens = max(1, sum(len(m.content) for m in req.messages) // 4)
+        if model is None:
+            # The model that was ATTEMPTED — what the provider generates for this request —
+            # not what was asked for: an echo stub that fails is "echo", as its answer would
+            # have been (B-101). No provider (a denied escalation): the decision's model.
+            model = (
+                generating_model(provider, decision.model)
+                if provider is not None
+                else decision.model
+            )
         record = RequestRecord(
             task_class=decision.task_class,
             backend=backend if backend is not None else getattr(provider, "name", "none"),
-            model=decision.model,
+            model=model,
             served_by="remote" if decision.would_escalate else "local",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -629,6 +641,33 @@ class Router:
         return self._adapters
 
 
+def generating_model(provider: ModelProvider, model: str) -> str:
+    """The model that GENERATES when ``provider`` is handed a request for ``model``.
+
+    Known before generation starts, so a stream can label its role and content chunks with
+    it (B-101) instead of the decision's model — which names what was asked for:
+
+    * the echo stub generates as ``"echo"`` whatever was asked (B-068);
+    * a provider that resolves ids (:class:`~hearth.serving.ModelPool`) generates the id it
+      resolves to (an unresolvable id is left as asked: that request fails anyway);
+    * a provider bound to one model (``model_id``) generates that model;
+    * anything else (a remote, a test fake) is taken at the requested id.
+
+    The terminal ``StreamDelta.model`` / ``GenResult.model`` stays the authority once the
+    generation reports it; this is the same derivation, made before the first token.
+    """
+    name = getattr(provider, "name", None)
+    if is_stub_backend(name):
+        return name
+    resolve = getattr(provider, "resolve", None)
+    if callable(resolve):
+        try:
+            return resolve(model)
+        except Exception:  # noqa: BLE001 — the request itself will fail and say why
+            return model
+    return getattr(provider, "model_id", None) or model
+
+
 def policy_rungs(policy: RoutingPolicy, default_id: str) -> dict[str, list[str]]:
     """Every local model an ``auto`` request can be routed to → where each comes from.
 
@@ -714,6 +753,7 @@ def _estimate_remote_cost(req: GenRequest) -> int:
 
 __all__ = [
     "check_policy_servable",
+    "generating_model",
     "policy_rungs",
     "AdapterChoice",
     "BudgetExhaustedError",

@@ -35,7 +35,12 @@ from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..providers.echo import is_stub_backend
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router, check_policy_servable
-from ..router.route import AdapterChoice, UnknownAdapterError, policy_rungs
+from ..router.route import (
+    AdapterChoice,
+    UnknownAdapterError,
+    generating_model,
+    policy_rungs,
+)
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
@@ -902,12 +907,14 @@ def _stream_sse(
         adapter=choice.path,
     )
 
-    # First chunk announces the assistant role (OpenAI convention).
+    # First chunk announces the assistant role (OpenAI convention). Every chunk names the
+    # model that GENERATES (B-101): the echo stub is "echo" from the first chunk, not only in
+    # the final one — decision.model names what was asked for.
     yield _sse(
         ChatCompletionChunk(
             id=chunk_id,
             created=created,
-            model=decision.model,
+            model=generating_model(provider, decision.model),
             choices=[base_choice(ChatChunkDelta(role="assistant"))],
         )
     )
@@ -923,8 +930,9 @@ def _stream_sse(
     # The adapter path the answer was actually generated with (None after a base retry).
     used_path: str | None = None
 
-    def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
+    def relay(provider: ModelProvider, stream_req: GenRequest):
         nonlocal finish_reason, served_model
+        model = generating_model(provider, stream_req.model)
         for event in iter_stream(provider, stream_req):
             if event.finish_reason:
                 finish_reason = event.finish_reason
@@ -949,7 +957,7 @@ def _stream_sse(
         nonlocal used_path
         used_path = stream_req.adapter
         try:
-            yield from relay(router.local, stream_req, stream_req.model)
+            yield from relay(router.local, stream_req)
         except Exception as exc:  # noqa: BLE001
             if stream_req.adapter is None or parts:
                 raise
@@ -964,7 +972,6 @@ def _stream_sse(
                     temperature=stream_req.temperature,
                     adapter=None,
                 ),
-                stream_req.model,
             )
 
     try:
@@ -972,7 +979,7 @@ def _stream_sse(
             yield from relay_local(stream_req)
         else:
             try:
-                yield from relay(provider, stream_req, decision.model)
+                yield from relay(provider, stream_req)
             except Exception as exc:  # noqa: BLE001
                 if parts:
                     # The remote received the prompt and produced tokens before dying: that
@@ -1033,8 +1040,8 @@ def _stream_sse(
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
     # A provider that cannot say which model ran (third-party, plain stream()) falls back to
-    # its bound model id if it has one, and only then to the decision.
-    model_served = served_model or getattr(provider, "model_id", None) or decision.model
+    # the same derivation that labelled the chunks: its bound model id, else the decision.
+    model_served = served_model or generating_model(provider, decision.model)
     # The adapter that actually served — not the one requested (B-034).
     served_adapter = router.served_adapter(provider, choice, used_path)
 
