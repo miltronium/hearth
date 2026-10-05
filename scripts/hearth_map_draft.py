@@ -42,13 +42,31 @@ Anything still unresolved is written into the YAML as a sentinel (``AMBIGUOUS`` 
 ``UNRESOLVED``) that :meth:`ColumnMapping.from_yaml` **refuses to load**. A draft that needs a
 human is therefore inert until it gets one, rather than being a plausible file that runs.
 
-**Privacy.** The tool reads values locally — that is the point — but it never prints one. Only
-headers, measured types, counts and the model's structural conclusions reach stdout, because
-that output is exactly what an operator is likely to paste into a cloud chat. This extends to
-failures: :class:`~hearth.finance.parse.ParseError` messages quote the offending cell, so a
-trial-parse failure is reported by row index and column and the message is withheld. The
-computed total goes into the draft file (local, and where a reviewer needs it) and reaches
-stdout only under ``--show-total``.
+**The header row is found, not assumed.** Real exports put the account holder, account number
+and statement period above the header. The header is the first row (in the first 30) holding
+at least two names from a fixed column vocabulary, exactly as ``scripts/hearth_peek.py`` finds
+it (both use :mod:`hearth.finance.shape`); the rows above it are written into the draft as
+``skip_rows``. Taking ``rows[0]`` made every draft for a file with a preamble wrong and printed
+the preamble as column names (B-074).
+
+**Privacy.** The tool reads values locally — that is the point — but stdout follows the same
+rule as ``hearth_peek.py``, by construction rather than by care, because stdout is exactly what
+an operator is likely to paste into a cloud chat:
+
+* a column is printed by name only if the name is made of :data:`hearth.finance.shape.VOCAB`
+  words; any other column is ``column N (withheld)``. Every sentence that mentions a column is
+  a :class:`Note` whose column slots are filled through that rule, so a raw header cannot be
+  interpolated into terminal text by accident;
+* files print as ids ``F1..Fn`` (``--index-out FILE`` writes the id -> path list locally); the
+  draft's own file name prints only if every word of it is vocabulary (the model proposes it,
+  and it could echo header text);
+* no figure computed from values: no total (``--show-total`` is refused), no count of negative
+  or zero amounts, only whether they occur;
+* no exception message: :class:`~hearth.finance.parse.ParseError` quotes the offending cell and
+  file-gate errors quote the path, so failures print coordinates and fixed reasons.
+
+The draft YAML is a local file and keeps the real header names (it must, to load), the file
+names, the counts and the unverified total, where a reviewer needs them.
 
     HEARTH_FILE_ROOTS=~/hearth-statements \\
         uv run --no-sync python scripts/hearth_map_draft.py ~/hearth-statements/incoming
@@ -65,6 +83,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -93,10 +112,70 @@ from hearth.finance.parse import (  # noqa: E402
     parse_money,
     parse_rows,
 )
+from hearth.finance.shape import (  # noqa: E402
+    HEADER_SCAN,
+    MIN_KNOWN,
+    column_ref,
+    file_ids,
+    file_label,
+    find_header,
+    header_label,
+    is_printable_slug,
+    refusal_reason,
+    write_index,
+)
 from hearth.finance.validate import SUM_UNVERIFIED, reconcile  # noqa: E402
 from hearth.mcp.files import FileAccessError, read_table  # noqa: E402
 
 TABLE_EXTS = {".csv", ".xlsx", ".json"}
+
+NO_HEADER_REASON = (
+    f"no header row identified (no row in the first {HEADER_SCAN} has {MIN_KNOWN}+ known "
+    "column names); write this mapping by hand"
+)
+
+
+@dataclass(frozen=True)
+class Note:
+    """A sentence that may name columns, rendered two ways.
+
+    ``template`` is fixed text with one ``{}`` slot per entry of ``columns``; an entry is a
+    header name or a tuple of them (rendered as a list). The local draft file gets the raw
+    names (:meth:`raw`); the terminal gets each name through the shared printing rule
+    (:meth:`render` with a :func:`~hearth.finance.shape.column_ref`-style function), so a
+    non-vocabulary header cannot reach stdout through a sentence. ``private`` is detail for
+    the local file only (an exception message, say) and is never part of the terminal text.
+
+    Build templates from fixed text, counts and constants only. A column name belongs in
+    ``columns``, never in the template.
+    """
+
+    template: str
+    columns: tuple[str | tuple[str, ...], ...] = ()
+    private: str = ""
+
+    def render(self, ref: Callable[[str], str]) -> str:
+        """The sentence with every column slot filled by ``ref``; ``private`` left out."""
+        args = [
+            "[" + ", ".join(ref(n) for n in c) + "]" if isinstance(c, tuple) else ref(c)
+            for c in self.columns
+        ]
+        return self.template.format(*args)
+
+    def raw(self) -> str:
+        """The sentence with the real names and the private detail: for the local file."""
+        text = self.render(repr)
+        return f"{text} ({self.private})" if self.private else text
+
+    def __str__(self) -> str:
+        return self.raw()
+
+    def __contains__(self, item: str) -> bool:
+        return item in self.raw()
+
+    def startswith(self, prefix: str) -> bool:
+        """Read like the string it renders to (keeps call sites and tests plain)."""
+        return self.raw().startswith(prefix)
 
 #: Written into any field that is not settled. Both are deliberately *not* loadable: a draft
 #: that still needs a human must fail loudly at ``from_yaml``, not run with a plausible guess.
@@ -246,6 +325,7 @@ KIND_EMPTY = "empty"
 KIND_DATE = "date"
 KIND_NUMBER = "number"
 KIND_TEXT = "text"
+KIND_REPEATED = "repeated-name"  # the header repeats this name; no mapping can address it
 
 #: The separator pairs tried, in order. The first that parses every numeric cell wins; two
 #: pairs cannot both parse the same cell set except where the cells are unambiguous anyway,
@@ -307,7 +387,7 @@ class ColumnProfile:
         return self.rows > 0 and self.populated == self.rows
 
     def describe(self) -> str:
-        """One safe line for the operator: header, measured kind and counts only."""
+        """One line with the RAW header and counts: for the local model and the local draft."""
         bits = [f"type={self.kind}", f"populated={self.populated}/{self.rows}"]
         if self.kind == KIND_NUMBER:
             bits.append(f"negative={self.negatives}")
@@ -319,6 +399,26 @@ class ColumnProfile:
         if self.kind == KIND_DATE and self.date is not None:
             bits.append(f"date-format={self.date.status}")
         return f"[{self.index}] {self.name!r:<32} " + "  ".join(bits)
+
+    def describe_safe(self) -> str:
+        """One line for the TERMINAL: the shared header rule, the type class, and flags.
+
+        The name goes through :func:`~hearth.finance.shape.header_label` (vocabulary or
+        ``(withheld)``). Numbers are reduced to whether negatives / zeros occur, not how many:
+        a count of debits is a figure computed from the values. ``populated`` counts filled
+        cells, which is shape, not content.
+        """
+        bits = [f"type={self.kind}", f"populated={self.populated}/{self.rows}"]
+        if self.kind == KIND_NUMBER:
+            bits.append("negatives=yes" if self.negatives else "negatives=no")
+            bits.append("zeros=yes" if self.zeros else "zeros=no")
+            if self.parens:
+                bits.append("accounting-negatives=parens")
+            if self.trailing_minus:
+                bits.append("accounting-negatives=trailing-minus")
+        if self.kind == KIND_DATE and self.date is not None:
+            bits.append(f"date-format={self.date.status}")
+        return f"[{self.index}] {header_label(self.name):<32} " + "  ".join(bits)
 
 
 def _classify(name: str, index: int, cells: list[str], probe: ColumnMapping) -> ColumnProfile:
@@ -554,10 +654,16 @@ class FormatProfile:
     separator_evidence: str
     structure: AmountStructure
     balance_evidence: tuple[BalanceEvidence, ...]
+    skip_rows: int = 0
 
     def by_name(self, name: str) -> ColumnProfile | None:
         """Look up a measured column by header name, or ``None``."""
         return next((c for c in self.columns if c.name == name), None)
+
+    def ref(self, name: str) -> str:
+        """A terminal-safe reference to a column: ``'Amount'`` or ``column 3 (withheld)``."""
+        column = self.by_name(name)
+        return column_ref(name, column.index if column is not None else -1)
 
     @property
     def negative_notation(self) -> tuple[str, ...]:
@@ -570,27 +676,65 @@ class FormatProfile:
         return tuple(notation)
 
 
+class HeaderNotFound(ValueError):
+    """No row in a file qualifies as the header (see :func:`hearth.finance.shape.find_header`)."""
+
+
+def locate_header(rows: list[list[str]], path: Path) -> int | None:
+    """The header row's index for one file, by the shared rule (JSON: the key row)."""
+    return find_header(rows, keyed=path.suffix.lower() == ".json")
+
+
 def profile_files(paths: list[Path], settings: Any | None = None) -> FormatProfile:
-    """Measure a group of same-header files as one format. Every row of every file is read."""
+    """Measure a group of same-header files as one format. Every row of every file is read.
+
+    The header row is located in each file by the shared rule; everything above it is
+    preamble and becomes ``skip_rows``. One mapping has one ``skip_rows``, so files whose
+    header sits on different rows are different formats, and mixing them here is refused
+    (:func:`group_by_signature` never does).
+    """
     header: tuple[str, ...] = ()
+    skip_rows: int | None = None
     grid: list[list[str]] = []
     spans: list[tuple[int, int]] = []
     for path in paths:
         rows = read_table(path, settings)
         if not rows:
             continue
-        if not header:
-            header = normalize_header(rows[0])
+        at = locate_header(rows, path)
+        if at is None:
+            raise HeaderNotFound(NO_HEADER_REASON)
+        if skip_rows is None:
+            skip_rows = at
+            header = normalize_header(rows[at])
+        elif at != skip_rows:
+            raise HeaderNotFound("files in one format have their header on different rows")
         start = len(grid)
-        grid.extend(rows[1:])
+        grid.extend(rows[at + 1 :])
         spans.append((start, len(grid)))
 
     width = len(header)
     columns_cells = [[row[i] if i < len(row) else "" for row in grid] for i in range(width)]
     decimal_sep, thousands_sep, separator_evidence = detect_separators(columns_cells)
     probe = _probe_mapping(decimal_sep, thousands_sep)
+    # A name the header repeats cannot be a mapped column: resolve_columns refuses it, since
+    # nothing says which occurrence wins. Such columns are measured as KIND_REPEATED, which no
+    # role accepts, rather than classified and then looked up by a name that means two things
+    # (that crashed the balance check with an IndexError, found by the property test).
+    counts: dict[str, int] = defaultdict(int)
+    for name in header:
+        counts[name] += 1
     columns = [
-        _classify(name, i, columns_cells[i], probe) for i, name in enumerate(header)
+        ColumnProfile(
+            index=i,
+            name=name,
+            kind=KIND_REPEATED,
+            populated=sum(1 for c in columns_cells[i] if str(c).strip()),
+            rows=len(columns_cells[i]),
+        )
+        if counts[name] > 1
+        else _classify(name, i, columns_cells[i], probe)
+        for i, name in enumerate(header)
     ]
     structure = detect_amount_structure(columns)
     return FormatProfile(
@@ -603,6 +747,7 @@ def profile_files(paths: list[Path], settings: Any | None = None) -> FormatProfi
         separator_evidence=separator_evidence,
         structure=structure,
         balance_evidence=detect_balance_evidence(columns, structure, spans),
+        skip_rows=skip_rows or 0,
     )
 
 
@@ -619,7 +764,16 @@ class Proposer(Protocol):
 
 
 class ModelUnavailable(RuntimeError):
-    """The local model could not be loaded (no mlx, no weights). Never fatal here."""
+    """The local model could not be loaded (no mlx, no weights). Never fatal here.
+
+    ``public`` is the only part that reaches the terminal: a fixed string, or an exception
+    TYPE name. The message (which can carry a path or a provider's echo of the prompt) goes to
+    the local draft file only.
+    """
+
+    def __init__(self, message: str, public: str | None = None) -> None:
+        super().__init__(message)
+        self.public = public or "reason withheld from the terminal; it is in the draft file"
 
 
 class LocalModel:
@@ -641,12 +795,12 @@ class LocalModel:
         try:
             from hearth.providers.mlx import MLXProvider, mlx_available
         except ImportError as exc:  # pragma: no cover - import guard
-            raise ModelUnavailable(str(exc)) from None
+            raise ModelUnavailable(str(exc), public="hearth.providers.mlx did not import") \
+                from None
         if not mlx_available():
-            raise ModelUnavailable(
-                "mlx-lm is not installed "
-                "(uv sync --extra mlx --extra mcp --extra dev --extra files)"
-            )
+            message = ("mlx-lm is not installed "
+                       "(uv sync --extra mlx --extra mcp --extra dev --extra files)")
+            raise ModelUnavailable(message, public=message)
         self._provider = MLXProvider(self.model_id)
         return self._provider
 
@@ -666,7 +820,9 @@ class LocalModel:
         except ModelUnavailable:
             raise
         except Exception as exc:  # a missing snapshot surfaces from deep inside mlx-lm
-            raise ModelUnavailable(f"{type(exc).__name__}: {exc}") from None
+            raise ModelUnavailable(
+                f"{type(exc).__name__}: {exc}", public=type(exc).__name__
+            ) from None
 
 
 def build_prompt(profile: FormatProfile) -> str:
@@ -806,13 +962,18 @@ class Provenance:
 
 @dataclass(frozen=True)
 class Verification:
-    """The result of trial-parsing a draft against the real files it was drafted from."""
+    """The result of trial-parsing a draft against the real files it was drafted from.
+
+    ``detail`` is a :class:`Note` so a column named in it reaches the terminal only through
+    the shared rule; ``file`` is the file a failure happened in, printed as its id.
+    """
 
     status: str
     rows_read: int = 0
     rows_parsed: int = 0
     total: Decimal | None = None
-    detail: str = ""
+    detail: Note = Note("")
+    file: Path | None = None
 
     @property
     def blocks_write(self) -> bool:
@@ -822,13 +983,17 @@ class Verification:
 
 @dataclass
 class Draft:
-    """A drafted mapping for one format: its fields, their provenance, and its verification."""
+    """A drafted mapping for one format: its fields, their provenance, and its verification.
+
+    ``provenance`` is rendered into the local draft file only. ``confirm`` is printed to the
+    terminal too, which is why its items are :class:`Note` s.
+    """
 
     profile: FormatProfile
     name: str
     fields: dict[str, Any]
     provenance: list[Provenance]
-    confirm: list[str]
+    confirm: list[Note]
     verification: Verification
     mapping: ColumnMapping | None = None
 
@@ -853,24 +1018,28 @@ def draft_for_profile(
 ) -> Draft:
     """Draft one mapping: mechanics first, the model second, verification last."""
     provenance: list[Provenance] = []
-    confirm: list[str] = []
+    confirm: list[Note] = []
     fields: dict[str, Any] = {}
 
     proposal: dict[str, str | None] = {}
-    model_note = ""
+    model_note: Note | None = None
     if proposer is not None:
         try:
             raw = proposer.propose(build_prompt(profile))
         except ModelUnavailable as exc:
-            model_note = f"the local model was unavailable ({exc}); no field below is a model "\
-                         "proposal"
+            # ``exc.public`` is fixed text or a type name; the message goes to the file only.
+            model_note = Note(
+                f"the local model was unavailable ({exc.public}); no field below is a model "
+                "proposal",
+                private=f"full reason: {exc}",
+            )
         else:
             proposal = validate_proposal(parse_proposal(raw), profile)
             if not proposal:
-                model_note = ("the local model answered, but nothing it proposed survived "
-                              "validation against the measurements")
+                model_note = Note("the local model answered, but nothing it proposed survived "
+                                  "validation against the measurements")
     else:
-        model_note = "run without a model (--no-model); no field below is a model proposal"
+        model_note = Note("run without a model (--no-model); no field below is a model proposal")
 
     # -- date column, then its format (mechanical, always) --------------------------------
     date_candidates = tuple(c.name for c in profile.columns if c.kind == KIND_DATE)
@@ -888,14 +1057,14 @@ def draft_for_profile(
                        f"chosen among {list(date_candidates)}; posting vs transaction date "
                        "is a judgement")
         )
-        confirm.append(f"date_column — {len(date_candidates)} columns parse as dates")
+        confirm.append(Note(f"date_column — {len(date_candidates)} columns parse as dates"))
     else:
         fields["date_column"] = UNRESOLVED
         provenance.append(
             Provenance("date_column", UNRESOLVED, SOURCE_CONFIRM,
                        f"candidates: {list(date_candidates) or 'none'}")
         )
-        confirm.append("date_column — not settled")
+        confirm.append(Note("date_column — not settled"))
 
     chosen_date = profile.by_name(str(fields["date_column"]))
     finding = chosen_date.date if chosen_date is not None else None
@@ -914,18 +1083,19 @@ def draft_for_profile(
                 f"{list(finding.candidates)} all parse every cell — {finding.evidence}",
             )
         )
-        confirm.append(
+        # The candidates come from DATE_CANDIDATES (fixed in this file), never from the data.
+        confirm.append(Note(
             f"date_format — AMBIGUOUS between {list(finding.candidates)}. Nothing downstream "
             "can catch a wrong choice: sums do not depend on dates, so the wrong one "
             "reconciles perfectly and files transactions in the wrong months"
-        )
+        ))
     else:
         fields["date_format"] = UNRESOLVED
         provenance.append(
             Provenance("date_format", UNRESOLVED, SOURCE_CONFIRM,
                        finding.evidence if finding else "no date column was settled")
         )
-        confirm.append("date_format — no candidate format parses every row")
+        confirm.append(Note("date_format — no candidate format parses every row"))
 
     # -- description ------------------------------------------------------------------------
     text_columns = tuple(c.name for c in profile.columns if c.kind == KIND_TEXT)
@@ -942,14 +1112,14 @@ def draft_for_profile(
             Provenance("description_column", str(proposal["description_column"]), SOURCE_MODEL,
                        f"chosen among {list(text_columns)}")
         )
-        confirm.append("description_column — a model proposal")
+        confirm.append(Note("description_column — a model proposal"))
     else:
         fields["description_column"] = UNRESOLVED
         provenance.append(
             Provenance("description_column", UNRESOLVED, SOURCE_CONFIRM,
                        f"text columns: {list(text_columns) or 'none'}")
         )
-        confirm.append("description_column — not settled")
+        confirm.append(Note("description_column — not settled"))
 
     # -- amount source and sign ---------------------------------------------------------------
     _draft_amount(profile, proposal, fields, provenance, confirm)
@@ -968,11 +1138,15 @@ def draft_for_profile(
                    f"{profile.decimal_separator!r}/{profile.thousands_separator!r}",
                    SOURCE_MECHANICAL, profile.separator_evidence)
     )
-    fields["skip_rows"] = 0
+    fields["skip_rows"] = profile.skip_rows
     provenance.append(
-        Provenance("skip_rows", "0", SOURCE_MECHANICAL,
-                   "the allowlisted reader returned the header as the first row; preamble "
-                   "above a header is NOT detected by this tool — check it yourself")
+        Provenance("skip_rows", str(profile.skip_rows), SOURCE_MECHANICAL,
+                   f"the header is row {profile.skip_rows + 1}: the first row (in the first "
+                   f"{HEADER_SCAN}) holding {MIN_KNOWN}+ names from HEARTH's fixed column "
+                   "vocabulary, the same rule scripts/hearth_peek.py uses. The "
+                   f"{profile.skip_rows} row(s) above it are preamble. If a preamble row "
+                   "happens to hold two such names, this is too early and the trial parse "
+                   "below is what catches it")
     )
 
     name = _slug(str(proposal.get("format_name") or "")) or f"format-{rank}"
@@ -982,7 +1156,7 @@ def draft_for_profile(
         )
 
     mapping, verification = _verify(profile, fields, finding, settings=settings)
-    if model_note:
+    if model_note is not None:
         confirm.insert(0, model_note)
     return Draft(
         profile=profile,
@@ -1046,10 +1220,11 @@ def _apply_balance_evidence(
                    f"fixes the DIRECTION only if {evidence.balance_column!r} is the account "
                    "balance")
     )
-    confirm.append(
-        f"sign — settled by treating {evidence.balance_column!r} as a running account balance. "
-        "Confirm that reading; reversed, every total is right in size and wrong in direction"
-    )
+    confirm.append(Note(
+        "sign — settled by treating {} as a running account balance. "
+        "Confirm that reading; reversed, every total is right in size and wrong in direction",
+        (evidence.balance_column,),
+    ))
 
 
 def _draft_amount(
@@ -1090,10 +1265,10 @@ def _draft_amount(
                        "account. Write the money-out column as debit_column, the other as "
                        f"credit_column, and sign: {SIGN_DEBIT_NEGATIVE}")
         )
-        confirm.append(
-            f"which of {list(only_pair)} is money out — the pair is measured, the direction is "
-            "yours"
-        )
+        confirm.append(Note(
+            "which of {} is money out — the pair is measured, the direction is yours",
+            (tuple(only_pair),),
+        ))
         return
 
     if only_single is not None:
@@ -1109,11 +1284,11 @@ def _draft_amount(
                        f"chosen among {list(structure.singles)}; a running balance has the "
                        "same shape as a signed amount, which is why this is a proposal")
         )
-        confirm.append(
-            f"amount_column is {proposal['amount_column']!r} — a model proposal. A balance "
-            "column read as the amount still sums, and still reconciles against a control "
-            "total derived from itself"
-        )
+        confirm.append(Note(
+            "amount_column is {} — a model proposal. A balance column read as the amount "
+            "still sums, and still reconciles against a control total derived from itself",
+            (str(proposal["amount_column"]),),
+        ))
     elif proposal.get("debit_column") and proposal.get("credit_column"):
         _model_pair(proposal, fields, provenance, confirm,
                     note=f"chosen among {[list(p) for p in structure.pairs]}")
@@ -1126,7 +1301,7 @@ def _draft_amount(
                        f"single-column candidates: {list(structure.singles) or 'none'}; "
                        f"debit/credit pairs: {[list(p) for p in structure.pairs] or 'none'}")
         )
-        confirm.append("amount_column and sign — not settled; no source could be named")
+        confirm.append(Note("amount_column and sign — not settled; no source could be named"))
         return
 
     _draft_single_sign(profile, fields, provenance, confirm)
@@ -1151,11 +1326,12 @@ def _model_pair(
                    "and the sign convention follows from that answer rather than being a "
                    "second choice")
     )
-    confirm.append(
-        f"debit_column is {debit!r} — a model proposal, and it alone decides the direction of "
-        "every amount. Reversed, every total is right in size and wrong in direction, and no "
-        "arithmetic here can see it"
-    )
+    confirm.append(Note(
+        "debit_column is {} — a model proposal, and it alone decides the direction of every "
+        "amount. Reversed, every total is right in size and wrong in direction, and no "
+        "arithmetic here can see it",
+        (debit,),
+    ))
 
 
 def _draft_single_sign(
@@ -1170,10 +1346,10 @@ def _draft_single_sign(
 
     if column is not None and column.negatives and column.positives:
         fields["sign"] = SIGN_AS_WRITTEN
-        note = (f"presumed: this column holds {column.negatives} negative and "
-                f"{column.positives} positive value(s), so it is already signed and "
-                f"{SIGN_AS_WRITTEN!r} takes it verbatim. If a negative here means money IN, "
-                f"the convention is {SIGN_NEGATE!r}")
+        # No counts here: this sentence is printed, and a count of debits is a figure.
+        note = ("presumed: this column holds both negative and positive values, so it is "
+                f"already signed and {SIGN_AS_WRITTEN!r} takes it verbatim. If a negative here "
+                f"means money IN, the convention is {SIGN_NEGATE!r}")
     elif column is not None and not column.negatives:
         fields["sign"] = UNRESOLVED
         note = ("this column has no negative value at all, so it states magnitudes and the "
@@ -1183,10 +1359,11 @@ def _draft_single_sign(
         note = "no amount column was settled"
 
     provenance.append(Provenance("sign", str(fields["sign"]), SOURCE_CONFIRM, note))
-    confirm.append(
+    # ``fields['sign']`` is a SIGN_* constant or UNRESOLVED; ``note`` is fixed text above.
+    confirm.append(Note(
         f"sign={fields['sign']} — {note}. Nothing here checked it: no control total was "
         "supplied, and without one the arithmetic cannot see a reversed convention"
-    )
+    ))
 
 
 def _verify(
@@ -1209,9 +1386,11 @@ def _verify(
         k for k, v in fields.items() if isinstance(v, str) and v in (AMBIGUOUS, UNRESOLVED)
     ]
     if set(unsettled) - {"date_format", "description_column"}:
+        # ``unsettled`` holds mapping FIELD names (fixed keys), never header text.
         return None, Verification(
             NOT_ATTEMPTED,
-            detail=f"unsettled field(s) {sorted(unsettled)} — there is no complete mapping to try",
+            detail=Note(f"unsettled field(s) {sorted(unsettled)} — there is no complete mapping "
+                        "to try"),
         )
 
     formats = (
@@ -1228,8 +1407,8 @@ def _verify(
     if not combinations:
         return None, Verification(
             NOT_ATTEMPTED,
-            detail=f"unsettled field(s) {sorted(unsettled)} have no candidate to stand in for "
-                   "them, so there is no mapping to try",
+            detail=Note(f"unsettled field(s) {sorted(unsettled)} have no candidate to stand in "
+                        "for them, so there is no mapping to try"),
         )
 
     last: ColumnMapping | None = None
@@ -1242,7 +1421,12 @@ def _verify(
         try:
             mapping = ColumnMapping.from_dict({k: v for k, v in candidate.items() if v != ""})
         except MappingError as exc:
-            return None, Verification(FAILED, detail=f"mapping is invalid: {exc}")
+            # A MappingError message quotes header text; it is kept out of the terminal.
+            return None, Verification(
+                FAILED,
+                detail=Note("mapping is invalid (MappingError; message withheld: it may quote "
+                            "header text)", private=str(exc)),
+            )
 
         rows_read = rows_parsed = 0
         transactions = []
@@ -1251,16 +1435,24 @@ def _verify(
                 rows = read_table(path, settings)
                 parsed = parse_rows(rows, mapping)
             except ParseError as exc:
-                # ParseError messages quote the offending cell. Report the coordinates only.
+                # ParseError messages quote the offending cell. Report the coordinates only:
+                # the row index, and the column through the shared rule (a Note slot).
                 where = f"row {exc.row_index}" if exc.row_index is not None else "the table"
-                column = f" column {exc.column!r}" if exc.column else ""
                 return None, Verification(
                     FAILED,
-                    detail=f"{path.name}: parse failed at {where}{column} (the parser's "
-                           "message is withheld: it quotes the cell)",
+                    detail=Note(
+                        f"parse failed at {where}" + (" column {}" if exc.column else "")
+                        + " (the parser's message is withheld: it quotes the cell)",
+                        (exc.column,) if exc.column else (),
+                    ),
+                    file=path,
                 )
             except (MappingError, FileAccessError) as exc:
-                return None, Verification(FAILED, detail=f"{path.name}: {exc}")
+                return None, Verification(
+                    FAILED,
+                    detail=Note(refusal_reason(exc, FileAccessError), private=str(exc)),
+                    file=path,
+                )
             rows_read += data_row_count(rows, mapping)
             rows_parsed += len(parsed)
             transactions.extend(parsed)
@@ -1271,25 +1463,29 @@ def _verify(
                 FAILED,
                 rows_read=result.rows_read,
                 rows_parsed=result.rows_parsed,
-                detail=f"reconciliation failed: rows read {result.rows_read} vs parsed "
-                       f"{result.rows_parsed}; problems {list(result.problems)}",
+                detail=Note(
+                    f"reconciliation failed: rows read {result.rows_read} vs parsed "
+                    f"{result.rows_parsed}; {len(result.problems)} problem(s) (withheld: they "
+                    "may quote figures)",
+                    private=f"problems {list(result.problems)}",
+                ),
             )
         last, total = mapping, result.total
 
     settled = len(combinations) == 1
-    varied = ", ".join(
-        part
-        for part in (
-            f"date format {formats}" if len(formats) > 1 else "",
-            f"description column {descriptions}" if len(descriptions) > 1 else "",
-        )
-        if part
-    )
+    # Formats come from DATE_CANDIDATES (fixed text); description columns are header names,
+    # so they go into a Note slot, never into the template.
+    varied = [f"date format {formats}"] if len(formats) > 1 else []
+    columns: tuple[str | tuple[str, ...], ...] = ()
+    if len(descriptions) > 1:
+        varied.append("description column {}")
+        columns = (tuple(descriptions),)
     detail = (
-        "parsed and reconciled"
+        Note("parsed and reconciled")
         if settled
-        else f"parsed and reconciled under every combination of {varied}; those choices change "
-             "no total, which is exactly why nothing here proves them"
+        else Note(f"parsed and reconciled under every combination of {', '.join(varied)}; "
+                  "those choices change no total, which is exactly why nothing here proves "
+                  "them", columns)
     )
     return (last if settled else None), Verification(
         VERIFIED if settled else VERIFIED_EACH,
@@ -1355,6 +1551,12 @@ def render_draft(draft: Draft) -> str:
         "# error. Fields marked AMBIGUOUS or UNRESOLVED will REFUSE to load until you replace",
         "# them, which is the point.",
         "#",
+        "# LOCAL FILE. It holds this format's real header names and the names of the files it",
+        "# was drafted from, and a sum computed from the amounts. Do not paste it into a cloud",
+        "# chat; the terminal output of hearth_map_draft.py is the part made to be shared.",
+        "#",
+        f"# Header found on row {profile.skip_rows + 1} (skip_rows: {profile.skip_rows}).",
+        "#",
         "# Files in this format:",
     ]
     lines += [f"#   - {path.name}" for path in profile.files]
@@ -1379,8 +1581,8 @@ def render_draft(draft: Draft) -> str:
     verification = draft.verification
     lines += ["#", "# VERIFICATION (run against the real files before this draft was written):"]
     lines.append(f"#   status         : {verification.status}")
-    if verification.detail:
-        lines += [f"#       {chunk}" for chunk in _wrap(verification.detail)]
+    if verification.detail.template:
+        lines += [f"#       {chunk}" for chunk in _wrap(verification.detail.raw())]
     if verification.status in (VERIFIED, VERIFIED_EACH):
         lines.append(f"#   rows read      : {verification.rows_read}")
         lines.append(f"#   rows parsed    : {verification.rows_parsed}")
@@ -1391,7 +1593,7 @@ def render_draft(draft: Draft) -> str:
     if draft.confirm:
         lines += ["#", "# BEFORE YOU USE THIS FILE, CONFIRM:"]
         for n, item in enumerate(draft.confirm, 1):
-            wrapped = _wrap(item)
+            wrapped = _wrap(item.raw())
             lines.append(f"#   {n}. {wrapped[0]}")
             lines += [f"#      {chunk}" for chunk in wrapped[1:]]
 
@@ -1441,23 +1643,31 @@ def collect(targets: list[str], exts: set[str]) -> list[Path]:
 
 def group_by_signature(
     paths: list[Path], settings: Any | None = None
-) -> tuple[dict[tuple[str, ...], list[Path]], list[tuple[Path, str]]]:
-    """Group files by header signature — one mapping is needed per group, not per file."""
-    groups: dict[tuple[str, ...], list[Path]] = defaultdict(list)
+) -> tuple[dict[tuple[Any, ...], list[Path]], list[tuple[Path, str]]]:
+    """Group files by (header row, header signature) — one mapping per group, not per file.
+
+    The header row is located by the shared rule (:func:`locate_header`), so a preamble is
+    never mistaken for the header. Its index is part of the key because a mapping has one
+    ``skip_rows``: the same header under a different-length preamble needs its own mapping.
+    The key holds raw header text; it is a dict key and is never printed. Refusal reasons are
+    fixed strings (:func:`hearth.finance.shape.refusal_reason`), never an exception message.
+    """
+    groups: dict[tuple[Any, ...], list[Path]] = defaultdict(list)
     refused: list[tuple[Path, str]] = []
     for path in paths:
         try:
             rows = read_table(path, settings)
-        except FileAccessError as exc:
-            refused.append((path, str(exc)))
-            continue
         except Exception as exc:  # a malformed file must not abort the sweep
-            refused.append((path, f"{type(exc).__name__}"))
+            refused.append((path, refusal_reason(exc, FileAccessError)))
             continue
         if not rows:
             refused.append((path, "no rows"))
             continue
-        groups[normalize_header(rows[0])].append(path)
+        at = locate_header(rows, path)
+        if at is None:
+            refused.append((path, NO_HEADER_REASON))
+            continue
+        groups[(at, normalize_header(rows[at]))].append(path)
     return dict(groups), refused
 
 
@@ -1484,16 +1694,55 @@ def write_draft(draft: Draft, out_dir: Path, *, force: bool) -> tuple[Path, str]
     return path, "written"
 
 
+def draft_label(name: str) -> str:
+    """The draft's file name as it may be PRINTED: shown only if every word is vocabulary.
+
+    ``format-N`` always passes. A model-proposed name ("chase-checking", or worse, an echo of
+    a withheld header) does not, and is printed as a fixed placeholder; ``--index-out`` maps
+    the draft id to the real path locally.
+    """
+    if is_printable_slug(name, extra={"format"}):
+        return f"{name}.yaml"
+    return "(file name withheld: proposed by the model; see --index-out)"
+
+
+#: The closing statement. Every line is true by construction of what main() prints: each
+#: file-derived string reaches stdout only through shape.header_label / column_ref /
+#: file_label / refusal_reason / draft_label, a ColumnProfile.describe_safe line, or a Note
+#: rendered through FormatProfile.ref; everything else printed is fixed text, a count of rows
+#: or cells, a type class, a status constant, or a date-format candidate from DATE_CANDIDATES.
+CLOSING = (
+    "Printed: file ids and extensions, row/cell counts, the header row and skip_rows, a",
+    "measured type per column, whether negatives/zeros occur, fixed status text, and header",
+    "names made only of HEARTH's fixed column vocabulary (date, description, amount, debit,",
+    "credit, balance, ...); any other column is 'column N (withheld)'. Not printed: any cell",
+    "value, any sum or other figure computed from values, preamble line, other header text,",
+    "file name or path, a model-proposed name outside that vocabulary, or an error message.",
+    "The draft files (local) DO hold your real header names, file names and an unverified",
+    "sum: do not paste them into a cloud chat. Every draft is unconfirmed until you read it.",
+)
+
+SHOW_TOTAL_REFUSED = (
+    "--show-total was removed: the trial-parse sum is a figure computed from your amounts, and "
+    "stdout is the part of this tool made to be pasted into a chat. The sum is written into the "
+    "draft file (local), labelled unverified. Re-run without --show-total."
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Draft a HEARTH column mapping per statement format, locally. "
-                    "Never prints a cell value.",
+        description="Draft a HEARTH column mapping per statement format, locally. Terminal "
+                    "output follows hearth_peek.py's rule: no cell value, no figure computed "
+                    "from values, no file name, and only header names made of HEARTH's fixed "
+                    "column vocabulary (others print as 'column N (withheld)'). The draft "
+                    "files themselves are local and hold the real header names.",
     )
     parser.add_argument("targets", nargs="+", help="files or directories (walked recursively)")
     parser.add_argument(
         "--out",
         default="~/hearth-statements/mappings",
-        help="directory to write drafts into (default: ~/hearth-statements/mappings)",
+        help="directory to write drafts into (default: ~/hearth-statements/mappings); it is "
+             "not echoed back",
     )
     parser.add_argument("--model", default=None, help="local model id (default: registry default)")
     parser.add_argument(
@@ -1505,25 +1754,35 @@ def main(argv: list[str] | None = None) -> int:
         "--force", action="store_true", help="overwrite an existing mapping of the same name"
     )
     parser.add_argument(
-        "--show-total",
-        action="store_true",
-        help="also print the trial-parse total (it is always written into the draft)",
+        "--index-out",
+        metavar="FILE",
+        default=None,
+        help="write the file id -> path and draft id -> path lists to FILE (local only; it "
+             "holds file names, so do not paste it anywhere). Nothing about it is printed.",
     )
+    # Removed on purpose (B-074): kept as a hidden flag so an old command line gets a reason
+    # rather than argparse's generic "unrecognized arguments".
+    parser.add_argument("--show-total", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ext", action="append", default=None, help="limit to this extension")
     args = parser.parse_args(argv)
+
+    if args.show_total:
+        print(SHOW_TOTAL_REFUSED, file=sys.stderr)
+        return 2
 
     exts = {e if e.startswith(".") else f".{e}" for e in (args.ext or [])} or TABLE_EXTS
     files = collect(args.targets, exts)
     if not files:
         print("no matching table files found")
         return 1
+    ids = file_ids(files)
 
     # Resolved once and threaded through, rather than each read reaching for the process
     # settings on its own: one place decides which allowlist this run used.
     settings = get_settings()
     groups, refused = group_by_signature(files, settings)
-    print(f"\nscanned {len(files)} file(s): {len(groups)} distinct format(s), "
-          f"{len(refused)} unreadable")
+    print(f"\nscanned {len(files)} file(s), shown as ids F1..F{len(files)} (names and paths "
+          f"are not printed): {len(groups)} distinct format(s), {len(refused)} unreadable")
 
     proposer: Proposer | None = None
     if not args.no_model:
@@ -1543,34 +1802,49 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out).expanduser()
     exit_code = 0
     claimed: set[str] = set()
+    drafts_written: list[tuple[str, Path]] = []
     for rank, (_signature, paths) in enumerate(
         sorted(groups.items(), key=lambda kv: -len(kv[1])), 1
     ):
-        profile = profile_files(paths, settings)
+        try:
+            profile = profile_files(paths, settings)
+        except Exception as exc:  # a file changed between the sweep and now, say
+            print(f"\n── format {rank} ── could not be profiled: "
+                  f"{refusal_reason(exc, FileAccessError)}")
+            exit_code = 1
+            continue
+        members = ", ".join(file_label(p, ids) for p in paths)
         print(f"\n── format {rank} ── {len(paths)} file(s), {profile.rows} data row(s) ──")
+        print(f"     files: {members}")
+        if profile.skip_rows:
+            print(f"     header is row {profile.skip_rows + 1}; skip_rows: {profile.skip_rows} "
+                  f"({profile.skip_rows} preamble line(s) counted, not shown)")
+        else:
+            print("     header is row 1; skip_rows: 0")
         for column in profile.columns:
-            print(f"     {column.describe()}")
+            print(f"     {column.describe_safe()}")
 
         draft = draft_for_profile(profile, proposer, settings=settings, rank=rank)
         draft.name = unique_name(draft.name, claimed, rank)
         claimed.add(draft.name)
         path, outcome = write_draft(draft, out_dir, force=args.force)
-        print(f"     verification: {draft.verification.status}"
-              + (f" — {draft.verification.detail}" if draft.verification.detail else ""))
-        if draft.verification.status in (VERIFIED, VERIFIED_EACH):
-            print(f"     rows read {draft.verification.rows_read} / "
-                  f"parsed {draft.verification.rows_parsed}")
-            if args.show_total:
-                print(f"     sum of amounts {draft.verification.total}  [{SUM_UNVERIFIED}]")
-            else:
-                print(f"     sum of amounts: written into the draft [{SUM_UNVERIFIED}] "
-                      "(pass --show-total to print it here)")
+        verification = draft.verification
+        where = f"{file_label(verification.file, ids)}: " if verification.file else ""
+        detail = verification.detail.render(profile.ref)
+        print(f"     verification: {verification.status}"
+              + (f" — {where}{detail}" if detail else ""))
+        if verification.status in (VERIFIED, VERIFIED_EACH):
+            print(f"     rows read {verification.rows_read} / parsed {verification.rows_parsed}")
+            print(f"     sum of amounts: written into the draft only [{SUM_UNVERIFIED}] — a "
+                  "figure computed from your values is never printed")
 
+        label = draft_label(draft.name)
         if outcome == "written":
-            print(f"     draft: {path}")
+            print(f"     draft D{rank} written into the --out directory: {label}")
+            drafts_written.append((f"D{rank}", path))
         elif outcome == "exists":
-            print(f"     NOT written: {path} already exists — your reviewed mapping outranks a "
-                  "fresh draft (use --force to replace it)")
+            print(f"     NOT written: {label} already exists in the --out directory — your "
+                  "reviewed mapping outranks a fresh draft (use --force to replace it)")
             exit_code = 1
         else:
             print("     NOT written: this draft did not parse its own files, and a mapping "
@@ -1580,7 +1854,7 @@ def main(argv: list[str] | None = None) -> int:
         if draft.confirm:
             print("     needs your confirmation:")
             for item in draft.confirm:
-                print(f"       - {item}")
+                print(f"       - {item.render(profile.ref)}")
         if not draft.complete:
             print("     this draft will REFUSE to load until you replace every AMBIGUOUS / "
                   "UNRESOLVED field")
@@ -1588,10 +1862,19 @@ def main(argv: list[str] | None = None) -> int:
     if refused:
         print("\n── could not read ──")
         for path, reason in refused:
-            print(f"     {path.name}: {reason}")
+            print(f"     {file_label(path, ids)}  {reason}")
         exit_code = 1
 
-    print("\nNo cell value was printed above. Every draft is unconfirmed until you read it.")
+    if args.index_out:
+        write_index(Path(args.index_out), ids, drafts_written)
+
+    print()
+    for line in CLOSING:
+        print(line)
+    if args.index_out:
+        print("The id -> path list was written to the --index-out file (local only).")
+    else:
+        print("To see which file is which locally, re-run with --index-out FILE.")
     return exit_code
 
 

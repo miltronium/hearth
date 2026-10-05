@@ -56,7 +56,11 @@ from hearth.observability.budget import BudgetAccountant  # noqa: E402
 from hearth.observability.metrics import MetricsStore  # noqa: E402
 from hearth.providers.base import GenRequest, Message, ModelProvider  # noqa: E402
 from hearth.router import Router  # noqa: E402
-from hearth.router.policy import RoutingPolicy, load_policy  # noqa: E402
+from hearth.router.policy import (  # noqa: E402
+    RoutingPolicy,
+    load_policy,
+    resolve_routing_selection,
+)
 
 # The closed label set the tier-1 model must choose from. Kept small and mutually exclusive
 # so a 3B model can hold it in one short prompt.
@@ -184,6 +188,37 @@ def make_provider(dry_run: bool, ram_ceiling_gb: float) -> ModelProvider:
 
 
 # -- the seal ------------------------------------------------------------------------------
+
+
+FINANCE_PROFILE = _REPO_ROOT / "config" / "routing.finance.yaml"
+
+
+def select_routing(cli_path: Path | None, environ: dict[str, str] | None = None) -> Path:
+    """The routing profile this run will load, or exit 2 if the one asked for is missing.
+
+    ``--routing`` wins (a command-line path, relative to the cwd like any other argument).
+    Otherwise ``HEARTH_ROUTING_YAML`` is resolved by the router's own resolver
+    (:func:`resolve_routing_selection`: ``~`` expanded, relative paths against the repo root),
+    so this example and ``hearth serve`` read the same file for the same setting. Unset, the
+    example defaults to ``config/routing.finance.yaml``.
+
+    A named profile that does not exist is an error, never a fall back:
+    :func:`load_policy` substitutes safe defaults for a missing *path argument*, which would
+    pass the seal check and run tier models the operator never chose (B-008, B-073).
+    """
+    if cli_path is not None:
+        path, named = cli_path.expanduser().resolve(), f"--routing {cli_path}"
+    else:
+        selection = resolve_routing_selection(environ)
+        if selection.explicit:
+            path, named = selection.path, f"HEARTH_ROUTING_YAML={selection.raw!r}"
+        else:
+            path, named = FINANCE_PROFILE, "the default finance profile"
+    if not path.is_file():
+        print(f"routing profile not found: {named} selects {path}, which does not exist",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return path
 
 
 def verify_no_egress(policy: RoutingPolicy, path: Path) -> None:
@@ -397,9 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    routing = args.routing or Path(
-        os.environ.get("HEARTH_ROUTING_YAML", _REPO_ROOT / "config" / "routing.finance.yaml")
-    )
+    routing = select_routing(args.routing)
 
     print("=" * 78)
     print("HEARTH two-tier local ladder — synthetic finance harness")

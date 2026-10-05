@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -33,6 +34,7 @@ from .eval import (
     DEFAULT_MIN_N,
     EvalConfig,
     EvalReport,
+    check_bar,
 )
 
 # Baselines a pre-registration requires by default (LEARNING_plan §3.2.4).
@@ -48,12 +50,21 @@ class PreRegError(ValueError):
 
 @dataclass(frozen=True)
 class GitStatus:
-    """Whether a pre-registration file is committed to git and unmodified since."""
+    """Whether a file is committed to git and unmodified since.
+
+    ``commit`` is the commit that last changed the file — the one whose content is the bar
+    in force — and ``committed_at`` its committer timestamp (ISO 8601). It is deliberately
+    NOT ``rev-parse HEAD``: HEAD moves with every unrelated commit, so recording it said
+    nothing about when the bar was written (B-061). ``introduced_commit`` is the commit
+    that first added the file.
+    """
 
     committed: bool
     reason: str
     commit: str = ""
     repo_root: str = ""
+    committed_at: str = ""
+    introduced_commit: str = ""
 
 
 @dataclass(frozen=True)
@@ -195,15 +206,51 @@ def load_prereg(path: Path | str) -> PreRegistration:
         golden_sha=str(obj["golden_sha"]),
         golden_version=str(obj.get("golden_version", "")),
         metric=str(obj["metric"]),
-        alpha=float(bar.get("alpha", DEFAULT_ALPHA)),
-        min_effect=float(bar.get("min_effect", 0.0)),
-        min_n=int(bar.get("min_n", DEFAULT_MIN_N)),
-        test=str(bar.get("test", "auto")),
         must_beat_baselines=tuple(str(b) for b in baselines),
         generation=config,
         hypothesis=str(obj.get("hypothesis", "")).strip(),
         raw=obj,
+        **_checked_bar(bar),
     )
+
+
+def _checked_bar(bar: dict) -> dict[str, object]:
+    """Range-check the registered bar; raise :class:`PreRegError` on anything looser (B-062).
+
+    YAML happily yields ``.nan``, ``1.0`` and ``-1`` here, and each used to load: NaN made
+    every gate comparison False (so nothing refused), a negative ``min_effect`` made the
+    baseline clause vacuous, ``alpha: 1.0`` / ``min_n: 1`` switched off significance and the
+    size floor — a 0.033 candidate passed against a 1.0 incumbent. A pre-registration
+    records the operator's bar; it may make the gate STRICTER than CLAUDE.md §7, never
+    looser:
+
+    * ``alpha`` in (0, 0.05] — §7's floors are derived at 0.05 (see ``eval.MAX_ALPHA``);
+    * ``min_effect`` finite and >= 0;
+    * ``min_n`` an integer >= ``DEFAULT_MIN_N`` (30). The gate's default IS the power
+      floor; a prereg that could lower it would turn the floor into a per-experiment opt-out
+      — and the operator writes the prereg after seeing how big the golden set is. Raise it,
+      never lower it (the mathematical n>=5 floor stays available to library callers of
+      ``evaluate_gate``, which cannot reach a promotion without a prereg);
+    * ``test`` one of ``auto`` / ``mcnemar`` / ``bootstrap``.
+
+    No coercion: ``float("nan")`` and ``int(30.5)`` are exactly how a bad value used to slip
+    through, so the YAML value must already be the right kind of number.
+    """
+    alpha = bar.get("alpha", DEFAULT_ALPHA)
+    min_effect = bar.get("min_effect", 0.0)
+    min_n = bar.get("min_n", DEFAULT_MIN_N)
+    test = bar.get("test", "auto")
+    try:
+        check_bar(alpha=alpha, margin=min_effect, min_n=min_n, test=test,
+                  min_n_floor=DEFAULT_MIN_N)
+    except ValueError as exc:
+        raise PreRegError(f"pre-registered bar refused: {exc}") from None
+    return {
+        "alpha": float(alpha),
+        "min_effect": float(min_effect),
+        "min_n": int(min_n),
+        "test": str(test),
+    }
 
 
 def verify_committed(path: Path | str) -> GitStatus:
@@ -247,15 +294,114 @@ def verify_committed(path: Path | str) -> GitStatus:
             repo_root=root,
         )
     try:
-        commit = _git(["rev-parse", "HEAD"], cwd=root)
-    except _GitError as exc:  # pragma: no cover - HEAD exists if diff HEAD succeeded
-        return GitStatus(committed=False, reason=f"cannot resolve HEAD ({exc})", repo_root=root)
+        last = _git(["log", "-1", "--format=%H %cI", "--", rel], cwd=root)
+        introduced = _git(
+            ["log", "--diff-filter=A", "--format=%H", "--", rel], cwd=root
+        ).splitlines()
+    except _GitError as exc:  # pragma: no cover - the file is tracked and unmodified
+        return GitStatus(
+            committed=False, reason=f"cannot read the file's history ({exc})", repo_root=root
+        )
+    commit, _, committed_at = last.partition(" ")
+    if not commit or not committed_at:  # pragma: no cover - tracked implies a commit
+        return GitStatus(
+            committed=False, reason=f"{path} has no commit history", repo_root=root
+        )
     return GitStatus(
         committed=True,
         reason="committed and unmodified",
         commit=commit,
         repo_root=root,
+        committed_at=committed_at,
+        introduced_commit=introduced[-1] if introduced else commit,
     )
+
+
+def check_provenance(
+    registration: PreRegistration, *, measured_at: str, golden_git: dict
+) -> GitStatus:
+    """Require the prereg to predate the measurement, in the repo that versions the golden set.
+
+    Raises :class:`PreRegError`; returns the prereg's :class:`GitStatus` on success. Three
+    things must hold, each one an outcome rather than a configuration (B-061):
+
+    1. **Committed and unmodified** (:func:`verify_committed`).
+    2. **Committed before the measurement.** The commit that last changed the file must be
+       no later than ``measured_at`` (the time the eval started, recorded in the — signed —
+       report). A bar committed seconds *after* the score was seen is the exact failure
+       pre-registration exists to prevent. Committer timestamps are second-granular and
+       set by whoever commits, so this stops the honest-but-post-hoc case and a casual
+       forger, not one who deliberately backdates a commit.
+    3. **In the repository that versions the golden set**, and the golden set itself
+       committed and unmodified there at measurement time (``golden_git``, recorded by
+       ``hearth eval``). Any-repo-will-do let a prereg be committed into a throwaway repo
+       created for the purpose; requiring the golden set's own repository puts the bar and
+       the evidence in one history an auditor can read, and makes "commit a bar somewhere"
+       insufficient.
+    """
+    status = verify_committed(registration.path)
+    if not status.committed:
+        raise PreRegError(f"pre-registration is not git-committed: {status.reason}")
+    committed = _parse_time(status.committed_at, "prereg commit time")
+    measured = _parse_time(measured_at, "measurement time")
+    if committed > measured:
+        raise PreRegError(
+            f"pre-registration was committed at {status.committed_at} (commit "
+            f"{status.commit[:12]}), AFTER the measurement started at {measured_at}: the bar "
+            "must be registered before the score is seen — re-run `hearth eval` now that it "
+            "is committed"
+        )
+    if not golden_git.get("committed"):
+        raise PreRegError(
+            "the golden set was not committed and unmodified in git when it was measured "
+            f"({golden_git.get('reason') or 'no git status recorded'}): commit it next to "
+            "the pre-registration and re-run `hearth eval`"
+        )
+    golden_root = str(golden_git.get("repo_root") or "")
+    if Path(golden_root).resolve() != Path(status.repo_root).resolve():
+        raise PreRegError(
+            f"the pre-registration lives in {status.repo_root}, but the golden set is "
+            f"versioned in {golden_root}: register the bar in the repository that holds the "
+            "golden set"
+        )
+    return status
+
+
+def provenance_proof(status: GitStatus, golden_git: dict) -> dict[str, object]:
+    """The git-provenance block of a ``promotion_proof`` (B-061).
+
+    ``prereg_commit`` is the commit that last changed the prereg (the bar in force), with
+    its timestamp — not HEAD, which says nothing about when the bar was written.
+    """
+    return {
+        "prereg_committed": True,
+        "prereg_commit": status.commit,
+        "prereg_committed_at": status.committed_at,
+        "prereg_introduced_commit": status.introduced_commit,
+        "prereg_repo": status.repo_root,
+        "golden_commit": str(golden_git.get("commit") or ""),
+    }
+
+
+def golden_git_status(path: Path | str) -> dict[str, object]:
+    """The git status of a golden-set file, as recorded in an eval report."""
+    status = verify_committed(path)
+    return {
+        "committed": status.committed,
+        "reason": status.reason,
+        "repo_root": status.repo_root,
+        "commit": status.commit,
+    }
+
+
+def _parse_time(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        raise PreRegError(f"{label} {value!r} is not an ISO-8601 timestamp") from None
+    if parsed.tzinfo is None:
+        raise PreRegError(f"{label} {value!r} has no timezone; cannot order it")
+    return parsed
 
 
 def require_prereg(path: Path | str, report: EvalReport) -> PreRegistration:
@@ -359,6 +505,9 @@ __all__ = [
     "GitStatus",
     "PreRegError",
     "PreRegistration",
+    "check_provenance",
+    "golden_git_status",
+    "provenance_proof",
     "load_prereg",
     "require_prereg",
     "template",

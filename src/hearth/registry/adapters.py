@@ -18,6 +18,7 @@ Promotion refuses unless an eval gate proof is attached — the store never trus
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -37,6 +38,43 @@ class AdapterError(RuntimeError):
 
 class GateNotPassedError(AdapterError):
     """Raised when promotion is attempted without a passing eval-gate proof (ADR-006)."""
+
+
+def adapter_weights_sha(adapter_path: str | Path) -> str:
+    """SHA-256 over an adapter's on-disk weights; :class:`AdapterError` if there are none.
+
+    The eval report records this at measurement time and promotion recomputes it (B-061):
+    the thing promoted must be the bytes that were measured, not an id whose weights were
+    swapped, retrained, or never existed. A registry entry's ``adapter_path`` is a
+    configuration that *implies* weights; this asserts on the weights themselves.
+
+    A directory (mlx_lm's ``adapters.safetensors`` + ``adapter_config.json``, plus any
+    checkpoints) hashes every regular file under it in sorted relative-path order, each as
+    ``path NUL size NUL bytes``, so a renamed, added, removed or edited file changes the
+    digest. Dot-files (``.DS_Store``) are skipped: they are not weights. A single file
+    hashes its bytes. A missing path, or a directory with no files, is an error — there is
+    nothing to measure.
+    """
+    root = Path(adapter_path).expanduser() if str(adapter_path) else None
+    if root is None or not root.exists():
+        raise AdapterError(f"adapter weights not found: {str(adapter_path) or '<empty path>'!r}")
+    digest = hashlib.sha256()
+    if root.is_file():
+        files = [(root.name, root)]
+    else:
+        files = sorted(
+            (str(p.relative_to(root)), p)
+            for p in root.rglob("*")
+            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts)
+        )
+    if not files:
+        raise AdapterError(f"adapter weights not found: {str(adapter_path)!r} contains no files")
+    for rel, path in files:
+        digest.update(rel.encode("utf-8") + b"\x00" + str(path.stat().st_size).encode() + b"\x00")
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass
@@ -252,4 +290,5 @@ __all__ = [
     "STATUS_CANDIDATE",
     "STATUS_PROMOTED",
     "STATUS_RETIRED",
+    "adapter_weights_sha",
 ]

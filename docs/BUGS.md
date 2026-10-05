@@ -105,8 +105,8 @@ must fail when the fix is reverted.
 - ~~[B-060](#b-060) An unknown `hearth.intent` / `--intent` is silently ignored (P3)~~ — fixed in `3951d2e`
 
 **Added 2026-10-05 (adversarial review of the day's merges)**
-- [B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)
-- [B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)
+- ~~[B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)~~ — fixed in `13038c5`
+- ~~[B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)~~ — fixed in `a731e8c`
 - [B-063](#b-063) `hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerles… (P0)
 - [B-064](#b-064) `/ready` judges only the registry default; under a routing ladder the default may never se… (P1)
 - [B-065](#b-065) Routing validation gaps: `defaults.local_model` is never validated; a class rung may name … (P1)
@@ -114,10 +114,11 @@ must fail when the fix is reverted.
 - [B-067](#b-067) `doctor --offline` says SAFE with a plugin embedder or vector store, which receive every R… (P1)
 - [B-068](#b-068) The auto→echo fallback stub labels its echo with the requested real model and credits toke… (P2)
 - [B-069](#b-069) LoRA adapter variants are full base reloads the ModelManager never counts (P2)
-- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2)
+- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2) — eval half fixed in `58890fa`; serving side open
 - [B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)
 - [B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)
 - [B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)
+- ~~[B-074](#b-074) `hearth_map_draft.py` printed a preamble as column names, drafted skip_rows 0, printed file names and a total~~ — fixed in `052d3af` (P0)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -409,7 +410,8 @@ must fail when the fix is reverted.
 ### B-011
 **The MLX embedder cannot work: the default id 404s, and mlx-lm has no BERT architecture**
 
-- **Priority:** P2 · **Status:** open · **Effort:** M
+- **Priority:** P2 · **Status:** open (the `config.py` default id was fixed in `d4eb825`;
+  the BERT architecture problem below is not) · **Effort:** M
 - **Evidence:**
   - `config.py:44` `embed_model = "mlx-community/bge-small-en-v1.5-mlx"`.
     `config/models.yaml:65-67` says that id "404s upstream" and registers
@@ -889,6 +891,8 @@ must fail when the fix is reverted.
 - **Fix:** real header detection (modal width + every cell label-like); preamble counted, never
   printed; no confident header → no names; error type only. Tests plant a marker in every
   non-header cell and assert none appears in the output.
+  **Superseded:** that label heuristic still printed values (B-063); replaced by an allowlist
+  in `a4ad61c`.
 
 ### B-045
 **An unedited `prereg init` template, or `must_beat_baselines: []`, could gate a promotion**
@@ -1090,19 +1094,48 @@ must fail when the fix is reverted.
 ### B-061
 **`hearth adapters promote --report` accepts a hand-written report: nothing ties it to the adapter, and a prereg committed seconds earlier in any repo passes**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `13038c5` · **Effort:** S–M
 - **Evidence:** cli.py adapters promote (~1875-1990) recomputes the gate from the report's per_example vectors but never checks the report's candidate/task against ADAPTER_ID's entry; prereg.py verify_committed (~209) accepts any repo and records rev-parse HEAD, not the introducing commit. Reviewer repro promoted `bogus-ad` (no golden set, no model run, task mismatch, adapter_path=/nonexistent) → `gate: verified`. Mutations deleting the mismatches/verify_committed checks in this command fail 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Fix:** `hearth eval --report-json` HMAC-signs the report with a per-install key
+  (`HEARTH_HOME/eval-report.key`, 0600, `training/attest.py`); `adapters promote` verifies it
+  first. The report records candidate id, task, base model, adapter path, a SHA-256 of the
+  adapter weights (hashed before scoring; `eval` refuses an adapter with no weights), the
+  incumbent and its weights hash, `measured_at` and the golden set's git status;
+  `training/promotion.report_problems` checks each against the registry and disk now
+  (incl. "the incumbent is still the incumbent"). Both promotion paths require the prereg's
+  last-changing commit to be no later than the measurement, in the git repo holding the
+  committed golden set (`prereg.check_provenance`); the proof records that commit (not
+  HEAD), its time, the introducing commit, the weights hash and the report sha.
+  Residual: a user who reads the key can forge a MAC (they can also edit `adapters.json`);
+  committer timestamps are settable, so a deliberate backdate is not caught.
+- **Verified:** the reviewer repro → `Unusable eval report: no report-signing key`, exit 1,
+  still a candidate. `tests/test_promotion_evidence.py` (31 attacks) promoted on the pre-fix
+  tree; every guard mutation-killed.
 
 ### B-062
 **Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 disables every gate clause**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `a731e8c` · **Effort:** S–M
 - **Evidence:** prereg.py (~198-201); eval.py comparisons (~513, 549, 557) are False under NaN; negative margin makes the baseline clause vacuous. Reviewer: a candidate at 0.033 vs base 1.0 PASSES with reasons=() — defeats B-045, the n≥5 floor and min_n=30 (CLAUDE.md §7). Works through `hearth eval --promote` too. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Fix:** `load_prereg` refuses (no coercion) a non-finite number, `alpha` outside
+  (0, 0.05], `min_effect` < 0, `min_n` not an integer ≥ 30, an unknown `test`.
+  `evaluate_gate` re-checks the bar (`check_bar`; its min_n floor is `min_n_for_alpha`, 5 at
+  0.05), refuses a report with a non-finite/out-of-range score, a `score` that is not the
+  mean of its vector, or a baseline from another golden set, and writes every comparison
+  so a NaN adds a refusal. `prereg init` will not scaffold a bar `load_prereg` refuses.
+- **Verified:** `/tmp/hr/nan.py` → both bars now raise `PreRegError`; 50 new tests failed
+  on the pre-fix code; every guard mutation-killed; the replay test still refuses.
 
 ### B-063
 **`hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerless all-text file, or JSON keys that are values pass `_looks_like_label`**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `a4ad61c` · **Effort:** S–M
+- **Fix:** no heuristic left. A header cell prints only if every word is in a fixed column
+  vocabulary (`VOCAB`; no digits), else `(withheld)`; header row = first row with ≥2 such
+  names (JSON: the key row); preamble counted as `skip_rows`, never printed; files print as
+  ids `F1..Fn` (`--index-out` writes the id→path list locally); refusals print fixed reasons.
+  Tests: the reviewer's three files (`tests/fixtures/peek/`) and a property test over 150
+  random tables (no random token or 3+ digit run may appear); 6 mutants killed.
 - **Evidence:** Reviewer: printed "Jane Q Public", "Premier Checking", "SECRETMERCHANT ONE" then "No cell values were printed". Heuristic label detection cannot distinguish text values from labels; tests only used rows containing a date and an amount. File names/paths also printed verbatim (may carry account numbers). (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-064
@@ -1126,7 +1159,10 @@ must fail when the fix is reverted.
 ### B-067
 **`doctor --offline` says SAFE with a plugin embedder or vector store, which receive every RAG chunk and query**
 
-- **Priority:** P1 · **Status:** open · **Effort:** S–M
+- **Priority:** P1 · **Status:** **FIXED** in `74e5943` · **Effort:** S–M
+- **Fix:** fatal `embedder` / `vector_store` rows judge the exact type returned by the real
+  `select_embedder` / `select_vector_store`: built-ins pass; a plugin (even a subclass of a
+  built-in) or an unresolvable name FAILs. The reviewer's command is now UNSAFE, exit 1.
 - **Evidence:** doctor.py FAILs a plugin backend (~398-411) but not HEARTH_EMBEDDER / HEARTH_VECTOR_STORE plugins. Reviewer: `HEARTH_EMBEDDER=evil-cloud-embedder HEARTH_VECTOR_STORE=evil-store hearth doctor --offline` → SAFE. (adversarial review 2026-10-05, 13b1438..69aa06e.)
 
 ### B-068
@@ -1144,8 +1180,16 @@ must fail when the fix is reverted.
 ### B-070
 **B-047 enforced at CLI call sites, not where the model is chosen**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** open (serving side); eval half **FIXED** in `58890fa` · **Effort:** S–M
 - **Evidence:** mlx_pool().resolve("") with a bogus HEARTH_DEFAULT_MODEL → catalog default (warning only). Not gated: `hearth eval`, example scripts, direct API users; a mutation deleting eval's `_require_known_model` fails 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Eval half (fixed):** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL
+  (`require_default`), on an empty/`auto` base model, and on a base the registry cannot
+  serve for any provider (not only a ModelPool); mutations deleting each check now fail
+  tests (`tests/test_cli_eval.py`).
+- **Remains:** the enforcement is still at a CLI call site. `mlx_pool().resolve("")` (and so
+  direct API users and `examples/` scripts) still falls back to the catalog default with a
+  warning when HEARTH_DEFAULT_MODEL is unregistered; moving `require_default` into the pool
+  / `select_provider` is the serving-side fix.
 
 ### B-071
 **An abandoned agent run keeps the single MLX thread busy for up to its budget**
@@ -1162,8 +1206,47 @@ must fail when the fix is reverted.
 ### B-073
 **Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; config embed_model default is the 404 id; failed record `adapter` field differs by path**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S–M
+- **Priority:** P3 · **Status:** **FIXED (2 of 3)** in `d4eb825` — the example resolves
+  `HEARTH_ROUTING_YAML` with `resolve_routing_selection` and exits 2 on a missing named
+  profile; `embed_model` defaults to the registered `-bf16` id. **Open:** the failed record's
+  `adapter` field differing between route.py ~266 and app.py ~889 · **Effort:** S–M
 - **Evidence:** run_finance_ladder.py ~400-402 (B-008 bypass); config.py ~46; route.py ~266 vs app.py ~889. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+
+### B-074
+**`hearth_map_draft.py` printed a preamble as column names, drafted `skip_rows: 0` for every file with a preamble, printed file names, and printed a value-derived total on request**
+
+- **Priority:** P0 (privacy) + P1 (correctness) · **Status:** **FIXED** in `052d3af` · **Effort:** M
+- **Evidence:** it took `rows[0]` as the header (grouping and profiling) and printed raw names
+  in `ColumnProfile.describe()`. Integrator, `--no-model`, synthetic file whose first rows were
+  `Account Holder,Jane Q Public,Premier Checking` and `Acct 4417123412341234,Open,x` above
+  `Date,Description,Amount`: printed `'Jane Q Public'` and `'Premier Checking'` as columns,
+  then "No cell value was printed above." On `examples/finance/statements.csv` it printed the
+  `#` comment text as column names and drafted nothing usable. `skip_rows` was hard-coded 0,
+  so every draft for a file with a preamble was wrong. Refusals and parse failures printed
+  `path.name`; `--show-total` printed the trial-parse sum; confirm items and verification
+  details interpolated raw header names (and a `MappingError` message that lists the whole
+  header).
+- **Fix:** the peek rule moved into `src/hearth/finance/shape.py` and is used by both scripts
+  (one implementation). map_draft finds the header with it (first row in 30 with >=2
+  vocabulary names; JSON key row), writes the rows above as `skip_rows`, groups by (header
+  row, header), and refuses a file with no identifiable header. Terminal: column names only
+  from the vocabulary, else `column N (withheld)`, through `Note` slots for every sentence
+  that names a column; files as `F1..Fn` (`--index-out` local); fixed reasons instead of
+  exception messages; the model-proposed draft file name prints only if it is vocabulary; no
+  counts of negatives/zeros, only yes/no. `--show-total` is refused (exit 2): a sum of the
+  amounts is a value-derived figure, and CLAUDE.md §4 says values are not safe; the sum stays
+  in the local draft. The closing lines say exactly what was printed and that the draft file
+  holds real header names, file names and the sum. Also fixed: a repeated header name crashed
+  the balance check (IndexError); such columns are now `repeated-name` and take no role.
+- **Acceptance test:** `tests/test_map_draft_privacy.py`: the integrator's file (no
+  Jane/Public/Premier/4417/file-name digits/3+ digit run in stdout; draft has `skip_rows: 2`,
+  the real names, and parses with `parse_rows`), a hostile fake local model, failure paths,
+  and a property test over 120 random tables (half with an echoing fake model). 19 mutants
+  killed (each guard reverted → a test fails).
+- **Remains:** a preamble row holding two vocabulary names (e.g. `Account Type,Checking,Account
+  Number,...`) would be taken as the header. Privacy holds (only vocabulary prints) and the
+  trial parse refuses the draft, but the operator then writes that mapping by hand. A header
+  with fewer than two vocabulary names (e.g. a non-English export) is refused, not drafted.
 
 ---
 
@@ -1226,3 +1309,10 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `2c8f5f9` | **B-037.** `docs/API.md` matches the app's routes and error envelopes; `tests/test_api_doc_routes.py` checks both ways. |
 | `05c4db5` | Docs: `docs/GUIDE.md` has no pending-change markers left; B-003/006/031/033–036/046–049 described as merged, with measured output. |
 | `3951d2e` | **B-059, B-060.** Unknown HEARTH_BACKEND → exit 2 / doctor FAIL; unknown intent → 422 / exit 2 / UnknownIntentError. |
+| `a4ad61c` | **B-063.** `hearth_peek.py` prints only allowlisted column names, counts, type guesses and file ids; no heuristic, no file names; property-tested. |
+| `74e5943` | **B-067.** `doctor --offline` FAILs a plugin (or unresolvable) embedder / vector store, judged on the type the real selector returns. |
+| `d4eb825` | **B-073 (2 of 3).** Finance example uses the shared routing resolver and exits on a missing profile; `embed_model` default is the registered `-bf16` id. |
+| `a731e8c` | **B-062.** Prereg bar range-checked at load (finite; alpha ∈ (0, 0.05]; min_effect ≥ 0; min_n ≥ 30; known test); `evaluate_gate` re-checks it and fails closed on non-finite input. |
+| `13038c5` | **B-061.** `adapters promote --report` needs an HMAC-signed report from `hearth eval` on this install, about this adapter (id, task, base, weights hash, incumbent), with a prereg committed before the measurement in the golden set's repo. |
+| `58890fa` | **B-070 (eval half).** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL or an empty/`auto`/unservable base; serving side still open. |
+| `052d3af` | **B-074.** `hearth_map_draft.py` finds the real header (shared `hearth.finance.shape` rule with peek), drafts `skip_rows`, prints only vocabulary column names / file ids / fixed reasons; `--show-total` refused; property-tested, 19 mutants killed. |

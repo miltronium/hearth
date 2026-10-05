@@ -66,49 +66,66 @@ is built around: **a mis-parsed statement produces a plausible number, not an er
 "Balance" column read as the amount still sums, still reconciles against a control total
 derived from itself, and is wrong by an amount nobody can see. So you state the layout once.
 
-To write the mapping you need the headers and a sense of what each column holds. You do **not**
-need the values, and `scripts/hearth_peek.py` enforces that distinction mechanically — it
-prints the header row, the row count, and a per-column *type guess*, and **never emits a cell**:
+To write the mapping you need column positions, a sense of what each column holds, and the
+names of the columns you map. You do **not** need the values, and `scripts/hearth_peek.py`
+enforces that **by construction** — it prints only counts, a per-column *type guess*, file ids,
+and header cells made entirely of a fixed vocabulary of statement column words:
 
 ```sh
 uv run --no-sync python scripts/hearth_peek.py ~/hearth-statements/incoming/august.csv
 ```
 
-The output below is from a **synthetic** file of the same shape (128 invented rows), with the
-scan root rewritten to `~/hearth-statements`:
+The output below is from a **synthetic** file of the same shape (two preamble lines, 128
+invented rows, one column with a non-standard name):
 
 ```
-scanned 1 file(s) under ~/hearth-statements/incoming
+scanned 1 file(s); shown as ids F1..F1 (names and paths are not printed)
 1 distinct table format(s), 0 text document(s), 0 unreadable
 
 ── format 1 ── 1 file(s), 128 data rows ── needs ONE mapping ──
-     august.csv  (128 rows)
+     F1 (.csv)  128 rows, header is row 3; skip_rows: 2 (2 preamble line(s) counted, not shown)
 
-       #  header                             looks like
-     ---  ---------------------------------- ----------------------------------------
-       0  Posting Date                       date-like
-       1  Description                        text
-       2  Amount                             number-like (accounting negatives present)
-       3  Balance                            number-like
-       4  Type                               text
+       #  header                               looks like
+     ---  ------------------------------------ ----------------------------------------
+       0  Posting Date                         date-like
+       1  Description                          text
+       2  Amount                               number-like (accounting negatives present)
+       3  Balance                              number-like
+       4  Type                                 text
+       5  (withheld)                           text
 
-No cell values were printed: only header cells that read as labels, and type
-guesses. Preamble lines and value-like cells were withheld.
-Values are not safe to share.
+Printed: file ids and extensions, row/column/preamble counts, a type guess per
+column, and header cells made only of HEARTH's fixed column vocabulary (date,
+description, amount, debit, credit, balance, ...). Not printed: any cell value,
+preamble line, other header text, JSON key outside that vocabulary, file name,
+path, or error message.
+To write a mapping, column positions, type guesses, skip_rows and the names shown
+are enough. For a (withheld) name, open the file locally and copy the header text
+yourself; do not paste it into a cloud chat.
+To see which file is which locally, re-run with --index-out FILE.
 You need 1 column mapping(s), one per format above.
 ```
 
-`hearth_peek.py` also takes directories (walked recursively) and groups files by header
-signature. Twenty exports from one bank show up as one format that needs one mapping. A file
-it cannot read is listed under `── could not read ──` with the reason (for unexpected errors,
-only the error type — a parser's message can quote file content), and the exit code is 1.
+What is and is not printed, and why:
 
-Preamble lines above the real header (account name/number, statement period — the case
-`skip_rows` is for) are detected and **not printed**: the file line reads e.g. `(46 rows, 5
-preamble line(s) above the header skipped, not shown)`. The number of preamble lines is your
-`skip_rows`. A header is only shown if every cell reads as a label (no dates, amounts, runs of
-4+ digits, e-mail addresses or long text); otherwise the file says `no header row identified`
-and no names are printed — open that file locally to write its mapping.
+- **Header names come from an allowlist, not a guess.** A header cell is shown only if every
+  word in it (after normalizing case, spacing and punctuation) is in `VOCAB` (`src/hearth/finance/shape.py`, shared with `hearth_map_draft.py`) —
+  date, posting, transaction, description, memo, payee, merchant, amount, debit, credit,
+  balance, running, type, category, reference, check, number, status, account, … — and it has
+  no digit. Anything else prints as `(withheld)`, whatever it looks like. (An earlier version
+  guessed which text "looked like a label" and printed an account holder's name and a
+  headerless file's merchant names, B-063.) For a withheld column, open the file locally and
+  copy its header text into the mapping yourself.
+- **The header row** is the first row (in the first 30) with at least two vocabulary names; for
+  JSON it is the key row. The rows above it are your `skip_rows` and are counted, never shown.
+  If no row qualifies, the file says `no header row identified` and every name is withheld.
+- **Files are ids, not names.** File and directory names carry account numbers and holder
+  names, so files print as `F1`, `F2`, … with their extension. `--index-out FILE` writes the
+  id → path list to a local file (nothing about it is printed); do not paste that file.
+- Directories are walked recursively and files are grouped by header signature, so twenty
+  exports from one bank show up as one format that needs one mapping. A file it cannot read is
+  listed under `── could not read ──` with a fixed reason (never the error message, which can
+  quote the path or the file's bytes), and the exit code is 1.
 
 That output is safe to read aloud, put in a note, or paste to a cloud agent for help writing
 the YAML. Write the mapping into `~/hearth-statements/mappings/acme-checking.yaml`:
@@ -123,7 +140,7 @@ sign: as_written                 # or: negate | debit_negative | debit_positive
 negative_notation: [parens]      # this bank writes debits as (50.00)
 decimal_separator: "."
 thousands_separator: ","
-skip_rows: 0                     # rows of preamble above the header
+skip_rows: 2                     # rows of preamble above the header (peek's skip_rows)
 currency: USD
 ```
 
@@ -436,7 +453,7 @@ support, which is the point).
 ## 10. The short version
 
 1. Statements live in `~/hearth-statements`; `HEARTH_FILE_ROOTS` points there and nowhere else.
-2. Author the mapping from **headers only** (`scripts/hearth_peek.py`) — it never prints a value.
+2. Author the mapping from **headers only** (`scripts/hearth_peek.py`) — it prints only allowlisted column names, counts and type guesses, never a value or a file name.
 3. Run sealed: `scripts/hearth_private.sh --profile config/routing.finance.yaml --check`.
 4. Always supply a control total. Without one the sum is `UNVERIFIED`, not verified.
 5. Rules first, model second, human last — and the store keeps all three.
@@ -466,9 +483,13 @@ HEARTH_FILE_ROOTS=~/hearth-statements \
   uv run --no-sync python scripts/hearth_map_draft.py ~/hearth-statements/incoming
 ```
 
-It walks the directory, groups files by header signature (one mapping per format, not per
-file), and writes a **draft** YAML per format into `~/hearth-statements/mappings/` — or
-wherever `--out` points. A draft is not a mapping. It is a proposal you review.
+It walks the directory, finds each file's real header row the same way `hearth_peek.py` does
+(the first row in the first 30 with at least two vocabulary column names; the rows above it
+are preamble), groups files by header row and header (one mapping per format, not per file),
+and writes a **draft** YAML per format into `~/hearth-statements/mappings/` — or wherever
+`--out` points. The preamble count goes into the draft as `skip_rows`. A file with no row that
+qualifies is listed under `── could not read ──` as `no header row identified`; write that
+mapping by hand. A draft is not a mapping. It is a proposal you review.
 
 ### What decides what
 
@@ -495,8 +516,9 @@ dropped and the field is left `UNRESOLVED`.
 ### What runs before a draft is written
 
 Every complete draft is trial-parsed against the real files with `parse_rows` and reconciled.
-**A draft that cannot parse its own file is not written** — you get the row and column it
-failed on, never the parser's message (that message quotes the cell). Where only the date
+**A draft that cannot parse its own file is not written** — you get the file id, row and column
+it failed on, never the parser's message (that message quotes the cell). A wrong `skip_rows`
+fails here too: the header the mapping names is not on the row it says. Where only the date
 format or the description column is still open, the draft is parsed under *every* candidate for
 them; neither changes a total, which is exactly why neither is proved by doing so.
 
@@ -517,15 +539,56 @@ fresh draft, permanently.
 
 ### Privacy, and the flags
 
-The tool reads values — locally, and that is the point — but it never prints one. Stdout gets
-headers, measured types, counts and the model's structural conclusions, because stdout is what
-ends up pasted into a chat window. The trial-parse total is written into the draft (local,
-where a reviewer needs it) and reaches the terminal only under `--show-total`.
+The tool reads values — locally, and that is the point — but its terminal output follows the
+same rule as `hearth_peek.py` (one implementation, `src/hearth/finance/shape.py`), because
+stdout is what ends up pasted into a chat window. On the synthetic preamble file from B-074
+(`Account Holder,Jane Q Public,Premier Checking` and an account-number row above
+`Date,Description,Amount`), `--no-model`:
+
+```text
+scanned 1 file(s), shown as ids F1..F1 (names and paths are not printed): 1 distinct format(s), 0 unreadable
+local model: disabled (--no-model)
+
+── format 1 ── 1 file(s), 2 data row(s) ──
+     files: F1 (.csv)
+     header is row 3; skip_rows: 2 (2 preamble line(s) counted, not shown)
+     [0] Date                             type=date  populated=2/2  date-format=decided
+     [1] Description                      type=text  populated=2/2
+     [2] Amount                           type=number  populated=2/2  negatives=yes  zeros=no
+     verification: verified — parsed and reconciled
+     rows read 2 / parsed 2
+     sum of amounts: written into the draft only [unverified] — a figure computed from your values is never printed
+     draft D1 written into the --out directory: format-1.yaml
+     needs your confirmation:
+       - run without a model (--no-model); no field below is a model proposal
+       - sign=as_written — presumed: this column holds both negative and positive values, ...
+```
+
+- **Column names** print only if made of the fixed column vocabulary; any other column is
+  `(withheld)` in the column list and `column N (withheld)` in any sentence (confirm items,
+  verification). This applies to names the local model returns, too.
+- **Files** print as `F1..Fn`; `--index-out FILE` writes the file id → path and draft id →
+  path lists to a local file. The `--out` directory is not echoed. A draft's file name prints
+  only if every word of it is vocabulary (`format-1.yaml`); a model-proposed name is withheld.
+- **No figure computed from values.** No total, and no count of negative or zero amounts (only
+  whether they occur). `--show-total` was removed and now exits 2 with the reason: a sum of
+  your amounts is a value, whatever it is called. The sum is in the draft, labelled
+  `unverified`.
+- **No error message.** Parse failures print the file id, row index and column (through the
+  rule above); file-gate, mapping and model-load failures print a fixed reason or an exception
+  type. The full message goes into the draft file when one is written.
+- **The draft file is local and is not shareable.** It must hold the real header names to
+  load, and it also lists the file names and the unverified sum. Do not paste it into a cloud
+  chat; paste the terminal output instead.
+
+Flags:
 
 - `--no-model` — mechanical determination only. Model-proposed fields stay `UNRESOLVED`; the
   draft is still written, still says so, and is never quietly worse.
 - `--model <id>` — a specific local model (default: the registry default). It runs at
-  temperature 0 so the same file drafts the same way twice.
+  temperature 0 so the same file drafts the same way twice. It is shown the real header names
+  and measured facts (it is local); nothing it returns is printed except through the rule.
+- `--index-out FILE` — the id → path lists, local only.
 - If mlx or the weights are missing, this is the `--no-model` path with a note saying why.
 
 Reads go through `read_table`, so `HEARTH_FILE_ROOTS` gates this tool exactly as it gates

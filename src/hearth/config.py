@@ -42,8 +42,11 @@ class Settings(BaseSettings):
     embedder: str = "hash"
     # Dimensionality for the offline hashing embedder.
     embed_dim: int = 256
-    # Model id for the MLX embedder (only used when embedder="mlx").
-    embed_model: str = "mlx-community/bge-small-en-v1.5-mlx"
+    # Model id for the MLX embedder (only used when embedder="mlx"). The id registered in
+    # config/models.yaml; the old `-mlx` id 404s upstream (B-073). Note B-011: the MLX
+    # embedder loads through mlx_lm, which has no BERT architecture, so even these weights
+    # do not load yet.
+    embed_model: str = "mlx-community/bge-small-en-v1.5-bf16"
 
     # Vector-store backend selection (Phase 7, ADR-008):
     #   "sqlite" — the embedded, file-based default (no extras, no service).

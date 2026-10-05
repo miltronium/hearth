@@ -329,6 +329,121 @@ def test_default_judge_refuses_to_run():
         default_judge("p", "a longer candidate", "short")
 
 
+# -- B-062: the gate fails closed on a non-finite or loosened bar, and on non-finite data --
+
+
+def _worse_candidate_vs_perfect_everything():
+    """The B-062 reproducer: candidate 0.033 against a perfect incumbent and baselines."""
+    candidate = _report([0.0] * 29 + [1.0], model_id="cand")
+    incumbent = _report([1.0] * 30, model_id="inc")
+    baselines = {name: _report([1.0] * 30, model_id=name)
+                 for name in ("empty", "majority_label", "copy_input")}
+    return candidate, incumbent, baselines
+
+
+@pytest.mark.parametrize(
+    "bar",
+    [
+        {"alpha": float("nan"), "margin": float("nan")},
+        {"alpha": float("nan")},
+        {"margin": float("nan")},
+        {"alpha": 1.0, "margin": -1.0, "min_n": 1},
+        {"alpha": 1.0},
+        {"alpha": 0.0},
+        {"alpha": float("inf")},
+        {"margin": -1.0},
+        {"margin": float("inf")},
+        {"min_n": 1},
+        {"min_n": 4},
+    ],
+)
+def test_gate_refuses_a_bar_that_would_disable_a_clause(bar):
+    candidate, incumbent, baselines = _worse_candidate_vs_perfect_everything()
+    with pytest.raises(ValueError):
+        evaluate_gate(candidate, incumbent, incumbent_role="base", baselines=baselines, **bar)
+
+
+def test_gate_min_n_floor_is_the_mathematical_one_for_alpha():
+    """Below min_n_for_alpha(alpha) no outcome can clear alpha; 5 at 0.05 is allowed."""
+    candidate, incumbent = _report([1.0] * 6), _report([0.0] * 6)
+    assert evaluate_gate(candidate, incumbent, min_n=5).passed
+    with pytest.raises(ValueError, match="min_n"):
+        evaluate_gate(candidate, incumbent, min_n=4)
+
+
+@pytest.mark.parametrize("side", ["candidate", "incumbent", "baseline"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5, 1.5])
+def test_gate_fails_closed_on_non_finite_or_out_of_range_scores(side, bad):
+    from dataclasses import replace
+
+    candidate, incumbent = _significant_pair()
+    baseline = _report([0.0] * 40, model_id="empty")
+    reports = {"candidate": candidate, "incumbent": incumbent, "baseline": baseline}
+    vector = list(reports[side].per_example)
+    vector[0] = bad
+    reports[side] = replace(reports[side], per_example=vector, score=sum(vector) / len(vector))
+    with pytest.raises(GateProvenanceError):
+        evaluate_gate(
+            reports["candidate"], reports["incumbent"], baselines={"empty": reports["baseline"]}
+        )
+
+
+@pytest.mark.parametrize("side", ["candidate", "incumbent", "baseline"])
+def test_gate_refuses_a_score_that_disagrees_with_its_vector(side):
+    """The gate is computed on the vectors; a typed `score` that disagrees is a forgery."""
+    from dataclasses import replace
+
+    candidate, incumbent = _significant_pair()
+    baselines = {"empty": _report([0.0] * 40, model_id="empty")}
+    if side == "candidate":
+        candidate = replace(candidate, score=1.0)
+    elif side == "incumbent":
+        incumbent = replace(incumbent, score=0.0)
+    else:
+        baselines = {"empty": replace(baselines["empty"], score=float("nan"))}
+    with pytest.raises(GateProvenanceError):
+        evaluate_gate(candidate, incumbent, baselines=baselines)
+
+
+def test_gate_refuses_a_baseline_from_another_golden_set():
+    candidate, incumbent = _significant_pair()
+    baselines = {"empty": _report([0.0] * 40, golden_sha="sha-B", model_id="empty")}
+    with pytest.raises(GateProvenanceError, match="baseline"):
+        evaluate_gate(candidate, incumbent, baselines=baselines)
+
+
+def test_gate_fails_closed_when_the_p_value_is_not_finite(monkeypatch):
+    """A NaN p-value used to make `p > alpha` False — i.e. significant."""
+    import hearth.training.eval as eval_mod
+
+    monkeypatch.setattr(eval_mod, "mcnemar_exact_p", lambda b, c: float("nan"))
+    candidate, incumbent = _significant_pair()
+    gate = evaluate_gate(candidate, incumbent)
+    assert not gate.passed
+    assert any("not significant" in r for r in gate.reasons)
+
+
+@pytest.mark.parametrize("bar", [{"margin": float("nan")}, {"alpha": float("nan")}])
+def test_gate_comparisons_refuse_under_nan_even_past_the_input_checks(monkeypatch, bar):
+    """Second layer: with the input checks switched off, a NaN still adds refusals.
+
+    Every clause is written `not (x > y)` / `not (p <= alpha)`, which is True under NaN —
+    so a NaN that some future path lets through refuses instead of silently passing.
+    """
+    import hearth.training.eval as eval_mod
+
+    monkeypatch.setattr(eval_mod, "check_bar", lambda **kwargs: None)
+    candidate, incumbent = _significant_pair()
+    baselines = {"empty": _report([0.0] * 40, model_id="empty")}
+    gate = evaluate_gate(candidate, incumbent, baselines=baselines, **bar)
+    assert not gate.passed
+    if "margin" in bar:
+        assert any("no lift" in r for r in gate.reasons)
+        assert any("degenerate baseline" in r for r in gate.reasons)
+    else:
+        assert any("not significant" in r for r in gate.reasons)
+
+
 # -- determinism -----------------------------------------------------------------------
 
 

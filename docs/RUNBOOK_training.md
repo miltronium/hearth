@@ -168,13 +168,24 @@ the candidate must beat (`empty`, `majority_label`, `copy_input`). The `--metric
 `--max-tokens` and `--system` you register here must be the ones you pass to `hearth eval`
 in step 5, or the run is refused as "not the registered experiment".
 
-Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand — `prereg check` and `eval --promote` refuse a prereg with any of them blank, and one whose `bar.must_beat_baselines` drops a default baseline (empty / majority / copy-input) — then commit:
+The bar may only be **stricter** than the gate's defaults (B-062): `alpha` in (0, 0.05],
+`min_effect` ≥ 0, `min_n` an integer ≥ 30, `test` one of `auto` / `mcnemar` / `bootstrap`,
+every number finite. `prereg init`, `prereg check` and `eval` refuse anything else
+(`pre-registered bar refused: alpha must be in (0, 0.05] ...`).
+
+**Where the prereg lives.** Commit it in the **same git repository as the golden set**, and
+commit the golden set too: promotion refuses a prereg in any other repository, and a golden
+set that was not committed and unmodified when it was measured (B-061). In this repo that
+means next to `data/<task>_golden.jsonl`.
+
+Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand — `prereg check` and `eval --promote` refuse a prereg with any of them blank, and one whose `bar.must_beat_baselines` drops a default baseline (empty / majority / copy-input) — then commit **before you run step 5**: promotion refuses a prereg whose last commit is later than the measurement (`... committed at ..., AFTER the measurement started at ...`):
 
 ```sh
-git add prereg/extract.yaml && git commit -m "prereg: extract adapter bar"
+git add prereg/extract.yaml data/extract_golden.jsonl && git commit -m "prereg: extract adapter bar"
 uv run --no-sync hearth prereg check prereg/extract.yaml --golden data/extract_golden.jsonl
 # -> prints the registered bar, "Golden set matches (N examples).", and
-#    "git: committed at <sha> and unmodified."  (exit 0)
+#    "git: committed at <sha> and unmodified."  (exit 0; <sha> is the commit that last
+#    changed the prereg, not HEAD)
 ```
 
 `prereg check` exits 1 if the file is not committed or has local edits
@@ -208,7 +219,17 @@ HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
 It prints a table (candidate, incumbent or base, each baseline), then
 `gate: PASS|FAIL n=... alpha=... mcnemar_exact p=... (b=..., c=...)`, one line per failed
 condition, and the `golden_sha` / `config` fingerprint. The JSON report carries the
-per-example vectors and provenance, so the gate can be recomputed from it later.
+per-example vectors and provenance, so the gate can be recomputed from it later. It also
+records what was measured — adapter id, task, base model, adapter path, a SHA-256 of the
+adapter's weights (hashed before scoring), the incumbent and its weights hash,
+`measured_at`, and the golden set's git status — and is **HMAC-signed** with this install's
+key (`~/.hearth/eval-report.key`, created 0600 on first use). Do not edit it: an edited
+report is refused at promotion. A report only promotes on the install that wrote it.
+
+`hearth eval` refuses to measure (exit 1) when the adapter's weights are missing — scoring
+an adapter with no weights scores the base model — and exits 2 when HEARTH_DEFAULT_MODEL
+names an unregistered model or the adapter's base model is empty, `auto` or not servable
+(B-070): an eval never runs on a silent fallback model.
 
 The same command on the `echo` backend runs the plumbing offline with no weights. Its
 scores are meaningless, so the gate fails. That is a useful check that the gate refuses a
@@ -228,7 +249,11 @@ The refusals, all CI-safe (run on the echo backend; each exits 1):
 | `hearth eval ... --temperature 0.7` | `Refusing to score at temperature > 0: the gate would be re-rollable.` (`--allow-sampling` measures anyway; it can never be promoted under a temperature-0 prereg) |
 | `hearth eval ... --prereg prereg/extract.yaml` with a different `--system`/`--metric`/`--max-tokens` | `This run is not the registered experiment: decode config ... != registered ...` |
 | `hearth eval ... --promote` with no `--prereg` | `Promotion refused: --promote requires --prereg.` |
-| `hearth eval ... --prereg <uncommitted file> --promote` | `Promotion refused: <file> is not tracked by git ...` (or `not inside a git repository`) |
+| `hearth eval ... --prereg <uncommitted file> --promote` | `Promotion refused: pre-registration is not git-committed: <file> is not tracked by git ...` (or `not inside a git repository`) |
+| `hearth eval ... --prereg <file committed after the run started> --promote` | `Promotion refused: pre-registration was committed at ..., AFTER the measurement started at ...` |
+| `hearth eval ... --prereg <file in a repo other than the golden set's> --promote` | `Promotion refused: the pre-registration lives in ..., but the golden set is versioned in ...` |
+| `hearth eval <adapter with no weights on disk> ...` | `Refusing to measure: adapter weights not found: ...` |
+| `hearth eval ... --alpha 0.5` (or `--margin -1`, `--min-n 1`) | `Gate refused to compare: alpha must be in (0, 0.05] ...` |
 
 `--check-determinism` re-generates a few prompts and refuses if any answer changes: a score
 that re-rolls is not a measurement.
@@ -268,15 +293,26 @@ HEARTH_BACKEND=mlx uv run --no-sync hearth eval extract-<run-id> \
 # -> Promoted extract-<run-id> (gate passed, candidate=..., p=...).
 ```
 
-Or promote later from the step-5 report. `adapters promote` does **not** trust the verdict in
-the report: it recomputes the gate from the stored per-example vectors under the bar in the
-prereg, and re-checks that the prereg is committed and matches the report:
+Or promote later from the step-5 report. `adapters promote` does **not** trust the report:
+it verifies the HMAC signature (only a report `hearth eval --report-json` wrote on this
+install, unedited), checks the report is about **this** adapter (id, task, base model,
+weights path, and weights on disk that still hash to what was measured) against the
+incumbent that is **still** in place, recomputes the gate from the stored per-example
+vectors under the bar in the prereg, and re-checks the prereg's provenance (committed,
+unmodified, committed before `measured_at`, in the golden set's repository):
 
 ```sh
 uv run --no-sync hearth adapters promote extract-<run-id> \
     --report reports/extract-<run-id>.json --prereg prereg/extract.yaml
 # -> Promoted extract-<run-id> (gate passed, mcnemar_exact p=..., n=...).
 ```
+
+Refusals here (all exit 1, all in `tests/test_promotion_evidence.py`): `Unusable eval report:
+report is not signed ...` / `... was edited after hearth eval wrote it` / `... signed by a
+different install's key`; `Promotion refused: the report is not evidence for '<id>' — report
+measured adapter ..., weights changed since the measurement ..., ... is the promoted adapter
+for '<task>' now: re-run hearth eval against it`. If you retrain, or another adapter is
+promoted for the task in between, re-run step 5.
 
 Both `--report` and `--prereg` are required (`Promotion requires --report and --prereg.`,
 exit 1). The old `--candidate-score` / `--incumbent-score` flags are **removed**. Passing
@@ -294,8 +330,16 @@ uv run --no-sync hearth adapters list --task extract
 ```
 
 The promotion is auditable: `~/.hearth/adapters.json` records the `promotion_proof`, which
-holds the gate result (test, p-value, n, alpha, baselines) and the pre-registration it ran
-under (its sha and the commit it was committed at).
+holds the gate result (test, p-value, n, alpha, baselines), the pre-registration it ran
+under (its sha; `prereg_commit`, the commit that last changed it — not HEAD — with
+`prereg_committed_at` and `prereg_introduced_commit`; `prereg_repo`; `golden_commit`), the
+`candidate_weights_sha` that was measured, `evidence` (`measured` for `eval --promote`,
+`signed-report` for `adapters promote`) and, for the latter, the `report_sha`.
+
+What the signature does not cover: a user who reads `~/.hearth/eval-report.key` can sign
+anything — the same user can edit `adapters.json` directly, so no file-based check could do
+better. And git committer timestamps are set by whoever commits, so "committed before the
+measurement" stops a bar written after seeing the score, not a deliberately backdated one.
 
 ---
 

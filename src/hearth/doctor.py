@@ -383,6 +383,58 @@ def _check_load_paths(settings: Settings, on_disk: dict[str, str]) -> list[Check
     return checks
 
 
+def _rag_component(name: str, var: str, raw: str, select, builtins: tuple, receives: str) -> Check:
+    """Judge the RAG component HEARTH would actually construct, not the setting's spelling.
+
+    ``select`` is the real selection function (``select_embedder`` / ``select_vector_store``),
+    so aliases, case, and plugin resolution are exactly what ``hearth rag`` and the MCP
+    server get. The verdict is on the TYPE of what came back: only an instance of a built-in
+    class (exact type, so a plugin subclassing one is still a plugin) is vouched for. Anything
+    else is third-party code that receives ``receives`` and whose network behaviour this
+    command cannot measure, the same rule as a plugin ``HEARTH_BACKEND``.
+    """
+    try:
+        chosen = select()
+    except Exception as exc:  # unknown name, or a plugin that failed to load here
+        return Check(
+            name,
+            False,
+            f"{var}={raw} does not resolve to a built-in ({type(exc).__name__}: {exc}); "
+            "cannot vouch for what RAG would use",
+            fatal=True,
+        )
+    kind = type(chosen)
+    if kind in builtins:
+        return Check(name, True, f"{var}={raw} -> built-in {kind.__name__} (in-process)",
+                     fatal=True)
+    return Check(
+        name,
+        False,
+        f"{var}={raw} -> plugin {kind.__module__}.{kind.__qualname__}: it receives "
+        f"{receives}, and its network behaviour is not measured here",
+        fatal=True,
+    )
+
+
+def _check_rag(settings: Settings) -> list[Check]:
+    """The embedder and vector store RAG would use, resolved by their real selectors."""
+    from .memory.embed import HashEmbedder, MLXEmbedder, select_embedder
+    from .memory.store import SQLiteVectorStore, SqliteVecVectorStore, select_vector_store
+
+    return [
+        _rag_component(
+            "embedder", "HEARTH_EMBEDDER", settings.embedder,
+            lambda: select_embedder(settings), (HashEmbedder, MLXEmbedder),
+            "every RAG chunk at ingest and every query",
+        ),
+        _rag_component(
+            "vector_store", "HEARTH_VECTOR_STORE", settings.vector_store,
+            lambda: select_vector_store(settings), (SQLiteVectorStore, SqliteVecVectorStore),
+            "every RAG chunk's text and vector, and every query vector",
+        ),
+    ]
+
+
 def run_offline_checks(
     settings: Settings | None = None,
     *,
@@ -422,6 +474,7 @@ def run_offline_checks(
             + ("" if builtin else " is a plugin — its network behaviour is not measured here"),
             fatal=True,
         ),
+        *_check_rag(settings),
         Check(
             "bind_host",
             loopback,
