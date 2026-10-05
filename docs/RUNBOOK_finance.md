@@ -569,7 +569,9 @@ local model: disabled (--no-model)
   verification). This applies to names the local model returns, too.
 - **Files** print as `F1..Fn`; `--index-out FILE` writes the file id → path and draft id →
   path lists to a local file. The `--out` directory is not echoed. A draft's file name prints
-  only if every word of it is vocabulary (`format-1.yaml`); a model-proposed name is withheld.
+  only if every word of it is vocabulary and it holds no digit except the draft's own rank
+  (`format-1.yaml`, `card-transactions-2.yaml`); any other model-proposed name, including
+  one that spells digits two at a time (`account-number-98-76-...`), is withheld.
 - **No figure computed from values.** No total, and no count of negative or zero amounts (only
   whether they occur). `--show-total` was removed and now exits 2 with the reason: a sum of
   your amounts is a value, whatever it is called. The sum is in the draft, labelled

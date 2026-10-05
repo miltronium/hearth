@@ -1694,14 +1694,20 @@ def write_draft(draft: Draft, out_dir: Path, *, force: bool) -> tuple[Path, str]
     return path, "written"
 
 
-def draft_label(name: str) -> str:
-    """The draft's file name as it may be PRINTED: shown only if every word is vocabulary.
+def draft_label(name: str, rank: int) -> str:
+    """The draft's file name as it may be PRINTED: vocabulary words only, no digit from it.
 
-    ``format-N`` always passes. A model-proposed name ("chase-checking", or worse, an echo of
-    a withheld header) does not, and is printed as a fixed placeholder; ``--index-out`` maps
-    the draft id to the real path locally.
+    The model proposes the name, so it can echo a withheld header or smuggle digits
+    (``account-number-98-76-54-32-10`` printed an account number two digits at a time,
+    B-091). A name prints only if, after removing the ``-{rank}`` this script itself appends
+    (:func:`unique_name`), every hyphen word is vocabulary - no digits at all. The rank is
+    already printed as ``D{rank}``, so it is the one number that may appear. ``format-{rank}``,
+    the script's own default, passes the same way. Anything else prints as a fixed
+    placeholder; ``--index-out`` maps the draft id to the real path locally.
     """
-    if is_printable_slug(name, extra={"format"}):
+    suffix = f"-{rank}"
+    base = name[: -len(suffix)] if name.endswith(suffix) else name
+    if base == "format" or is_printable_slug(base):
         return f"{name}.yaml"
     return "(file name withheld: proposed by the model; see --index-out)"
 
@@ -1838,7 +1844,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"     sum of amounts: written into the draft only [{SUM_UNVERIFIED}] — a "
                   "figure computed from your values is never printed")
 
-        label = draft_label(draft.name)
+        label = draft_label(draft.name, rank)
         if outcome == "written":
             print(f"     draft D{rank} written into the --out directory: {label}")
             drafts_written.append((f"D{rank}", path))

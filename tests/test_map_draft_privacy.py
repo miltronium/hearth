@@ -367,6 +367,40 @@ def test_a_vocabulary_only_model_name_is_printed(tmp_path, capsys, monkeypatch):
     assert "written into the --out directory: card-transactions.yaml" in out
 
 
+def test_a_model_name_that_spells_digits_two_at_a_time_is_withheld(tmp_path, capsys, monkeypatch):
+    """B-091: ``\\d{1,2}`` per hyphen word let a proposer print a whole account number."""
+    root = tmp_path / "in"
+    root.mkdir()
+    (root / "s.csv").write_text(HOSTILE_HEADER, encoding="utf-8")
+    _with_model(monkeypatch, FakeModel({"format_name": "account-number-98-76-54-32-10"}))
+    _code, out = _run(root, capsys, monkeypatch, "--model", "fake/local")
+    for fragment in ("98", "76", "54", "32", "10", "account-number"):
+        assert fragment not in out, f"{fragment!r} printed:\n{out}"
+    assert "draft D1 written into the --out directory: (file name withheld" in out
+
+
+@pytest.mark.parametrize(
+    ("name", "rank", "printed"),
+    [
+        ("format-1", 1, True),          # the script's own default
+        ("format-3", 3, True),
+        ("format-3", 1, False),         # a model answering "format-3" at rank 1: its digit
+        ("card-transactions", 2, True),
+        ("card-transactions-2", 2, True),   # unique_name's suffix is the rank: already public
+        ("card-transactions-7", 2, False),  # a digit that is not this draft's rank
+        ("account-number-98-76", 1, False),
+        ("debit-1-1", 1, False),
+        ("jane-public", 1, False),
+        ("format", 1, True),
+    ],
+)
+def test_draft_label_prints_no_digit_but_the_rank(name, rank, printed):
+    label = md.draft_label(name, rank)
+    assert (label == f"{name}.yaml") is printed
+    if not printed:
+        assert not re.search(r"\d", label)
+
+
 def test_a_model_failure_message_is_kept_out_of_the_terminal(tmp_path, capsys, monkeypatch):
     root = tmp_path / "in"
     root.mkdir()
@@ -498,8 +532,15 @@ def _hostile_model(rng: random.Random, token, secrets: list[str]) -> FakeModel:
             junk = token()
             secrets.append(junk)
             single = rng.random() < 0.5
+            if rng.random() < 0.5:
+                # Vocabulary words plus short digit groups: an account number two digits at
+                # a time, which the 3+-digit-run check below cannot see (B-091).
+                groups = "-".join(f"{rng.randint(10, 99)}" for _ in range(rng.randint(1, 5)))
+                name = f"account-number-{groups}"
+            else:
+                name = f"{junk} {pick()} {rng.randint(100, 99999)}"
             return json.dumps({
-                "format_name": f"{junk} {pick()} {rng.randint(100, 99999)}",
+                "format_name": name,
                 "date_column": pick(), "description_column": pick(),
                 "amount_column": pick() if single else None,
                 "debit_column": None if single else pick(),
@@ -552,6 +593,10 @@ def test_property_no_random_text_or_digit_run_reaches_stdout(
         assert leaked == [], f"seed {seed} case {case} leaked {leaked}:\n{out}"
         runs = re.findall(r"\d{3,}", out)
         assert runs == [], f"seed {seed} case {case} printed digit runs {runs}:\n{out}"
+        # A printed draft name may carry no digit except the rank the script itself added.
+        for rank, label in re.findall(r"draft D(\d+) written into the --out directory: (.*)$",
+                                      out, re.M):
+            assert set(re.findall(r"\d+", label)) <= {rank}, f"seed {seed} case {case}: {label}"
         for name in expected_names:  # usefulness: identifiable headers are named
             assert name in out, f"seed {seed} case {case}: {name!r} not shown\n{out}"
 

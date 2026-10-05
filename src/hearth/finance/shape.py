@@ -131,14 +131,17 @@ def column_ref(cell: str, index: int) -> str:
 
 
 def is_printable_slug(slug: str, *, extra: Iterable[str] = ()) -> bool:
-    """True when every hyphen-separated word of ``slug`` is vocabulary, ``extra`` or a number.
+    """True when every hyphen-separated word of ``slug`` is vocabulary or ``extra``. No digits.
 
-    For names that are not header cells but may echo one (a model-proposed format name). A
-    number is at most two digits, so no account-number fragment passes.
+    For names that are not header cells but may echo one (a model-proposed format name).
+    Digits are refused outright, not length-capped: an earlier version let a one- or two-digit
+    word through, and a proposer answering ``account-number-98-76-54-32-10`` printed a whole
+    account number two digits at a time (B-091). The only number a caller may print beside a
+    name is one it generated itself (a rank), never one taken from the name.
     """
     allowed = VOCAB | frozenset(extra)
-    words = [w for w in slug.split("-") if w]
-    return bool(words) and all(w in allowed or re.fullmatch(r"\d{1,2}", w) for w in words)
+    words = slug.split("-")
+    return bool(slug) and all(w in allowed for w in words)
 
 
 def file_ids(paths: Iterable[Path]) -> dict[Path, str]:
