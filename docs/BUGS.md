@@ -30,8 +30,8 @@ must fail when the fix is reverted.
 - [B-003](#b-003) Escalation fails, then local fails: no record that the prompt may have left
 
 **P1: correctness**
-- [B-004](#b-004) MLXProvider ignores `GenRequest.model`; the model ladder silently serves the default (in progress)
-- [B-005](#b-005) `/ready` returns 200 with no weights loaded (in progress)
+- ~~[B-004](#b-004) MLXProvider ignores `GenRequest.model`; the model ladder silently serves the default (in progress)~~ — fixed in `2d186dd`
+- ~~[B-005](#b-005) `/ready` returns 200 with no weights loaded (in progress)~~ — fixed in `2d186dd`
 - [B-006](#b-006) `HEARTH_BACKEND=auto` silently becomes the echo stub, and the stub reports ready
 - [B-007](#b-007) An exception after the stream relay ends the SSE stream with no `[DONE]`
 - ~~[B-008](#b-008) A relative `HEARTH_ROUTING_YAML` resolves from the current working directory~~ — fixed in `2550766`
@@ -85,6 +85,11 @@ must fail when the fix is reverted.
 - ~~[B-044](#b-044) `hearth_peek.py` printed preamble values as headers~~ — fixed in `1883397` (P0)
 - ~~[B-045](#b-045) unedited prereg template / empty baselines could gate a promotion~~ — fixed in `9165034` (P1)
 - [B-046](#b-046) `hearth train` steers to `adapters promote` without `--report/--prereg` (P3)
+
+**Added 2026-10-05 (after the model-selection merge)**
+- [B-047](#b-047) bogus `HEARTH_DEFAULT_MODEL`: `/ready` failed but `auto` served by the default (P1)
+- [B-048](#b-048) `/ready` 503 when the default is evicted (P2)
+- [B-049](#b-049) finance example computes money with float (P1)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -181,7 +186,7 @@ must fail when the fix is reverted.
 ### B-004
 **MLXProvider ignores `GenRequest.model`; the gateway serves the default model for every id**
 
-- **Priority:** P1 · **Status:** in-progress-on-branch (another agent's worktree) ·
+- **Priority:** P1 · **Status:** **FIXED** in `2d186dd` (merge of the model-selection branch) ·
   **Effort:** M
 - **Evidence:**
   - The router does pick a per-request model. `route.py:349-350` honours a client pin,
@@ -217,7 +222,7 @@ must fail when the fix is reverted.
 ### B-005
 **`/v1/hearth/admin/ready` returns 200 without the weights being loaded**
 
-- **Priority:** P1 · **Status:** in-progress-on-branch (another agent's worktree) ·
+- **Priority:** P1 · **Status:** **FIXED** in `2d186dd` (merge of the model-selection branch) ·
   **Effort:** S
 - **Evidence:** `serving/manager.py:102-104` calls `provider.load(model_id)` only
   `if callable(getattr(provider, "load", None))`, then admits the model as resident
@@ -867,6 +872,45 @@ must fail when the fix is reverted.
 - **Fix outline:** Point at `hearth eval ... --prereg ... --promote` (or `--report-json` then
   `adapters promote --report --prereg`). Do with the cli.py help pass.
 
+### B-047
+**A bogus `HEARTH_DEFAULT_MODEL`: `/ready` says failed, but `model=auto` is still served by the catalog default**
+
+- **Priority:** P1 · **Status:** open · **Effort:** S
+- **Evidence:** Confirmed live by the model-selection agent (in-process, real weights): with
+  `HEARTH_DEFAULT_MODEL=bogus/no-such-model`, `/ready` → 503 `failed`, yet a `model=auto` chat
+  is answered 200 by Coder-7B and `/admin/health` reports the 7B (`registry/__init__.py:59`
+  falls back; B-029 added a warning only).
+- **Impact:** Two parts of the server disagree about what is serving — the CLAUDE.md §3 shape.
+- **Fix outline:** Treat an explicitly set but unregistered default like a missing named
+  routing profile (B-008): refuse to start `serve`/`run`/`agent` with a clear message (exit 2);
+  doctor FAIL. Keep the catalog default only when the variable is unset.
+- **Acceptance test:** with the variable bogus, `serve` exits 2 naming it; revert → test fails.
+
+### B-048
+**`/ready` turns 503 when the default model is evicted to make room for another**
+
+- **Priority:** P2 · **Status:** open (from code + an existing unit test; not observed live) · **Effort:** S
+- **Evidence:** `src/hearth/gateway/app.py` `_weights_loaded` (~426) requires the default to be
+  resident; LRU eviction under `ram_ceiling_gb` (observed live under a 12 GB ceiling) unloads it.
+- **Impact:** A healthy server reports not-ready; orchestrators gating on `/ready` pull it.
+- **Fix outline:** Ready = the default has loaded successfully once and can be reloaded (its
+  weights resolve on disk); report residency separately (e.g. in the body or admin/models).
+- **Acceptance test:** after evicting the default, `/ready` stays 200 with a "not resident,
+  reloads on demand" detail; a default whose weights were deleted goes 503.
+
+### B-049
+**The finance ladder example computes money with `float`**
+
+- **Priority:** P1 (CLAUDE.md §4: "Decimal in Python, never a float") · **Status:** open · **Effort:** S
+- **Evidence:** Checked: `examples/finance/run_finance_ladder.py` `amount: float`, `float(r["amount"])`,
+  and income/spend/net/by_category/largest totals all float (lines ~88, 111-117, 127, 236).
+- **Impact:** The shipped example teaches the exact practice the finance package forbids; float
+  sums drift (e.g. 0.1+0.2).
+- **Fix outline:** Parse with `Decimal`, sum Decimals, format with quantize; reuse
+  `hearth.finance` parsing if it fits.
+- **Acceptance test:** amounts that sum exactly in Decimal but not in float (e.g. 0.10 + 0.20)
+  produce the exact total; a test fails if `float(` reappears in money paths.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -904,3 +948,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `cf3b6e9` | **B-043.** `RUNBOOK_finance.md` §2 `hearth_peek.py` sample regenerated from a synthetic CSV. |
 | `1883397` | **B-044.** `hearth_peek.py` never prints preamble or value-like cells; output asserted marker-free. |
 | `9165034` | **B-045.** A prereg needs written hypothesis/stopping_rule/kill_condition and cannot drop default baselines. |
+| `2d186dd` | **B-004, B-005.** ModelPool: the requested model serves (404 for unknown ids); telemetry from the provider that ran; warmup loads and `/ready` reports loading/failed with a reason. |
