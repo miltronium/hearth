@@ -419,9 +419,11 @@ def serve(
     /v1/hearth/admin/health and /v1/hearth/admin/ready need no token.
 
     Readiness: on the mlx backend the default model loads in the background at startup
-    (HEARTH_WARMUP). GET /v1/hearth/admin/ready answers 200 once its weights are in
-    memory, else 503 with status 'loading' or 'failed' and a reason. Check backend= in
-    the banner: 'echo' means the test stub is answering, not a model.
+    (HEARTH_WARMUP). GET /v1/hearth/admin/ready answers 200 once the default has loaded
+    (or, with HEARTH_WARMUP=false, once its weights are on disk) and stays 200 if it is
+    later evicted to make room; it answers 503 'loading' during the first load, 'failed'
+    with a reason when the load failed or the weights are missing, and 'stub' when the
+    echo fallback is answering. Check backend= in the banner: 'echo' is a test stub.
 
     Settings are read once at startup, so restart after changing any HEARTH_* variable.
 
