@@ -235,24 +235,10 @@ class Router:
         retried on base) — never merely the one requested.
         """
         self.check_adapter(adapter)
+        started = time.perf_counter()
         decision = self.decide(req, intent=intent, allow_escalation=allow_escalation)
-        if decision.would_escalate and decision.backend == "remote":
-            remote_cfg = self.policy.remote_for()
-            if remote_cfg is None or not self.budget.can_afford(_estimate_remote_cost(req)):
-                raise BudgetExhaustedError(
-                    "remote budget exhausted; escalation denied"
-                    if remote_cfg is not None
-                    else "no remote configured for escalation"
-                )
-            logger.info(
-                "escalating class=%s reason=%s model=%s",
-                decision.task_class,
-                decision.reason,
-                decision.model,
-            )
-            provider: ModelProvider = self._make_remote(remote_cfg)
-        else:
-            provider = self.local
+        # Records a denied escalation (BudgetExhaustedError) before raising it (B-066).
+        provider = self.provider_for(req, decision, started=started)
 
         # Adapters only layer over the LOCAL backend; resolve the id -> path here so the
         # provider gets a concrete adapter_path to load (hot-swap; ARCHITECTURE §5).
@@ -260,10 +246,15 @@ class Router:
         if not decision.would_escalate:
             choice = self.select_adapter(adapter, decision.task_class, decision.model)
 
-        started = time.perf_counter()
         escalation_failed: str | None = None
         try:
             result, used_path = self._generate(provider, decision, req, choice.path)
+        except UnknownModelError as exc:
+            # A rung nobody serves: the client gets a 404 — and the record says so (B-066).
+            self.record_failure(
+                req, decision, provider, exc, started=started, adapter=choice.id
+            )
+            raise
         except ProviderError as exc:
             if not decision.would_escalate:
                 # A plain local failure: the client gets a 503, and the record says so.
@@ -281,10 +272,11 @@ class Router:
             provider = self.local
             try:
                 result, used_path = self._generate(self.local, decision, req, choice.path)
-            except ProviderError as local_exc:
+            except (ProviderError, UnknownModelError) as local_exc:
                 # Both failed. The remote was CALLED and may already hold the prompt
                 # (docs/PRIVACY.md), so this is exactly the request the audit trail must
-                # not lose: record the failed escalation and the failed fallback, re-raise.
+                # not lose: record the failed escalation and the failed fallback, re-raise
+                # — a 404 from the local rung included (B-066).
                 self.record_failure(
                     req, decision, self.local, local_exc, started=started,
                     adapter=adapter, escalation_failed=escalation_failed,
@@ -324,35 +316,74 @@ class Router:
 
     # -- helpers ----------------------------------------------------------------------
 
+    def provider_for(
+        self, req: GenRequest, decision: RouteDecision, *, started: float | None = None
+    ) -> ModelProvider:
+        """The provider that executes ``decision`` — or :class:`BudgetExhaustedError`.
+
+        Shared by :meth:`route` and the gateway's streaming path, so both apply the same
+        escalation and budget rule. A denied escalation (no remote configured, or the budget
+        cannot cover the estimate) is RECORDED before it is raised (B-066): it used to reach
+        the client as a 429 / stream error event with nothing in the metrics. The record has
+        ``failed`` set and ``escalated=False`` — nothing left the machine.
+        """
+        if not (decision.would_escalate and decision.backend == "remote"):
+            return self.local
+        remote_cfg = self.policy.remote_for()
+        if remote_cfg is None or not self.budget.can_afford(_estimate_remote_cost(req)):
+            exc = BudgetExhaustedError(
+                "remote budget exhausted; escalation denied"
+                if remote_cfg is not None
+                else "no remote configured for escalation"
+            )
+            self.record_failure(
+                req, decision, None, exc,
+                started=time.perf_counter() if started is None else started,
+                backend=remote_cfg.protocol if remote_cfg is not None else "none",
+                escalated=False,
+            )
+            raise exc
+        logger.info(
+            "escalating class=%s reason=%s model=%s",
+            decision.task_class,
+            decision.reason,
+            decision.model,
+        )
+        return self._make_remote(remote_cfg)
+
     def record_failure(
         self,
         req: GenRequest,
         decision: RouteDecision,
-        provider: ModelProvider,
+        provider: ModelProvider | None,
         exc: Exception,
         *,
         started: float,
         adapter: str | None = None,
         escalation_failed: str | None = None,
         completion_tokens: int = 0,
+        backend: str | None = None,
+        escalated: bool | None = None,
     ) -> RequestRecord | None:
         """Record a request that ended in an error instead of an answer (``failed`` set).
 
         Shared by :meth:`route` and the gateway's streaming path. ``served_by`` names the
         tier that was tried and failed; ``backend_mix`` does not count it (nothing was
-        served). Never raises: a metrics store that fails here must not replace the
-        provider's error the client is about to receive with its own.
+        served). ``backend`` overrides ``provider.name`` when no
+        provider was built (a denied escalation); ``escalated`` overrides
+        ``decision.would_escalate``. Never raises: a metrics store that fails here must not
+        replace the provider's error the client is about to receive with its own.
         """
         prompt_tokens = max(1, sum(len(m.content) for m in req.messages) // 4)
         record = RequestRecord(
             task_class=decision.task_class,
-            backend=provider.name,
+            backend=backend if backend is not None else getattr(provider, "name", "none"),
             model=decision.model,
             served_by="remote" if decision.would_escalate else "local",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=(time.perf_counter() - started) * 1000.0,
-            escalated=decision.would_escalate,
+            escalated=decision.would_escalate if escalated is None else escalated,
             escalation_reason=decision.reason if decision.would_escalate else None,
             escalation_failed=escalation_failed,
             adapter=adapter,

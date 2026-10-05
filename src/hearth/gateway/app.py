@@ -989,6 +989,12 @@ def _stream_sse(
                 yield from relay_local(stream_req)
     except UnknownModelError as exc:
         logger.error("stream refused: %s", exc)
+        # Recorded like any failed request (B-066) — after a failed escalation too, where the
+        # remote may already hold the prompt.
+        router.record_failure(
+            gen_req, decision, provider, exc, started=started, adapter=choice.id,
+            escalation_failed=escalation_failed,
+        )
         yield _sse(
             {
                 "error": {
@@ -1172,22 +1178,12 @@ def _resolve_stream_provider(
 ):
     """Decide the route and return ``(decision, provider)`` for streaming.
 
-    Mirrors :meth:`Router.route`'s provider selection so streaming and non-streaming
-    share the same escalation + budget semantics.
+    The same :meth:`Router.provider_for` :meth:`Router.route` uses, so streaming and
+    non-streaming share the same escalation + budget semantics and accounting.
     """
     decision = router.decide(gen_req, intent=intent, allow_escalation=allow_escalation)
-    if decision.would_escalate and decision.backend == "remote":
-        remote_cfg = router.policy.remote_for()
-        from ..router.route import _estimate_remote_cost
-
-        if remote_cfg is None or not router.budget.can_afford(_estimate_remote_cost(gen_req)):
-            raise BudgetExhaustedError(
-                "remote budget exhausted; escalation denied"
-                if remote_cfg is not None
-                else "no remote configured for escalation"
-            )
-        return decision, router._make_remote(remote_cfg)
-    return decision, router.local
+    # Router.provider_for records a denied escalation before raising it (B-066).
+    return decision, router.provider_for(gen_req, decision)
 
 
 def _parse_since(since: str | None) -> float | None:

@@ -155,10 +155,13 @@ final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget":
 ### Admin (`/v1/hearth/admin/`)
 
 - `GET /v1/hearth/admin/metrics` — token-savings rollups, escalation rate, backend mix, latency.
-  A request that ended in an error (the local provider failed, or a remote stream died
-  mid-answer) is recorded too: it counts in `requests` and in `failed` / `failure_rate`
-  (added keys; nothing renamed), and — after a failed escalation — in `escalations_failed`,
-  since the remote may already have received the prompt. `backend_mix` and `latency_ms`
+  A request that ended in an error (the local provider failed, a routed local rung could not
+  be served — 404 / stream `model_not_found` —, an escalation was denied — 429 / stream
+  `hearth.budget.exhausted` —, or a remote stream died mid-answer) is recorded too: it counts
+  in `requests` and in `failed` / `failure_rate` (added keys; nothing renamed), and — after a
+  failed escalation, whatever the local fallback then did — in `escalations_failed`, since
+  the remote may already have received the prompt. A denied escalation never left the
+  machine, so it is not counted in `escalations`. `backend_mix` and `latency_ms`
   count only requests that were served an answer.
 - `GET /v1/hearth/admin/health` — liveness (unauthenticated): the process is up. Says nothing
   about weights. Body: `status`, `version`, `backend`, `model` (the default id), plus
