@@ -47,7 +47,9 @@ def test_chat_completion_roundtrip(client):
     # HEARTH telemetry block rides along
     assert body["hearth"]["served_by"] == "local"
     assert body["hearth"]["backend"] == "echo"
-    assert body["hearth"]["estimated_frontier_tokens_saved"] > 0
+    # The echo stub is not inference: it names itself and saves nothing (B-068).
+    assert body["hearth"]["model"] == body["model"] == "echo"
+    assert body["hearth"]["estimated_frontier_tokens_saved"] == 0
 
 
 def _parse_sse(text: str) -> list:
@@ -87,7 +89,7 @@ def test_chat_completion_streaming(client):
     last = chunks[-1]
     assert last["choices"][0]["finish_reason"] == "stop"
     assert last["hearth"]["backend"] == "echo"
-    assert last["hearth"]["estimated_frontier_tokens_saved"] > 0
+    assert last["hearth"]["estimated_frontier_tokens_saved"] == 0  # B-068
 
 
 def test_embeddings_openai_shape(client):

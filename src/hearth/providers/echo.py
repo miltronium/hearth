@@ -21,8 +21,23 @@ from .base import (
 )
 
 
+def is_stub_backend(backend: str | None) -> bool:
+    """True when ``backend`` names the echo stub — output that is not model inference.
+
+    Telemetry asks this of the backend that GENERATED (``GenResult.backend`` / the streaming
+    provider's ``name``), never of the request, so a stub answer can neither be priced as
+    frontier tokens saved nor labelled as a real model (B-068).
+    """
+    return backend == EchoProvider.name
+
+
 class EchoProvider:
-    """A no-op provider that returns a deterministic response derived from the prompt."""
+    """A no-op provider that returns a deterministic response derived from the prompt.
+
+    It reports its OWN identity — ``model`` is ``"echo"`` — whatever the request named
+    (B-068). It used to echo ``req.model`` back, so an ``auto`` -> echo fallback answered a
+    request for a 14B with ``model: ...14B`` and the text ``[echo] hi``.
+    """
 
     name = "echo"
 
@@ -37,7 +52,7 @@ class EchoProvider:
         )
         return GenResult(
             text=text,
-            model=req.model,
+            model=self.name,
             backend=self.name,
             prompt_tokens=_approx_tokens(last_user),
             completion_tokens=_approx_tokens(text),
@@ -56,7 +71,7 @@ class EchoProvider:
         words = text.split(" ")
         for i, word in enumerate(words):
             yield StreamDelta(text=word if i == 0 else " " + word)
-        yield StreamDelta(finish_reason=finish_reason, model=req.model)
+        yield StreamDelta(finish_reason=finish_reason, model=self.name)
 
     def footprint(self, model_id: str) -> ResourceEstimate:
         return ResourceEstimate(ram_gb=0.0)

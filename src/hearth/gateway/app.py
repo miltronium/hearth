@@ -32,6 +32,7 @@ from ..observability.metrics import (
 )
 from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
+from ..providers.echo import is_stub_backend
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router, check_policy_servable
 from ..router.route import AdapterChoice, UnknownAdapterError, policy_rungs
@@ -1030,7 +1031,8 @@ def _stream_sse(
     served_by = "remote" if decision.would_escalate else "local"
     saved = (
         0
-        if served_by == "remote"
+        # A remote answer saved nothing; neither did an echo stub's (B-068).
+        if served_by == "remote" or is_stub_backend(provider.name)
         else estimated_tokens_saved(decision.task_class, prompt_tokens, completion_tokens)
     )
     # The answer has already been streamed. Accounting that fails now (a full disk under the

@@ -149,8 +149,30 @@ def test_metrics_endpoint_reflects_requests(tmp_path):
     assert r.status_code == 200
     roll = r.json()
     assert roll["requests"] == 1
-    assert roll["estimated_frontier_tokens_saved"] > 0
+    assert roll["estimated_frontier_tokens_saved"] == 0  # the echo stub saves nothing (B-068)
     assert roll["backend_mix"] == {"local": 1}
+
+
+def test_metrics_endpoint_prices_a_real_local_answer(tmp_path):
+    class InferenceLocal(EchoProvider):
+        name = "fake-local"
+
+    metrics = MetricsStore()
+    local = InferenceLocal()
+    router = Router(local_provider=local, policy=_local_policy(), budget=BudgetAccountant(0),
+                    metrics=metrics)
+    settings = Settings(backend="echo", home=tmp_path / ".hearth", require_auth=False)
+    client = TestClient(create_app(provider=local, settings=settings, router=router,
+                                   metrics=metrics))
+    for stream in (False, True):
+        client.post(
+            "/v1/chat/completions",
+            json={"stream": stream,
+                  "messages": [{"role": "user", "content": "summarize this long document"}]},
+        )
+    roll = client.get("/v1/hearth/admin/metrics").json()
+    assert roll["requests"] == 2
+    assert all(r.estimated_frontier_tokens_saved > 0 for r in metrics._records)
 
 
 def test_budget_exhausted_returns_error(tmp_path):

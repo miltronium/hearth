@@ -90,11 +90,20 @@ def test_auto_rung_is_treated_as_unset():
 
 def test_ladder_model_reaches_the_provider_and_telemetry():
     """The decided rung is what actually gets generated with, and what gets recorded."""
-    router = _router(_ladder())
+    seen: list[str] = []
+
+    class Recording(EchoProvider):
+        def generate(self, req):
+            seen.append(req.model)
+            return super().generate(req)
+
+    router = Router(local_provider=Recording(), policy=_ladder(), budget=BudgetAccountant(0),
+                    metrics=MetricsStore())
     routed = router.route(_req("categorize this transaction"), intent="classify")
     assert routed.decision.model == TIER1
-    assert routed.result.model == TIER1  # echo echoes back the requested model id
-    assert routed.record.model == TIER1
+    assert seen == [TIER1]  # the rung is what the provider was asked to generate with
+    # The record names what GENERATED: the echo stub names itself, not the rung (B-068).
+    assert routed.result.model == routed.record.model == "echo"
     assert not routed.record.escalated
 
 

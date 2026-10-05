@@ -69,6 +69,23 @@ def test_local_class_serves_local():
     assert routed.decision.backend == "local"
     assert routed.result.backend == "echo"
     assert not routed.record.escalated
+    # An echo stub replaced no frontier call with inference: it saves nothing (B-068).
+    assert routed.record.estimated_frontier_tokens_saved == 0
+
+
+class _InferenceLocal(EchoProvider):
+    """Echo text, but reported as a real local backend: prices the savings path."""
+
+    name = "fake-local"
+
+
+def test_a_real_local_answer_is_priced_as_saved_tokens():
+    policy = _policy(summarize=ClassRule(backend="local", escalate="never"))
+    router = Router(local_provider=_InferenceLocal(), policy=policy,
+                    budget=BudgetAccountant(10_000), metrics=MetricsStore(),
+                    remote_factory=FakeRemote)
+    routed = router.route(_req("summarize this long and detailed document please"))
+    assert routed.result.backend == "fake-local"
     assert routed.record.estimated_frontier_tokens_saved > 0
 
 

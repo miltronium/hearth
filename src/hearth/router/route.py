@@ -27,6 +27,7 @@ from ..observability.metrics import (
     get_metrics,
 )
 from ..providers.base import GenRequest, GenResult, ModelProvider
+from ..providers.echo import is_stub_backend
 from ..serving.pool import UnknownModelError, check_model
 from .classify import TASK_CLASSES, classify
 from .policy import ClassRule, RoutingPolicy, RoutingPolicyError, get_policy
@@ -289,6 +290,8 @@ class Router:
         if served_by == "remote":
             self.budget.spend(result.prompt_tokens + result.completion_tokens)
             saved = 0
+        elif is_stub_backend(result.backend):
+            saved = 0  # an echo replaced no frontier call with inference (B-068)
         else:
             saved = estimated_tokens_saved(
                 decision.task_class, result.prompt_tokens, result.completion_tokens

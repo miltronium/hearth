@@ -212,13 +212,16 @@ final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget":
   `detail`. Measured [in-process, fake weights]: `routing.finance.yaml` with the 14B absent →
   `503 {"status": "failed", "reason": "weights for 'mlx-community/Qwen2.5-14B-Instruct-4bit' do
   not resolve on disk: …", "models": {"mlx-community/Qwen2.5-14B-Instruct-4bit": {"status":
-  "failed", …}, "mlx-community/Qwen2.5-3B-Instruct-4bit": {"status": "ready", …}, …}}`. The `echo` backend is ready when chosen
-  explicitly (`HEARTH_BACKEND=echo`). When `HEARTH_BACKEND=auto` (the default) falls back to
+  "failed", …}, "mlx-community/Qwen2.5-3B-Instruct-4bit": {"status": "ready", …}, …}}`.
+
+  The `echo` backend is ready when chosen explicitly (`HEARTH_BACKEND=echo`). When `HEARTH_BACKEND=auto` (the default) falls back to
   echo because `mlx_lm` is not importable — usually a venv pruned by a bare `uv run` — `/ready`
   is `503` with `status: "stub"`, `backend: "echo"` and a `reason` naming the repair command,
   `/health` adds a `backend_fallback` field with the same text, and a WARNING is logged at
   startup. The server still starts (admin/metrics and non-inference CLI paths keep working);
-  it just cannot be mistaken for real inference.
+  it just cannot be mistaken for real inference: whichever model a request names, an echo
+  answer reports `model: "echo"` (body, `hearth` block, stream chunks and the metrics record)
+  and `estimated_frontier_tokens_saved: 0`.
   Measured on 2026-10-05 with real weights (warmup on): `503 loading` at 0.05 s after start,
   `200 ready` at ~1.05 s (7B from page cache).
 - `GET /v1/hearth/admin/models` — what is resident right now, read off the provider instances
