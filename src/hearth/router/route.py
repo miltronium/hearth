@@ -27,9 +27,9 @@ from ..observability.metrics import (
     get_metrics,
 )
 from ..providers.base import GenRequest, GenResult, ModelProvider
-from ..serving.pool import UnknownModelError
+from ..serving.pool import UnknownModelError, check_model
 from .classify import classify
-from .policy import ClassRule, RoutingPolicy, get_policy
+from .policy import ClassRule, RoutingPolicy, RoutingPolicyError, get_policy
 
 logger = logging.getLogger("hearth.router")
 
@@ -124,7 +124,12 @@ class Router:
         adapters=None,
     ) -> None:
         self.local = local_provider
+        loaded_from_file = policy is None
         self.policy = policy or get_policy()
+        if loaded_from_file:
+            # The profile the operator selected, checked against the backend that will
+            # actually serve it (B-065). A policy built in code is the caller's own business.
+            check_policy_servable(self.policy, local_provider)
         self.budget = budget or get_budget()
         self.metrics = metrics or get_metrics()
         # Injectable so tests supply a fake remote without importing the anthropic SDK.
@@ -580,6 +585,41 @@ class Router:
         return self._adapters
 
 
+def check_policy_servable(policy: RoutingPolicy, local: ModelProvider, registry=None) -> None:
+    """Refuse a policy whose model rungs the ACTIVE backend cannot serve (B-065).
+
+    ``load_policy`` already checks each rung is a registered chat model; this adds what
+    only the live provider knows — a :class:`~hearth.serving.ModelPool` serves the chat
+    models of its own backend, so ``echo`` (or a plugin's model) as a rung under mlx is a
+    request-time 404 for every task of that class. Judged with :func:`check_model`, the
+    same function that 404s the request, so this check and the request cannot disagree.
+    Raises :class:`RoutingPolicyError` naming every bad rung.
+    """
+    if registry is None:
+        registry = getattr(local, "registry", None)
+    if registry is None:
+        from ..registry import get_registry
+
+        registry = get_registry()
+    named: dict[str, list[str]] = {}
+    if policy.defaults.local_model and policy.defaults.local_model != "auto":
+        named.setdefault(policy.defaults.local_model, []).append("defaults.local_model")
+    for task_class, rule in policy.classes.items():
+        if rule.local_model and rule.local_model != "auto":
+            named.setdefault(rule.local_model, []).append(f"class {task_class!r}")
+    problems = []
+    for model_id, where in named.items():
+        try:
+            check_model(local, registry, model_id)
+        except UnknownModelError as exc:
+            problems.append(f"{', '.join(where)} -> {exc}")
+    if problems:
+        raise RoutingPolicyError(
+            f"the routing profile names a model the {getattr(local, 'name', '?')!r} backend "
+            "cannot serve: " + "; ".join(problems)
+        )
+
+
 def _confidence(req: GenRequest, task_class: str) -> float:
     """Heuristic confidence score in [0, 1] — STUB (ARCHITECTURE §3, step 3).
 
@@ -602,6 +642,7 @@ def _estimate_remote_cost(req: GenRequest) -> int:
 
 
 __all__ = [
+    "check_policy_servable",
     "AdapterChoice",
     "BudgetExhaustedError",
     "ProviderError",

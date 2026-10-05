@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from hearth.registry import get_registry
-from hearth.router.policy import _parse, load_policy
+from hearth.router.policy import RoutingPolicyError, _parse, load_policy
 
 _CONFIG = Path(__file__).resolve().parent.parent / "config"
 
@@ -71,7 +71,8 @@ def test_valid_custom_policy(tmp_path):
             api_key_env: LAN_KEY
         """,
     )
-    policy = load_policy(path)
+    # defaults.local_model is a model rung, validated like a class rung (B-065).
+    policy = load_policy(path, known_models={"my-local"})
     assert policy.defaults.local_model == "my-local"
     assert policy.defaults.remote_budget_tokens_per_day == 500
     assert policy.rule_for("chat").threshold == 0.5
@@ -152,10 +153,10 @@ def test_unknown_local_model_is_rejected_at_load(tmp_path):
     )
     with pytest.raises(ValueError, match="not in the model registry"):
         _parse(yaml.safe_load(path.read_text()), known_models=_KNOWN)
-    # ADR-005 still holds at the load_policy boundary: log + safe defaults, never a crash.
-    policy = load_policy(path, known_models=_KNOWN)
-    assert policy.rule_for("classify").backend == "local"
-    assert policy.rule_for("classify").local_model is None
+    # B-065: NOT degraded to the safe defaults at the load_policy boundary. The fallback
+    # silently replaced the whole ladder with the registry default; a bad rung is loud.
+    with pytest.raises(RoutingPolicyError, match="mlx-community/typo-7B"):
+        load_policy(path, known_models=_KNOWN)
 
 
 def test_local_model_auto_is_allowed_and_unvalidated(tmp_path):

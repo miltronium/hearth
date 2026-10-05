@@ -99,6 +99,25 @@ class RoutingProfileNotFoundError(RuntimeError):
     """``HEARTH_ROUTING_YAML`` names a routing profile that does not exist."""
 
 
+class RoutingPolicyError(RoutingProfileNotFoundError):
+    """The routing profile parses, but a model rung in it cannot serve (B-065).
+
+    Raised for ``defaults.local_model`` or a class ``local_model`` that names an id the
+    model registry does not hold, a registered model that is not chat-capable (an embed
+    model), or — checked against the live provider by :func:`check_policy_servable` — a
+    model the active backend cannot serve (``echo`` under mlx).
+
+    Unlike a structurally broken file this is NOT degraded to the safe defaults: the
+    fallback is all-local and never leaks, but it silently replaces the operator's model
+    ladder with the registry default, so the server would come up green answering with
+    different weights than the profile names (the B-008 argument, CLAUDE.md §3).
+
+    It subclasses :class:`RoutingProfileNotFoundError` so every place that already refuses
+    to start on an unusable profile (the CLI's exit-2 handler, ``get_policy`` callers)
+    refuses on this too, without each having to learn a second exception type.
+    """
+
+
 @dataclass(frozen=True)
 class RoutingSelection:
     """Which routing profile is selected, and how.
@@ -155,28 +174,72 @@ def default_policy_path(environ: Mapping[str, str] | None = None) -> Path:
     return resolve_routing_selection(environ).path
 
 
-def _known_model_ids() -> set[str] | None:
-    """Servable model ids from the registry, or ``None`` when it can't be read.
+@dataclass(frozen=True)
+class _ModelCatalog:
+    """What a model rung is checked against: registered ids, and which of them chat.
 
-    Used to reject a per-class ``local_model`` that names a model nobody can serve — the
-    error belongs at config-load time, not at generation time. Deliberately best-effort: an
+    ``chat`` is ``None`` when only membership is known (a caller passed a bare id set).
+    """
+
+    known: frozenset[str]
+    chat: frozenset[str] | None = None
+
+
+def _registry_catalog() -> _ModelCatalog | None:
+    """The model registry as a :class:`_ModelCatalog`, or ``None`` when it can't be read.
+
+    Used to reject a ``local_model`` rung that names a model nobody can serve — the error
+    belongs at config-load time, not at generation time. Deliberately best-effort: an
     unreadable *registry* must not veto an otherwise valid *routing* config, so we skip the
     check rather than fail closed on an unrelated file's problem.
     """
     try:
         from ..registry import get_registry
 
-        return {entry.id for entry in get_registry().list()}
+        entries = get_registry().list()
     except Exception as exc:  # noqa: BLE001 — registry trouble ⇒ skip the check, don't veto
         logger.warning("model registry unreadable; skipping local_model validation: %s", exc)
         return None
+    return _ModelCatalog(
+        known=frozenset(e.id for e in entries),
+        chat=frozenset(e.id for e in entries if "chat" in e.capabilities),
+    )
+
+
+def _check_rung(where: str, model_id: str, catalog: _ModelCatalog | None) -> None:
+    """Raise :class:`ValueError` when ``model_id`` (a ladder rung) cannot be a chat model.
+
+    ``"auto"`` is the explicit "fall through" value and names no model.
+    """
+    if catalog is None or model_id == "auto":
+        return
+    if model_id not in catalog.known:
+        raise _RungError(
+            f"{where} {model_id!r} is not in the model registry (config/models.yaml); "
+            f"known ids: {sorted(catalog.known)}"
+        )
+    if catalog.chat is not None and model_id not in catalog.chat:
+        raise _RungError(
+            f"{where} {model_id!r} is registered but not chat-capable, so no chat request "
+            f"routed to it can be served; chat models: {sorted(catalog.chat)}"
+        )
+
+
+class _RungError(ValueError):
+    """A model rung failed validation (kept distinct so load_policy does not swallow it)."""
 
 
 def load_policy(path: Path | None = None, known_models: set[str] | None = None) -> RoutingPolicy:
-    """Load and validate the routing policy, falling back to safe defaults on any error.
+    """Load and validate the routing policy, falling back to safe defaults on a broken file.
 
-    ``known_models`` overrides the set of ids a per-class ``local_model`` is checked against
-    (default: the model registry). Tests inject it to stay off ``config/models.yaml``.
+    ``known_models`` overrides the set of ids a ``local_model`` rung is checked against
+    (default: the model registry, which also checks the rung is chat-capable). Tests inject
+    it to stay off ``config/models.yaml``.
+
+    A model rung that cannot serve — ``defaults.local_model`` or a class ``local_model``
+    naming an unregistered id or a non-chat model — raises :class:`RoutingPolicyError`
+    rather than falling back (B-065): the fallback would quietly replace the profile's
+    ladder with the registry default.
 
     One exception to the fallback (B-008): with no ``path`` argument, when
     ``HEARTH_ROUTING_YAML`` names a file that **does not exist**, this raises
@@ -198,21 +261,44 @@ def load_policy(path: Path | None = None, known_models: set[str] | None = None) 
         path = selection.path
     try:
         raw = yaml.safe_load(path.read_text()) or {}
-        known = known_models if known_models is not None else _known_model_ids()
-        return _parse(raw, known_models=known)
+        catalog = (
+            _ModelCatalog(known=frozenset(known_models))
+            if known_models is not None
+            else _registry_catalog()
+        )
+        return _parse(raw, catalog=catalog)
+    except _RungError as exc:
+        raise RoutingPolicyError(
+            f"routing profile {path} names a model that cannot serve: {exc}. Fix the "
+            "profile (or select another with HEARTH_ROUTING_YAML)."
+        ) from None
     except (OSError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
         logger.warning("invalid or missing routing.yaml (%s); using safe defaults: %s", path, exc)
         return _safe_defaults()
 
 
-def _parse(raw: dict, known_models: set[str] | None = None) -> RoutingPolicy:
-    """Parse a raw dict into a validated policy. Raises on structural problems."""
+def _parse(
+    raw: dict,
+    known_models: set[str] | None = None,
+    *,
+    catalog: _ModelCatalog | None = None,
+) -> RoutingPolicy:
+    """Parse a raw dict into a validated policy. Raises on structural problems.
+
+    ``catalog`` (or the bare id set ``known_models``) is what every model rung is checked
+    against; neither means "skip the check" (registry unreadable).
+    """
+    if catalog is None and known_models is not None:
+        catalog = _ModelCatalog(known=frozenset(known_models))
     d = raw.get("defaults", {}) or {}
     defaults = Defaults(
         local_model=str(d.get("local_model", "auto")),
         remote=str(d.get("remote", "default")),
         remote_budget_tokens_per_day=int(d.get("remote_budget_tokens_per_day", 200_000)),
     )
+    # The rung every unpinned class falls through to: it serves exactly like a class rung,
+    # so it is validated exactly like one (it used to be read verbatim, unchecked).
+    _check_rung("defaults.local_model", defaults.local_model, catalog)
 
     classes: dict[str, ClassRule] = {}
     for name, spec in (raw.get("classes", {}) or {}).items():
@@ -229,14 +315,8 @@ def _parse(raw: dict, known_models: set[str] | None = None) -> RoutingPolicy:
         if local_model is not None:
             local_model = str(local_model)
             # Fail here, not at generation time: a typo'd rung of the ladder is a config bug
-            # and should read as one. "auto" is the explicit "fall through to defaults" value
-            # and names no model, so it is never looked up.
-            unknown = known_models is not None and local_model not in known_models
-            if unknown and local_model != "auto":
-                raise ValueError(
-                    f"class {name!r}: local_model {local_model!r} is not in the model "
-                    f"registry (config/models.yaml); known ids: {sorted(known_models)}"
-                )
+            # and should read as one.
+            _check_rung(f"class {name!r}: local_model", local_model, catalog)
         classes[name] = ClassRule(
             backend=backend,
             escalate=escalate,
@@ -278,5 +358,6 @@ __all__ = [
     "resolve_routing_selection",
     "RoutingSelection",
     "RoutingProfileNotFoundError",
+    "RoutingPolicyError",
     "repo_root",
 ]

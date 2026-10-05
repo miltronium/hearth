@@ -33,7 +33,7 @@ from ..observability.metrics import (
 from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
-from ..router import BudgetExhaustedError, ProviderError, Router
+from ..router import BudgetExhaustedError, ProviderError, Router, check_policy_servable
 from ..router.route import AdapterChoice, UnknownAdapterError
 from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
@@ -94,6 +94,11 @@ def create_app(
     registry.require_default()
     metrics = metrics or get_metrics()
     router = router or Router(local_provider=provider, metrics=metrics)
+    # B-065: every model rung of the policy this app routes with must be servable by the
+    # backend that serves it — checked whether the router was built here or injected, so a
+    # ladder naming echo (or a plugin's model) under mlx refuses to start instead of 404ing
+    # every request of that class.
+    check_policy_servable(router.policy, router.local, registry)
     # RAG defaults to the offline embedder + SQLite store (rooted at settings.home/rag so
     # tests stay isolated); the index reuses the router so `answer=True` runs the local
     # model (allow_escalation=False). Injectable for tests.

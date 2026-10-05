@@ -8,13 +8,22 @@ then executes it and records telemetry. Routing behavior is declarative data
 from __future__ import annotations
 
 from .classify import TASK_CLASSES, classify
-from .policy import RoutingPolicy, load_policy
-from .route import BudgetExhaustedError, ProviderError, RouteDecision, Router, RouteResult
+from .policy import RoutingPolicy, RoutingPolicyError, load_policy
+from .route import (
+    BudgetExhaustedError,
+    ProviderError,
+    RouteDecision,
+    Router,
+    RouteResult,
+    check_policy_servable,
+)
 
 __all__ = [
     "TASK_CLASSES",
     "classify",
     "RoutingPolicy",
+    "RoutingPolicyError",
+    "check_policy_servable",
     "load_policy",
     "Router",
     "RouteDecision",
