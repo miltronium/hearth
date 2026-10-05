@@ -598,3 +598,16 @@ def test_gap_a_bar_tightened_after_the_first_measurement_is_refused_even_in_the_
     result = world.promote()
     assert result.exit_code == 1, _flat(result)
     assert world.status() == "candidate"
+
+
+def test_gap_a_candidate_block_whose_measured_at_disagrees_is_refused(world):
+    """The ledger binds the report's top-level measured_at; report_problems binds the
+    candidate block to it. Edit only the block (key-holder re-sign): still refused."""
+    world.registered()
+    payload = world.eval_report()
+    del payload["signature"]
+    payload["candidate"]["measured_at"] = "2020-01-01T00:00:00+00:00"
+    world.write_report(payload, resign=True)
+    result = world.promote()
+    assert result.exit_code == 1 and "measured_at" in _flat(result)
+    assert world.status() == "candidate"
