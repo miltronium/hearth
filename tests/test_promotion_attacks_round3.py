@@ -12,6 +12,8 @@ ported to assert the refusal; each was run against 3caecb0 first and promoted th
         verdict, promote under another (B-122)
     M4  an adapter id holding U+2028 tore its ledger record in two, bricking every later
         measurement and promotion on the install (B-124)
+    M5  near-duplicate prompts passed as distinct via zero-width / soft hyphen / word joiner,
+        fullwidth forms, NFC vs NFD, or trailing punctuation, inflating n (B-125)
 """
 
 from __future__ import annotations
@@ -455,3 +457,60 @@ def test_M4_a_ledger_that_is_not_utf8_refuses_cleanly(tmp_path):
     ledger.ledger_path(tmp_path).write_bytes(b"\xff\xfe{}\n")
     with pytest.raises(ledger.LedgerError, match="not UTF-8"):
         ledger.read(tmp_path, key)
+
+
+# -- M5: near-duplicate prompts cannot pass as distinct by changing bytes, not text (B-125) -
+
+
+@pytest.mark.parametrize(
+    "twin",
+    [
+        "what is the capital of france\u200b",          # zero-width space (Cf)
+        "what is the capi\u00adtal of france",           # soft hyphen (Cf)
+        "what is the\u2060 capital of france",           # word joiner (Cf)
+        "\ufeffwhat is the capital of france",           # BOM / ZWNBSP (Cf)
+        "ｗｈａｔ ｉｓ ｔｈｅ ｃａｐｉｔａｌ ｏｆ ｆｒａｎｃｅ",  # fullwidth (NFKC)
+        "What is the capital of France?",                # trailing punctuation + case
+        "what is the capital of france .",               # trailing punctuation after space
+        "what\u00a0is the capital of france",            # no-break space (NFKC -> space)
+    ],
+)
+def test_M5_near_duplicates_are_one_prompt(twin):
+    from hearth.training.eval import as_golden_set
+
+    base = "what is the capital of france"
+    golden = as_golden_set("extract", [(base, "Paris"), (twin, "Paris")])
+    assert golden.duplicate_prompts(), repr(twin)
+
+
+def test_M5_composed_and_decomposed_accents_are_one_prompt():
+    from hearth.training.eval import normalize_prompt
+
+    assert normalize_prompt("café menu") == normalize_prompt("cafe\u0301 menu")
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("3-1", "31"),                     # inner punctuation can carry meaning: kept
+        ("?what", "what"),                 # leading punctuation: kept
+        ("label: spam", "label: ham"),
+    ],
+)
+def test_M5_genuinely_different_prompts_stay_distinct(a, b):
+    from hearth.training.eval import normalize_prompt
+
+    assert normalize_prompt(a) != normalize_prompt(b)
+
+
+def test_M5_a_near_duplicate_golden_set_is_refused_end_to_end(tmp_path):
+    """30 distinct rows + 10 zero-width twins: n is 30 observations, not 40."""
+    import json
+
+    w = World(tmp_path)
+    _adapter(w, "a1")
+    rows = pe.ROWS[:30] + [{"prompt": r["prompt"] + "\u200b", "expected": r["expected"]}
+                           for r in pe.ROWS[:10]]
+    w.golden.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    result = w.eval("a1")
+    assert result.exit_code == 1 and "repeats" in _flat(result), _flat(result)
