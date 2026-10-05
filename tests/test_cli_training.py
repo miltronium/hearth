@@ -51,6 +51,31 @@ def test_train_reports_dataset_error_cleanly(tmp_path):
     assert "Dataset error" in result.stdout
 
 
+def test_train_with_one_record_is_a_clean_dataset_error(tmp_path):
+    """A one-record dataset loads, then fails LoRAConfig.validate ("need at least 2 records
+    to split into train/valid"). DatasetError is a ValueError, not the RuntimeError the CLI
+    caught, so it used to end in a traceback after announcing a training run."""
+    one = tmp_path / "one.jsonl"
+    one.write_text(
+        '{"kind": "hearth.dataset.header", "schema_version": 1, "task": "extract"}\n'
+        '{"prompt": "p1", "completion": "c1"}\n'
+    )
+    result = runner.invoke(
+        app,
+        ["train", "--task", "extract", "--base", "org/base", "--data", str(one),
+         "--out", str(tmp_path / "run")],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 1, result.output
+    assert "Dataset error" in result.output and "at least 2 records" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        repr(result.exception)
+    )
+    assert "Traceback" not in result.output
+    assert "Training extract adapter" not in result.output  # refused before announcing
+    assert not (tmp_path / "run").exists()
+
+
 def test_train_success_points_at_a_promotion_path_that_can_work(tmp_path, monkeypatch):
     """B-046: the post-train message said "Eval it, then `hearth adapters promote`", but
     `adapters promote` refuses without --report and --prereg. Every promotion command the

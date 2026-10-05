@@ -1292,10 +1292,13 @@ def train(
     import subprocess
     from datetime import UTC, datetime
 
+    from rich.markup import escape
+
     from .config import Settings
     from .registry import AdapterError
     from .training import LoRAConfig, load_dataset
     from .training import train as run_train
+    from .training.dataset import DatasetError
 
     try:
         dataset = load_dataset(data)
@@ -1308,6 +1311,17 @@ def train(
     config = LoRAConfig(
         base_model=base, task=task, dataset=dataset, output_dir=out_dir, iters=iters
     )
+    try:
+        # The trainability checks (e.g. "need at least 2 records to split into
+        # train/valid") raise DatasetError / ValueError -- not RuntimeError -- so they used to
+        # end in a traceback. Run them before announcing a training run.
+        config.validate()
+    except DatasetError as exc:
+        console.print(f"[red]Dataset error:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        console.print(f"[red]Invalid training config:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=1) from None
     console.print(
         f"Training [cyan]{task}[/cyan] adapter on [cyan]{base}[/cyan] "
         f"({len(dataset)} records) -> {out_dir}"
@@ -1318,6 +1332,10 @@ def train(
         # The real runner raises with the fix hint when the [mlx] extra is missing, and
         # ModelNotOnDiskError (a RuntimeError) when the base model is not on disk.
         console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    except DatasetError as exc:
+        # The real runner's batch-size preflight (validation split smaller than batch_size).
+        console.print(f"[red]Dataset error:[/red] {escape(str(exc))}")
         raise typer.Exit(code=1) from None
     except subprocess.CalledProcessError as exc:
         # The mlx_lm.lora child failed (OOM, bad data…): one clean line, not a traceback.
