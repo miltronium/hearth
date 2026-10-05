@@ -173,12 +173,23 @@ The bar may only be **stricter** than the gate's defaults (B-062): `alpha` in (0
 every number finite. `prereg init`, `prereg check` and `eval` refuse anything else
 (`pre-registered bar refused: alpha must be in (0, 0.05] ...`).
 
-**Where the prereg lives.** Commit it in the **same git repository as the golden set**, and
-commit the golden set too: promotion refuses a prereg in any other repository, and a golden
-set that was not committed and unmodified when it was measured (B-061). In this repo that
-means next to `data/<task>_golden.jsonl`.
+**Where the prereg lives.** Commit it, and the golden set, in the **evals repository** this
+install is anchored to (B-081). By default that is HEARTH's own repository — next to
+`data/<task>_golden.jsonl`; `hearth prereg anchor` prints it and `hearth prereg anchor
+<repo>` pins another one (stored in `~/.hearth/evals-repo`). Every eval records the anchor
+in force, and promotion requires the prereg to live in the anchor recorded at the adapter's
+**first** measurement: a copy of the golden set in a throwaway repo does not count, and
+re-anchoring after a score has been seen does not rescue an adapter already measured.
+Promotion also refuses a golden set that was not committed and unmodified when it was
+measured. "Committed and unmodified" means the bytes on disk are the committed blob — HEARTH
+hashes them itself rather than asking `git diff`, so `git update-index --assume-unchanged`
+or `--skip-worktree` cannot hide an edit (B-078) — and at promotion the golden set is
+re-read from the committed blob and must hash to what was scored. Every golden row must be
+a distinct prompt (whitespace- and case-insensitive): a repeated prompt is one observation
+counted twice, and `eval` / `prereg init` refuse the set (B-080). A prereg YAML with a
+duplicated key is refused too (B-083).
 
-Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand — `prereg check` and `eval --promote` refuse a prereg with any of them blank, and one whose `bar.must_beat_baselines` drops a default baseline (empty / majority / copy-input) — then commit **before you run step 5**: promotion refuses a prereg whose last commit is later than the measurement (`... committed at ..., AFTER the measurement started at ...`):
+Fill in `hypothesis`, `stopping_rule` and `kill_condition` by hand — `prereg check` and `eval --promote` refuse a prereg with any of them blank, and one whose `bar.must_beat_baselines` drops a default baseline (empty / majority / copy-input) — then commit **before the adapter is measured at all**. Every `hearth eval` — with or without `--prereg`, on any golden set — is recorded in a signed, append-only ledger (`~/.hearth/measurements.jsonl`) *before* it scores anything, and promotion requires the prereg's last commit to precede the adapter's **first** recorded measurement, both in committer time and in history (the commit must be an ancestor of the HEAD recorded at that first measurement, which a backdated commit cannot be) (B-079). An exploratory `hearth eval` run before the bar is committed therefore makes that adapter unpromotable; retrain or measure a fresh adapter under the committed bar:
 
 ```sh
 git add prereg/extract.yaml data/extract_golden.jsonl && git commit -m "prereg: extract adapter bar"
@@ -250,13 +261,28 @@ The refusals, all CI-safe (run on the echo backend; each exits 1):
 | `hearth eval ... --prereg prereg/extract.yaml` with a different `--system`/`--metric`/`--max-tokens` | `This run is not the registered experiment: decode config ... != registered ...` |
 | `hearth eval ... --promote` with no `--prereg` | `Promotion refused: --promote requires --prereg.` |
 | `hearth eval ... --prereg <uncommitted file> --promote` | `Promotion refused: pre-registration is not git-committed: <file> is not tracked by git ...` (or `not inside a git repository`) |
-| `hearth eval ... --prereg <file committed after the run started> --promote` | `Promotion refused: pre-registration was committed at ..., AFTER the measurement started at ...` |
+| `hearth eval ... --prereg <file committed after the adapter was first measured> --promote` | `Promotion refused: pre-registration was committed at ..., AFTER the measurement started at ... — the first recorded measurement of ...` or `... was not in the history of ... when ... was first measured ...` |
 | `hearth eval ... --prereg <file in a repo other than the golden set's> --promote` | `Promotion refused: the pre-registration lives in ..., but the golden set is versioned in ...` |
+| `hearth eval ... --prereg <file + golden set in a repo that is not the anchored evals repository> --promote` | `Promotion refused: ... which is not the evals repository HEARTH was anchored to when ... was first measured ...` |
+| `hearth eval ... --prereg <file edited, hidden with --assume-unchanged> --promote` | `Promotion refused: pre-registration is not git-committed: ... has uncommitted modifications ...` |
+| `hearth eval --golden <set that repeats a prompt> ...` | `Golden set error: golden set repeats N prompt(s) ...` |
+| `hearth eval ... --promote` on the echo backend or a plugin | `Promotion refused: the scores were generated by backend '...', not the MLX model pool ...` |
+| `hearth eval ... --metric exactt` | `Unknown metric: 'exactt' ...` (refused before anything is recorded) |
 | `hearth eval <adapter with no weights on disk> ...` | `Refusing to measure: adapter weights not found: ...` |
 | `hearth eval ... --alpha 0.5` (or `--margin -1`, `--min-n 1`) | `Gate refused to compare: alpha must be in (0, 0.05] ...` |
 
 `--check-determinism` re-generates a few prompts and refuses if any answer changes: a score
 that re-rolls is not a measurement.
+
+Without `--prereg`, `eval` still prints the gate verdict, followed by `Exploratory
+measurement (no --prereg): recorded in the measurement ledger. <id> can only be promoted
+under a pre-registration committed BEFORE its first measurement (<time>)`. With `--prereg`
+but no `--promote` it says up front whether the adapter is promotable under that prereg.
+The ledger is append-only and chained: an edited, removed or reordered record makes every
+later measurement and promotion refuse (`cannot record the measurement: ...`,
+`the measurement ledger is not intact: ...`). Only scores generated by the MLX model pool
+(`HEARTH_BACKEND=mlx`) can promote; the report records the backend (B-084). A promoted
+incumbent is scored on **its own** registered base model, not the candidate's (B-085).
 
 For scripted or custom scoring, the same API is in `hearth.training.eval`. Use
 `evaluate_gate`, not `beats_incumbent` (a legacy mean-only comparison with no significance
@@ -298,8 +324,11 @@ it verifies the HMAC signature (only a report `hearth eval --report-json` wrote 
 install, unedited), checks the report is about **this** adapter (id, task, base model,
 weights path, and weights on disk that still hash to what was measured) against the
 incumbent that is **still** in place, recomputes the gate from the stored per-example
-vectors under the bar in the prereg, and re-checks the prereg's provenance (committed,
-unmodified, committed before `measured_at`, in the golden set's repository):
+vectors under the bar in the prereg, requires the report's measurement to be in this
+install's ledger, and re-checks the prereg's provenance (committed, unmodified, committed
+before the adapter's first recorded measurement, in the anchored evals repository that
+holds the golden set). The incumbent check and the registry write happen under one lock, so
+an adapter promoted in between is not silently retired (B-082):
 
 ```sh
 uv run --no-sync hearth adapters promote extract-<run-id> \
@@ -334,12 +363,19 @@ holds the gate result (test, p-value, n, alpha, baselines), the pre-registration
 under (its sha; `prereg_commit`, the commit that last changed it — not HEAD — with
 `prereg_committed_at` and `prereg_introduced_commit`; `prereg_repo`; `golden_commit`), the
 `candidate_weights_sha` that was measured, `evidence` (`measured` for `eval --promote`,
-`signed-report` for `adapters promote`) and, for the latter, the `report_sha`.
+`signed-report` for `adapters promote`), the ledger positions (`ledger_seq`,
+`first_ledger_seq`, `first_measured_at`) and, for `adapters promote`, the `report_sha`.
 
-What the signature does not cover: a user who reads `~/.hearth/eval-report.key` can sign
-anything — the same user can edit `adapters.json` directly, so no file-based check could do
-better. And git committer timestamps are set by whoever commits, so "committed before the
-measurement" stops a bar written after seeing the score, not a deliberately backdated one.
+What this does not cover (residual trust): a user who reads `~/.hearth/eval-report.key` can
+sign anything — reports and ledger records alike — and the same user can edit
+`adapters.json` directly, so no file-based check could do better. Anyone who can write
+`~/.hearth` can delete the ledger or truncate its tail (an orphaned report is refused, but a
+fresh measurement after the deletion starts a new history). The anchor is install
+configuration: re-pinning it before an adapter's first measurement is allowed (and
+recorded). Perturbing an adapter's weights makes a new candidate with a fresh history.
+Committer timestamps are settable, which is why the ancestry rule exists — but a bar
+committed *before* the first measurement and never looked at again is what is enforced,
+not that nobody peeked at a sibling adapter trained the same way.
 
 ---
 
