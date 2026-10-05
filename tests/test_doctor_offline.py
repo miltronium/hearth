@@ -240,6 +240,91 @@ def test_a_plugin_backend_is_not_vouched_for(machine):
     assert not checks["backend"].ok
 
 
+class _CloudEmbedder:
+    """Stands in for a third-party embedder plugin (would ship every chunk off-machine)."""
+
+    name = "evil-cloud-embedder"
+    dim = 8
+
+    def embed(self, texts):
+        return [[0.0] * self.dim for _ in texts]
+
+
+class _CloudStore:
+    """Stands in for a third-party vector-store plugin."""
+
+    def add(self, collection, chunks, vectors):
+        return 0
+
+    def query(self, collection, vector, k):
+        return []
+
+    def count(self, collection):
+        return 0
+
+
+@pytest.fixture
+def installed_plugins(monkeypatch):
+    """Register the two stand-ins exactly where the real selectors look them up."""
+    from hearth import plugins
+    from hearth.memory.embed import EmbeddingProvider
+    from hearth.memory.store import VectorStore
+
+    assert isinstance(_CloudEmbedder(), EmbeddingProvider)
+    assert isinstance(_CloudStore(), VectorStore)
+    table = {
+        (plugins.EMBEDDER_GROUP, "evil-cloud-embedder"): _CloudEmbedder,
+        (plugins.VECTOR_STORE_GROUP, "evil-store"): _CloudStore,
+    }
+    monkeypatch.setattr(
+        plugins, "load_plugin",
+        lambda group, name: (lambda f: f() if f else None)(table.get((group, name))),
+    )
+
+
+def test_builtin_rag_components_are_vouched_for(machine):
+    checks, safe = machine.run()
+    assert safe
+    assert checks["embedder"].ok and "HashEmbedder" in checks["embedder"].detail
+    assert checks["vector_store"].ok and "SQLiteVectorStore" in checks["vector_store"].detail
+    for embedder in ("HASH", "mlx"):
+        assert machine.run(embedder=embedder)[0]["embedder"].ok
+    assert machine.run(vector_store="sqlite-vec")[0]["vector_store"].ok
+
+
+@pytest.mark.parametrize(
+    ("setting", "row"),
+    [({"embedder": "evil-cloud-embedder"}, "embedder"),
+     ({"vector_store": "evil-store"}, "vector_store")],
+)
+def test_a_plugin_embedder_or_vector_store_is_unsafe(machine, installed_plugins, setting, row):
+    """B-067: they receive every RAG chunk and query, so they are judged like a backend."""
+    checks, safe = machine.run(**setting)
+    assert not safe
+    assert not checks[row].ok and checks[row].fatal
+    assert "plugin" in checks[row].detail and "_Cloud" in checks[row].detail
+
+
+def test_an_unresolvable_embedder_name_is_not_vouched_for(machine):
+    checks, safe = machine.run(embedder="no-such-embedder")
+    assert not safe and not checks["embedder"].ok
+
+
+def test_a_plugin_subclassing_a_builtin_is_still_a_plugin(machine, monkeypatch):
+    """The verdict is on the exact type: inheriting HashEmbedder's name proves nothing about
+    what an overriding ``embed`` does with the text."""
+    from hearth import plugins
+    from hearth.memory.embed import HashEmbedder
+
+    class Lookalike(HashEmbedder):
+        def embed(self, texts):  # imagine a POST here
+            return super().embed(texts)
+
+    monkeypatch.setattr(plugins, "load_plugin", lambda group, name: Lookalike())
+    checks, safe = machine.run(embedder="lookalike")
+    assert not safe and not checks["embedder"].ok
+
+
 def test_cli_exits_nonzero_when_unsafe_and_zero_when_safe(machine, monkeypatch, tmp_path):
     from typer.testing import CliRunner
 
