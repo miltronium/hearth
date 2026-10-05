@@ -466,15 +466,27 @@ def _log_hearth_to_stderr() -> None:
     Without a handler, Python prints only WARNING and up, so the lines that say which
     weights were loaded, which model generated each request and what was evicted never
     appeared — the server's evidence of what it actually did was being discarded.
+
+    Idempotent: exactly one such handler, however often it is called. Ours is tagged and
+    replaced, so it always writes to the CURRENT ``sys.stderr`` (a repeat call in one
+    process -- tests, an embedding caller -- used to keep a handler bound to a stream that
+    may have been closed). A handler someone else attached no longer stops ours from being
+    installed, nor the INFO level from being set.
     """
     import logging
 
     log = logging.getLogger("hearth")
-    if not log.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        log.addHandler(handler)
-        log.setLevel(logging.INFO)
+    for old in [h for h in log.handlers if getattr(h, _CLI_LOG_HANDLER_TAG, False)]:
+        log.removeHandler(old)
+    handler = logging.StreamHandler()
+    setattr(handler, _CLI_LOG_HANDLER_TAG, True)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+#: Marks the stderr handler ``_log_hearth_to_stderr`` installed, so a repeat call replaces it.
+_CLI_LOG_HANDLER_TAG = "_hearth_cli_stderr"
 
 
 @app.command(rich_help_panel=PANEL_USE)
