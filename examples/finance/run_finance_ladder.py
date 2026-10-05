@@ -13,7 +13,11 @@ figures, so no model on this ladder is ever asked to add anything up: Python com
 totals and hands them to tier 2 as facts to describe. The tier-2 prompt says so explicitly.
 
 The router picks the model for each stage purely from the routing policy — this script never
-names a model. Which model actually served is printed at every stage so the ladder is visible.
+names a model. It serves through :class:`hearth.serving.ModelPool`, the same front door the
+gateway and CLI use (one provider per model id, LRU under the RAM ceiling, everything on the
+MLX thread), so the ladder here is the ladder production runs. Which model actually served is
+printed at every stage, and at the end each resident provider reports the weights path it
+loaded and how many generations it ran — evidence from the provider, not the request.
 
 Run it sealed (see README.md)::
 
@@ -31,32 +35,23 @@ import csv
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# huggingface_hub reads its cache location at import time, and `hearth models pull` stores
-# weights under ~/.hearth/models rather than the default ~/.cache/huggingface. Point it there
-# before anything imports the hub, so offline loading finds the pre-pulled weights.
-os.environ.setdefault("HF_HUB_CACHE", str(Path.home() / ".hearth" / "models"))
+# No HF_HUB_CACHE override: MLXProvider resolves weights through
+# providers/mlx.py:resolve_local_model, which checks ~/.hearth/models first and then the hub
+# cache (CLAUDE.md §2 — a hidden global would make this disagree with hearth_status.py).
 
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from hearth.observability.budget import BudgetAccountant  # noqa: E402
 from hearth.observability.metrics import MetricsStore  # noqa: E402
-from hearth.providers.base import (  # noqa: E402
-    Capabilities,
-    GenRequest,
-    GenResult,
-    Message,
-    ModelProvider,
-    ResourceEstimate,
-)
+from hearth.providers.base import GenRequest, Message, ModelProvider  # noqa: E402
 from hearth.router import Router  # noqa: E402
 from hearth.router.policy import RoutingPolicy, load_policy  # noqa: E402
-from hearth.serving import ModelManager  # noqa: E402
 
 # The closed label set the tier-1 model must choose from. Kept small and mutually exclusive
 # so a 3B model can hold it in one short prompt.
@@ -137,49 +132,23 @@ def load_transactions(path: Path) -> list[Transaction]:
     ]
 
 
-# -- the local provider that makes a ladder possible --------------------------------------
+# -- the local provider ----------------------------------------------------------------------
 
 
-class LadderProvider:
-    """Serves whichever local model the router picked for this request.
+def make_provider(dry_run: bool, ram_ceiling_gb: float) -> ModelProvider:
+    """The gateway's own ModelPool for real runs; the echo stub for ``--dry-run``."""
+    if dry_run:
+        from hearth.providers.echo import EchoProvider
 
-    ``MLXProvider`` is bound to a single model id, so a per-class ladder needs a front door
-    that maps ``GenRequest.model`` -> the right resident provider. :class:`ModelManager` owns
-    residency (LRU under a RAM ceiling, ARCHITECTURE §5); this only delegates, and records
-    which model served each call so the ladder is visible in the output.
-    """
-
-    name = "ladder"
-
-    def __init__(self, manager: ModelManager) -> None:
-        self._manager = manager
-        self.calls_by_model: dict[str, int] = defaultdict(int)
-
-    def capabilities(self) -> Capabilities:
-        return Capabilities(chat=True, stream=True)
-
-    def footprint(self, model_id: str) -> ResourceEstimate:
-        return self._manager.get(model_id).footprint(model_id)
-
-    def generate(self, req: GenRequest) -> GenResult:
-        self.calls_by_model[req.model] += 1
-        return self._manager.get(req.model).generate(req)
-
-    def stream(self, req: GenRequest):
-        self.calls_by_model[req.model] += 1
-        yield from self._manager.get(req.model).stream(req)
-
-
-def _mlx_factory(model_id: str) -> ModelProvider:
+        return EchoProvider()
     from hearth.providers.mlx import MLXProvider
+    from hearth.serving import ModelPool
 
-    return MLXProvider(model_id)
-
-
-def _echo_factory(model_id: str) -> ModelProvider:
-    from hearth.providers.echo import EchoProvider
-
-    return EchoProvider()
+    return ModelPool(
+        lambda model_id, ram_gb: MLXProvider(model_id, ram_gb=ram_gb),
+        backend="mlx",
+        ram_ceiling_gb=ram_ceiling_gb,
+    )
 
 
 # -- the seal ------------------------------------------------------------------------------
@@ -413,8 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         txns = txns[: args.limit]
 
-    factory = _echo_factory if args.dry_run else _mlx_factory
-    provider = LadderProvider(ModelManager(factory, ram_ceiling_gb=args.ram_ceiling_gb))
+    provider = make_provider(args.dry_run, args.ram_ceiling_gb)
     router = Router(
         local_provider=provider,
         policy=policy,
@@ -453,9 +421,18 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
 
     print("\n" + "=" * 78)
-    print("  ladder actually exercised (calls per model):")
-    for model_id, n in sorted(provider.calls_by_model.items()):
+    # GenResult.model is filled in by the provider instance that generated, not the router.
+    served = Counter([r.model for r in rows] + [model3])
+    print("  ladder actually exercised (calls per model, as reported by the provider that ran):")
+    for model_id, n in sorted(served.items()):
         print(f"    {n:>3} x {model_id}")
+    manager = getattr(provider, "manager", None)
+    if manager is not None:
+        print("  resident providers (weights path loaded, generations run by that instance):")
+        for resident in manager.residents():
+            p = resident.provider
+            print(f"    {resident.model_id}: {getattr(p, 'loaded_path', None)} "
+                  f"x{getattr(p, 'generations', '?')}")
     rollup = router.metrics.rollup()
     print(f"  end to end: {(stage1_ms + stage2_ms + stage3_ms) / 1000:.1f} s")
     print(f"  backend mix: {rollup['backend_mix']}")

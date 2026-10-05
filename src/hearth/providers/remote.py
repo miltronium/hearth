@@ -146,7 +146,8 @@ class RemoteProvider:
             # The accumulated final message carries the stop_reason for the whole turn.
             final = stream.get_final_message()
         yield StreamDelta(
-            finish_reason=normalize_finish_reason(getattr(final, "stop_reason", None))
+            finish_reason=normalize_finish_reason(getattr(final, "stop_reason", None)),
+            model=self.config.model,
         )
 
     # -- openai-compatible (httpx) ----------------------------------------------------
@@ -229,7 +230,9 @@ class RemoteProvider:
                 delta = (choice.get("delta") or {}).get("content")
                 if delta:
                     yield StreamDelta(text=delta)
-        yield StreamDelta(finish_reason=normalize_finish_reason(raw_reason))
+        yield StreamDelta(
+            finish_reason=normalize_finish_reason(raw_reason), model=self.config.model
+        )
 
 
 def _split_system(messages: list[Message]) -> tuple[str, list[dict]]:

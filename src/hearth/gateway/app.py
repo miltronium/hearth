@@ -11,10 +11,12 @@ liveness probe ``/v1/hearth/admin/health``.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -33,7 +35,7 @@ from ..providers import select_provider
 from ..providers.base import GenRequest, Message, ModelProvider, iter_stream
 from ..registry import Registry, get_registry
 from ..router import BudgetExhaustedError, ProviderError, Router
-from ..serving import ModelManager
+from ..serving import ModelManager, UnknownModelError, check_model, servable_for
 from .agent_route import register_agent_route
 from .auth import require_token
 from .chat_ui import register_chat_ui
@@ -96,12 +98,17 @@ def create_app(
         router=router,
     )
     # Memory-aware residency (Phase 7): the manager owns which models are loaded within the
-    # RAM ceiling. Its factory returns the app's local provider for any model id — a single
-    # backend serving multiple ids — so warmup/readiness go through one place. Injectable so
-    # tests supply a manager over fake providers.
-    manager = manager or ModelManager(
+    # RAM ceiling. The MLX backend is a ModelPool, which brings its own manager holding one
+    # provider per model id — readiness must look at THAT manager, the one requests are
+    # served from. Any other provider (echo, a plugin, a test fake) serves every id itself,
+    # so a manager over it is only the residency record for warmup/readiness. A pool's own
+    # manager always wins, even over an injected one: readiness that inspected any other
+    # manager would be checking a different object from the one that serves (CLAUDE.md §3).
+    # Injectable so tests supply a manager over fake providers.
+    manager = getattr(provider, "manager", None) or manager or ModelManager(
         factory=lambda _model_id: provider, ram_ceiling_gb=settings.ram_ceiling_gb
     )
+    warmup_state = _WarmupState()
 
     app = FastAPI(title="HEARTH", version=__version__)
     app.state.provider = provider
@@ -111,11 +118,22 @@ def create_app(
     app.state.metrics = metrics
     app.state.rag = rag
     app.state.manager = manager
+    app.state.warmup = warmup_state
 
-    # Warm the default model so the first request is fast and /ready flips to 200. Never
-    # fatal: a failed warmup logs and leaves the server up in degraded mode (not ready).
+    # Warm the default model so the first request is fast and /ready flips to 200. Runs on a
+    # background thread so serve starts listening at once (it never blocks on a load); the
+    # load itself runs on the MLX thread. Never fatal: a failed warmup is logged loudly and
+    # /ready reports 503 with the reason — a missing model shows up at startup, not on the
+    # first request.
     if settings.warmup and provider.name != "echo":
-        _warmup(manager, registry.default_id)
+        warmup_state.running = True
+        warmup_state.thread = threading.Thread(
+            target=_warmup,
+            args=(provider, manager, registry, warmup_state),
+            name="hearth-warmup",
+            daemon=True,
+        )
+        warmup_state.thread.start()
 
     # Auth gates everything except the health/ready liveness+readiness probes.
     auth = Depends(require_token)
@@ -133,23 +151,72 @@ def create_app(
     def ready():
         """Readiness probe (distinct from liveness /health).
 
-        Returns 200 only once the default/warm model is resident in the manager; 503
-        otherwise. Deployment (launchd/k8s) gates traffic on this so requests don't hit a
-        server whose model hasn't loaded yet (ARCHITECTURE §9). The echo backend is always
-        ready (nothing to load).
+        Returns 200 only once the default model's weights are actually in memory: resident
+        in the manager requests are served from AND, for a provider that can say so
+        (``is_loaded``), holding weights. It used to check residency alone, and residency
+        was granted without loading anything — so /ready said 200 with zero weights loaded.
+        503 otherwise, with ``status`` ``loading`` (not loaded yet) or ``failed`` plus the
+        ``reason`` (the load raised, or ``HEARTH_DEFAULT_MODEL`` names no servable model).
+        The echo backend is always ready (nothing to load).
         """
         default_id = registry.default_id
-        model_ready = provider.name == "echo" or manager.is_resident(default_id)
-        payload = {
-            "status": "ready" if model_ready else "loading",
+        payload: dict = {
             "backend": provider.name,
             "model": default_id,
             "resident": manager.resident_ids(),
         }
-        return JSONResponse(status_code=200 if model_ready else 503, content=payload)
+        if provider.name == "echo":
+            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
+        problem = _default_model_problem(provider, registry)
+        if problem is None and _weights_loaded(manager, default_id):
+            return JSONResponse(status_code=200, content={**payload, "status": "ready"})
+        reason = problem or warmup_state.error
+        status = "failed" if reason else "loading"
+        if not reason:
+            reason = (
+                "warmup in progress"
+                if warmup_state.running
+                else f"weights for {default_id!r} are not loaded"
+                + ("" if settings.warmup else " (HEARTH_WARMUP is off)")
+            )
+        return JSONResponse(
+            status_code=503, content={**payload, "status": status, "reason": reason}
+        )
+
+    @app.get("/v1/hearth/admin/models", dependencies=[auth])
+    def admin_models() -> dict:
+        """What is resident right now, read off the provider instances themselves.
+
+        ``loaded_path`` is the directory ``mlx_lm.load`` read and ``generations`` counts the
+        generations THAT instance ran — evidence of which weights answered, independent of
+        anything a response says about itself.
+        """
+        return {
+            "backend": provider.name,
+            "default": registry.default_id,
+            "ram_ceiling_gb": manager.ram_ceiling_gb,
+            "resident_ram_gb": manager.resident_ram_gb(),
+            "resident": [
+                {
+                    "model": r.model_id,
+                    "ram_gb": r.ram_gb,
+                    "provider_model": getattr(r.provider, "model_id", None),
+                    "loaded": getattr(r.provider, "is_loaded", None),
+                    "loaded_path": getattr(r.provider, "loaded_path", None),
+                    "generations": getattr(r.provider, "generations", None),
+                }
+                for r in manager.residents()
+            ],
+        }
 
     @app.get("/v1/models", dependencies=[auth])
     def list_models() -> ModelList:
+        # Only what a chat request can name and be SERVED by: OpenAI clients (and /chat)
+        # build their model picker from this list, so listing echo under the mlx backend, or
+        # an embed model, offers picks that can only 404. /v1/embeddings ignores ``model``
+        # and always uses the configured embedder, so an embed entry here serves nobody.
+        # Same rule as check_model (servable_for mirrors it), so list and 404 agree.
+        servable = set(servable_for(router.local, registry))
         return ModelList(
             data=[
                 ModelCard(
@@ -159,6 +226,7 @@ def create_app(
                     capabilities=e.capabilities,
                 )
                 for e in registry.list()
+                if e.id in servable
             ]
         )
 
@@ -189,6 +257,12 @@ def create_app(
             response_format = resolve_format(req.response_format)
         except UnsupportedResponseFormatError as exc:
             return _response_format_error(str(exc))
+        # An unknown model is a 404 before anything runs — streaming included, where a
+        # failure after the 200 could only be an in-band error event.
+        try:
+            check_model(router.local, registry, req.model)
+        except UnknownModelError as exc:
+            return _model_not_found(exc)
         messages = (
             json_instruction(req.messages)
             if response_format == "json_object"
@@ -216,6 +290,8 @@ def create_app(
             )
         except BudgetExhaustedError as exc:
             return _budget_error(str(exc))
+        except UnknownModelError as exc:
+            return _model_not_found(exc)
         except ProviderError as exc:
             return _provider_error(str(exc))
 
@@ -315,20 +391,94 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _warmup(manager: ModelManager, model_id: str) -> bool:
-    """Pre-load ``model_id`` via the manager; degrade (log, don't crash) on failure.
+@dataclass
+class _WarmupState:
+    """What the warmup thread found. Read by /ready; written by :func:`_warmup`."""
+
+    running: bool = False
+    error: str | None = None
+    thread: threading.Thread | None = None
+
+
+def _default_model_problem(provider: ModelProvider, registry: Registry) -> str | None:
+    """Why the configured default model cannot be the one serving, or ``None``.
+
+    ``Registry.default_id`` ignores a ``HEARTH_DEFAULT_MODEL`` that names no registered
+    model and falls back to the catalog default — so the operator asked for one model and
+    would be served another with every probe green. Readiness says so instead.
+    """
+    override = os.environ.get("HEARTH_DEFAULT_MODEL", "").strip()
+    if override and registry.get(override) is None:
+        return (
+            f"HEARTH_DEFAULT_MODEL={override!r} is not in the model registry "
+            f"(config/models.yaml); refusing to report ready while 'auto' would be served "
+            f"by {registry.default_id!r} instead"
+        )
+    resolve = getattr(provider, "resolve", None)
+    if callable(resolve):
+        try:
+            resolve(registry.default_id)
+        except UnknownModelError as exc:
+            return f"default model is not servable: {exc}"
+    return None
+
+
+def _weights_loaded(manager: ModelManager, model_id: str) -> bool:
+    """True when ``model_id`` is resident AND its provider reports weights in memory."""
+    resident = manager.peek(model_id)
+    if resident is None:
+        return False
+    loaded = getattr(resident, "is_loaded", None)
+    return True if loaded is None else bool(loaded)
+
+
+def _warmup(
+    provider: ModelProvider, manager: ModelManager, registry: Registry, state: _WarmupState
+) -> bool:
+    """Load the default model's weights now; record (never raise) a failure.
 
     Returns whether warmup succeeded. A failed load (missing weights, MLX not installed)
     must not take the server down — `hearth serve` stays up in degraded mode and `/ready`
-    reports 503 until a model actually loads (Phase 7 graceful degradation).
+    reports 503 with the reason until a model actually loads (Phase 7 graceful
+    degradation). A pool loads through its own path so the load runs on the MLX thread.
     """
+    state.running = True
+    model_id = registry.default_id
     try:
-        manager.get(model_id)
+        problem = _default_model_problem(provider, registry)
+        if problem is not None:
+            raise RuntimeError(problem)
+        warm = getattr(provider, "warm", None)
+        if callable(warm) and getattr(provider, "manager", None) is manager:
+            warm(model_id)
+        else:
+            manager.get(model_id)
+        if not _weights_loaded(manager, model_id):
+            raise RuntimeError(f"warmup returned but {model_id!r} holds no weights")
+        state.error = None
         logger.info("warmed default model %s", model_id)
         return True
     except Exception as exc:  # noqa: BLE001 — warmup is best-effort; never fatal
-        logger.warning("warmup of %s failed; serving in degraded mode: %s", model_id, exc)
+        state.error = f"warmup of {model_id!r} failed: {type(exc).__name__}: {exc}"
+        logger.error("%s — NOT READY; serving in degraded mode", state.error)
         return False
+    finally:
+        state.running = False
+
+
+def _model_not_found(exc: UnknownModelError) -> JSONResponse:
+    """OpenAI-style 404 for a model id this server cannot serve (docs/API.md)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }
+        },
+    )
 
 
 def _budget_error(message: str) -> JSONResponse:
@@ -516,12 +666,18 @@ def _stream_sse(
     parts: list[str] = []
     finish_reason = "stop"
     escalation_failed: str | None = None
+    # The model that actually generated, as reported by the provider instance that ran it
+    # (the terminal StreamDelta). Never the request's or the decision's model: those name
+    # what was asked for, which is exactly what used to be reported when another model ran.
+    served_model: str | None = None
 
     def relay(provider: ModelProvider, stream_req: GenRequest, model: str):
-        nonlocal finish_reason
+        nonlocal finish_reason, served_model
         for event in iter_stream(provider, stream_req):
             if event.finish_reason:
                 finish_reason = event.finish_reason
+            if event.model:
+                served_model = event.model
             if not event.text:
                 continue
             parts.append(event.text)
@@ -589,11 +745,28 @@ def _stream_sse(
                     ),
                 )
                 yield from relay_local(stream_req)
+    except UnknownModelError as exc:
+        logger.error("stream refused: %s", exc)
+        yield _sse(
+            {
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }
+            }
+        )
+        yield _sse("[DONE]")
+        return
     except Exception as exc:  # noqa: BLE001 — a dead stream must still end, and say why
         yield from _stream_failure(provider, exc)
         return
     latency_ms = (time.perf_counter() - started) * 1000.0
     text = "".join(parts)
+    # A provider that cannot say which model ran (third-party, plain stream()) falls back to
+    # its bound model id if it has one, and only then to the decision.
+    model_served = served_model or getattr(provider, "model_id", None) or decision.model
 
     prompt_tokens, completion_tokens = _estimate_stream_tokens(gen_req, text)
     served_by = "remote" if decision.would_escalate else "local"
@@ -607,7 +780,7 @@ def _stream_sse(
         RequestRecord(
             task_class=decision.task_class,
             backend=provider.name,
-            model=decision.model,
+            model=model_served,
             served_by=served_by,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -624,12 +797,12 @@ def _stream_sse(
         ChatCompletionChunk(
             id=chunk_id,
             created=created,
-            model=decision.model,
+            model=model_served,
             choices=[base_choice(ChatChunkDelta(), finish=finish_reason)],
             hearth=HearthTelemetry(
                 served_by=served_by,
                 backend=provider.name,
-                model=decision.model,
+                model=model_served,
                 adapter=adapter,
                 escalated=decision.would_escalate,
                 estimated_frontier_tokens_saved=saved,

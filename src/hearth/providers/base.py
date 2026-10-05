@@ -76,10 +76,17 @@ class StreamDelta:
     :data:`FinishReason` and no text. Splitting them this way lets a streaming backend
     report truncation the same way :class:`GenResult` does, so the streaming and
     non-streaming paths cannot drift.
+
+    The terminal event may also carry ``model``: the id of the model that *actually*
+    generated the stream, as reported by the provider instance that ran it — the streaming
+    counterpart of :attr:`GenResult.model`. Telemetry reads it from here rather than from the
+    request, because the request names what was *asked for*, not what answered. ``None``
+    means the provider cannot tell.
     """
 
     text: str = ""
     finish_reason: FinishReason | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)

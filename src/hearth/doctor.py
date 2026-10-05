@@ -203,10 +203,24 @@ def _check_models(settings: Settings, policy, registry) -> tuple[list[Check], di
         return [Check(
             "models", True, f"backend={backend} serves the echo stub: no weights load", fatal=True
         )], {}
+    from .serving.pool import UnknownModelError, resolve_model_id
+
     checks, resolved = [], {}
     for model_id, roles in _models_to_check(settings, policy, registry).items():
         why = ", ".join(roles)
         entry = registry.get(model_id)
+        if any(role != "embedder" for role in roles):
+            # The mlx backend serves through ModelPool, which refuses an id that is not a
+            # registered chat model of its backend (echo, an embed model) — so such a rung is
+            # a 404 at request time even though the routing loader accepted it. Judge the
+            # rung by the pool's own resolver, not by "is it in the registry".
+            try:
+                resolve_model_id(registry, model_id, "mlx")
+            except UnknownModelError as exc:
+                checks.append(Check(
+                    f"model {model_id}", False, f"{why}: NOT servable — {exc}", fatal=True
+                ))
+                continue
         if entry is not None and entry.backend == "echo":
             checks.append(Check(f"model {model_id}", True, f"{why}: echo, no weights", fatal=True))
             continue

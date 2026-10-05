@@ -16,8 +16,10 @@ Design notes:
   * ``footprint().ram_gb`` is the sizing signal. A model larger than the whole ceiling is
     refused (:class:`ModelTooLargeError`) rather than silently evicting everything and
     still overflowing.
-  * **Thread-safe.** A single re-entrant lock guards residency state; loads happen under
-    the lock so two requests racing for the same cold model don't double-load or overflow.
+  * **Thread-safe.** A load lock serializes admissions, so two requests racing for the same
+    cold model don't double-load or overflow; a separate state lock guards the resident map
+    and is only ever held briefly, so readers (``/ready``, the admin view) never wait out a
+    multi-second model load.
   * **Graceful degradation.** A provider whose ``load()``/construction raises is not
     marked resident (its RAM is not counted), and the error propagates to the caller so
     the gateway can fall back — a failed load never corrupts the accounting.
@@ -73,7 +75,8 @@ class ModelManager:
         self.ram_ceiling_gb = ram_ceiling_gb
         # Insertion order == LRU order; move_to_end on access marks most-recently-used.
         self._resident: OrderedDict[str, Resident] = OrderedDict()
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # resident-map state; held briefly
+        self._load_lock = threading.RLock()  # serializes construct/evict/load/admit
 
     def get(self, model_id: str) -> ModelProvider:
         """Return a ready provider for ``model_id``, loading + evicting LRU as needed.
@@ -82,15 +85,36 @@ class ModelManager:
         constructed, ``load()``-ed, and admitted after evicting enough LRU residents to
         keep the total footprint within the ceiling.
         """
-        with self._lock:
-            resident = self._resident.get(model_id)
-            if resident is not None:
-                self._resident.move_to_end(model_id)
-                return resident.provider
+        hit = self._hit(model_id)
+        if hit is not None:
+            return hit
+        with self._load_lock:
+            hit = self._hit(model_id)  # another thread may have loaded it while we waited
+            if hit is not None:
+                return hit
             return self._load(model_id)
 
+    def _hit(self, model_id: str) -> ModelProvider | None:
+        with self._lock:
+            resident = self._resident.get(model_id)
+            if resident is None:
+                return None
+            self._resident.move_to_end(model_id)
+            return resident.provider
+
+    def peek(self, model_id: str) -> ModelProvider | None:
+        """The resident provider for ``model_id`` without loading or touching LRU order."""
+        with self._lock:
+            resident = self._resident.get(model_id)
+            return resident.provider if resident is not None else None
+
+    def residents(self) -> list[Resident]:
+        """Snapshot of resident entries in LRU→MRU order (oldest first)."""
+        with self._lock:
+            return list(self._resident.values())
+
     def _load(self, model_id: str) -> ModelProvider:
-        """Construct, load, and admit ``model_id`` (caller holds the lock)."""
+        """Construct, load, and admit ``model_id`` (caller holds the load lock)."""
         provider = self._factory(model_id)
         ram_gb = max(0.0, provider.footprint(model_id).ram_gb)
         if ram_gb > self.ram_ceiling_gb:
@@ -102,8 +126,9 @@ class ModelManager:
         load = getattr(provider, "load", None)
         if callable(load):
             load(model_id)
-        self._resident[model_id] = Resident(model_id, provider, ram_gb)
-        self._resident.move_to_end(model_id)
+        with self._lock:
+            self._resident[model_id] = Resident(model_id, provider, ram_gb)
+            self._resident.move_to_end(model_id)
         logger.info(
             "loaded %s (%.1f GB); resident=%.1f/%.1f GB",
             model_id,
@@ -119,8 +144,13 @@ class ModelManager:
         The incoming model is known to fit on its own (checked in :meth:`_load`), so this
         loop always terminates — worst case it empties the resident set.
         """
-        while self._resident and self.resident_ram_gb() + incoming_ram_gb > self.ram_ceiling_gb:
-            victim_id, victim = self._resident.popitem(last=False)  # LRU end
+        while True:
+            with self._lock:
+                if not self._resident or (
+                    self.resident_ram_gb() + incoming_ram_gb <= self.ram_ceiling_gb
+                ):
+                    return
+                victim_id, victim = self._resident.popitem(last=False)  # LRU end
             self._unload(victim)
             logger.info("evicted LRU model %s (%.1f GB)", victim_id, victim.ram_gb)
 
@@ -135,8 +165,9 @@ class ModelManager:
 
     def evict(self, model_id: str) -> bool:
         """Explicitly evict ``model_id`` if resident; return whether it was present."""
-        with self._lock:
-            resident = self._resident.pop(model_id, None)
+        with self._load_lock:
+            with self._lock:
+                resident = self._resident.pop(model_id, None)
             if resident is None:
                 return False
             self._unload(resident)

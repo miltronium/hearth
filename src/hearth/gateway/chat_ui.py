@@ -343,7 +343,11 @@ CHAT_UI_HTML: Final[str] = """<!doctype html>
     return fetch("/v1/models", { headers: headers() }).then(function (res) {
       return res.text().then(function (text) {
         if (!res.ok) { status("Could not list models: " + describe(res, text), true); return; }
-        var data = (JSON.parse(text) || {}).data || [];
+        // /v1/models lists only servable chat models; filter again so a gateway that
+        // lists embed models (an older HEARTH, another OpenAI server) never offers one.
+        var data = ((JSON.parse(text) || {}).data || []).filter(function (m) {
+          return !m.capabilities || m.capabilities.indexOf("chat") !== -1;
+        });
         sel.textContent = "";
         var auto = document.createElement("option");
         auto.value = "auto";
