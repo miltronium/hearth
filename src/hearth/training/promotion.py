@@ -1,0 +1,125 @@
+"""What an eval report must prove before ``hearth adapters promote --report`` acts on it (B-061).
+
+``adapters promote`` used to recompute the gate from a report's per-example vectors and
+never ask whether the report was *about this adapter*. A hand-written report promoted an
+id with no weights, no golden-set run and the wrong task. The signature
+(:mod:`hearth.training.attest`) proves the report came from ``hearth eval`` unedited; this
+module proves it is evidence for the promotion being asked for:
+
+* the candidate it measured is ``ADAPTER_ID`` — same id, task, base model and weights path;
+* the weights on disk now hash to what was measured (:func:`adapter_weights_sha`): retrained,
+  swapped or deleted weights are a different candidate;
+* the incumbent it beat is still the incumbent: the base model when nothing is promoted for
+  the task, else the promoted adapter, with the same weights. A report that beat the base
+  cannot displace an adapter promoted since.
+
+Each check compares the report with the *current* registry and filesystem — the outcome —
+rather than trusting a field the report asserts about itself.
+"""
+
+from __future__ import annotations
+
+from ..registry.adapters import AdapterEntry, AdapterError, AdapterStore, adapter_weights_sha
+from .eval import EvalReport
+
+REPORT_SCHEMA = "hearth.eval-report/2"
+
+
+def report_problems(
+    payload: dict,
+    *,
+    adapter_id: str,
+    entry: AdapterEntry,
+    store: AdapterStore,
+    candidate: EvalReport,
+    incumbent: EvalReport,
+) -> list[str]:
+    """Every way a (signature-verified) report fails to be evidence for promoting ``entry``.
+
+    Empty means the report measured this adapter, as it is on disk now, against the
+    incumbent that is still in place.
+    """
+    problems: list[str] = []
+    if payload.get("schema") != REPORT_SCHEMA:
+        problems.append(
+            f"report schema {payload.get('schema')!r} is not {REPORT_SCHEMA!r}: re-run "
+            "`hearth eval --report-json` with this version"
+        )
+        return problems
+
+    # -- the candidate is this adapter ---------------------------------------------------
+    if payload.get("candidate_id") != adapter_id:
+        problems.append(
+            f"report measured adapter {payload.get('candidate_id')!r}, not {adapter_id!r}"
+        )
+    if not entry.task or payload.get("task") != entry.task or candidate.task != entry.task:
+        problems.append(
+            f"report task {payload.get('task')!r} (candidate {candidate.task!r}) != "
+            f"{adapter_id!r}'s task {entry.task!r}"
+        )
+    if incumbent.task != candidate.task:
+        problems.append(f"incumbent task {incumbent.task!r} != candidate task {candidate.task!r}")
+    base = entry.base_model
+    if not base or payload.get("base_model") != base:
+        problems.append(
+            f"report base model {payload.get('base_model')!r} != {adapter_id!r}'s base_model "
+            f"{base!r}: an adapter is promoted on the base it serves on"
+        )
+    if candidate.model_id != f"{base}+{adapter_id}":
+        problems.append(
+            f"candidate report model_id {candidate.model_id!r} is not {base}+{adapter_id}"
+        )
+    if payload.get("adapter_path") != entry.adapter_path:
+        problems.append(
+            f"report adapter_path {payload.get('adapter_path')!r} != registered "
+            f"{entry.adapter_path!r}"
+        )
+    problems.extend(
+        _weights_problems(entry, payload.get("candidate_weights_sha"), role="candidate")
+    )
+    if payload.get("measured_at") != candidate.measured_at or not candidate.measured_at:
+        problems.append("report measured_at is missing or disagrees with the candidate report")
+
+    # -- the incumbent is still the incumbent ----------------------------------------------
+    current = store.promoted_for(entry.task)
+    role = payload.get("incumbent_role")
+    incumbent_id = payload.get("incumbent_id")
+    if current is not None and current.id != adapter_id:
+        if role != "incumbent" or incumbent_id != current.id:
+            problems.append(
+                f"report compared against {role} {incumbent_id!r}, but {current.id!r} is the "
+                f"promoted adapter for {entry.task!r} now: re-run `hearth eval` against it"
+            )
+        else:
+            problems.extend(
+                _weights_problems(current, payload.get("incumbent_weights_sha"), role="incumbent")
+            )
+        expected_model = f"{base}+{current.id}"
+    else:
+        if role != "base" or incumbent_id != base:
+            problems.append(
+                f"report compared against {role} {incumbent_id!r}, but nothing else is "
+                f"promoted for {entry.task!r}: the incumbent is the base model {base!r}"
+            )
+        expected_model = base
+    if incumbent.model_id != expected_model:
+        problems.append(
+            f"incumbent report model_id {incumbent.model_id!r} is not {expected_model!r}"
+        )
+    return problems
+
+
+def _weights_problems(entry: AdapterEntry, recorded: object, *, role: str) -> list[str]:
+    try:
+        now = adapter_weights_sha(entry.adapter_path)
+    except AdapterError as exc:
+        return [f"{role} {entry.id!r}: {exc}"]
+    if not isinstance(recorded, str) or recorded != now:
+        return [
+            f"{role} {entry.id!r} weights changed since the measurement (measured "
+            f"{str(recorded)[:12] or '<none>'}, on disk now {now[:12]})"
+        ]
+    return []
+
+
+__all__ = ["REPORT_SCHEMA", "report_problems"]

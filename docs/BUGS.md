@@ -105,8 +105,8 @@ must fail when the fix is reverted.
 - ~~[B-060](#b-060) An unknown `hearth.intent` / `--intent` is silently ignored (P3)~~ — fixed in `3951d2e`
 
 **Added 2026-10-05 (adversarial review of the day's merges)**
-- [B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)
-- [B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)
+- ~~[B-061](#b-061) `hearth adapters promote --report` accepts a hand-written report: nothing ties it to the a… (P0)~~ — fixed in `13038c5`
+- ~~[B-062](#b-062) Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 … (P0)~~ — fixed in `a731e8c`
 - [B-063](#b-063) `hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerles… (P0)
 - [B-064](#b-064) `/ready` judges only the registry default; under a routing ladder the default may never se… (P1)
 - [B-065](#b-065) Routing validation gaps: `defaults.local_model` is never validated; a class rung may name … (P1)
@@ -114,7 +114,7 @@ must fail when the fix is reverted.
 - [B-067](#b-067) `doctor --offline` says SAFE with a plugin embedder or vector store, which receive every R… (P1)
 - [B-068](#b-068) The auto→echo fallback stub labels its echo with the requested real model and credits toke… (P2)
 - [B-069](#b-069) LoRA adapter variants are full base reloads the ModelManager never counts (P2)
-- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2)
+- [B-070](#b-070) B-047 enforced at CLI call sites, not where the model is chosen (P2) — eval half fixed in `58890fa`; serving side open
 - [B-071](#b-071) An abandoned agent run keeps the single MLX thread busy for up to its budget (P2)
 - [B-072](#b-072) ModelManager evicts residents before knowing the new load will succeed (P3)
 - [B-073](#b-073) Low: finance ladder example resolves HEARTH_ROUTING_YAML itself and silently falls back; c… (P3)
@@ -1093,14 +1093,37 @@ must fail when the fix is reverted.
 ### B-061
 **`hearth adapters promote --report` accepts a hand-written report: nothing ties it to the adapter, and a prereg committed seconds earlier in any repo passes**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `13038c5` · **Effort:** S–M
 - **Evidence:** cli.py adapters promote (~1875-1990) recomputes the gate from the report's per_example vectors but never checks the report's candidate/task against ADAPTER_ID's entry; prereg.py verify_committed (~209) accepts any repo and records rev-parse HEAD, not the introducing commit. Reviewer repro promoted `bogus-ad` (no golden set, no model run, task mismatch, adapter_path=/nonexistent) → `gate: verified`. Mutations deleting the mismatches/verify_committed checks in this command fail 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Fix:** `hearth eval --report-json` HMAC-signs the report with a per-install key
+  (`HEARTH_HOME/eval-report.key`, 0600, `training/attest.py`); `adapters promote` verifies it
+  first. The report records candidate id, task, base model, adapter path, a SHA-256 of the
+  adapter weights (hashed before scoring; `eval` refuses an adapter with no weights), the
+  incumbent and its weights hash, `measured_at` and the golden set's git status;
+  `training/promotion.report_problems` checks each against the registry and disk now
+  (incl. "the incumbent is still the incumbent"). Both promotion paths require the prereg's
+  last-changing commit to be no later than the measurement, in the git repo holding the
+  committed golden set (`prereg.check_provenance`); the proof records that commit (not
+  HEAD), its time, the introducing commit, the weights hash and the report sha.
+  Residual: a user who reads the key can forge a MAC (they can also edit `adapters.json`);
+  committer timestamps are settable, so a deliberate backdate is not caught.
+- **Verified:** the reviewer repro → `Unusable eval report: no report-signing key`, exit 1,
+  still a candidate. `tests/test_promotion_evidence.py` (31 attacks) promoted on the pre-fix
+  tree; every guard mutation-killed.
 
 ### B-062
 **Prereg `bar` is not range-checked: NaN alpha/min_effect or alpha=1, min_effect<0, min_n=1 disables every gate clause**
 
-- **Priority:** P0 · **Status:** open · **Effort:** S–M
+- **Priority:** P0 · **Status:** **FIXED** in `a731e8c` · **Effort:** S–M
 - **Evidence:** prereg.py (~198-201); eval.py comparisons (~513, 549, 557) are False under NaN; negative margin makes the baseline clause vacuous. Reviewer: a candidate at 0.033 vs base 1.0 PASSES with reasons=() — defeats B-045, the n≥5 floor and min_n=30 (CLAUDE.md §7). Works through `hearth eval --promote` too. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Fix:** `load_prereg` refuses (no coercion) a non-finite number, `alpha` outside
+  (0, 0.05], `min_effect` < 0, `min_n` not an integer ≥ 30, an unknown `test`.
+  `evaluate_gate` re-checks the bar (`check_bar`; its min_n floor is `min_n_for_alpha`, 5 at
+  0.05), refuses a report with a non-finite/out-of-range score, a `score` that is not the
+  mean of its vector, or a baseline from another golden set, and writes every comparison
+  so a NaN adds a refusal. `prereg init` will not scaffold a bar `load_prereg` refuses.
+- **Verified:** `/tmp/hr/nan.py` → both bars now raise `PreRegError`; 50 new tests failed
+  on the pre-fix code; every guard mutation-killed; the replay test still refuses.
 
 ### B-063
 **`hearth_peek.py` still prints cell values: a full-width all-text preamble row, a headerless all-text file, or JSON keys that are values pass `_looks_like_label`**
@@ -1156,8 +1179,16 @@ must fail when the fix is reverted.
 ### B-070
 **B-047 enforced at CLI call sites, not where the model is chosen**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** open (serving side); eval half **FIXED** in `58890fa` · **Effort:** S–M
 - **Evidence:** mlx_pool().resolve("") with a bogus HEARTH_DEFAULT_MODEL → catalog default (warning only). Not gated: `hearth eval`, example scripts, direct API users; a mutation deleting eval's `_require_known_model` fails 0 tests. (adversarial review 2026-10-05, 13b1438..69aa06e.)
+- **Eval half (fixed):** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL
+  (`require_default`), on an empty/`auto` base model, and on a base the registry cannot
+  serve for any provider (not only a ModelPool); mutations deleting each check now fail
+  tests (`tests/test_cli_eval.py`).
+- **Remains:** the enforcement is still at a CLI call site. `mlx_pool().resolve("")` (and so
+  direct API users and `examples/` scripts) still falls back to the catalog default with a
+  warning when HEARTH_DEFAULT_MODEL is unregistered; moving `require_default` into the pool
+  / `select_provider` is the serving-side fix.
 
 ### B-071
 **An abandoned agent run keeps the single MLX thread busy for up to its budget**
@@ -1244,3 +1275,6 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `a4ad61c` | **B-063.** `hearth_peek.py` prints only allowlisted column names, counts, type guesses and file ids; no heuristic, no file names; property-tested. |
 | `74e5943` | **B-067.** `doctor --offline` FAILs a plugin (or unresolvable) embedder / vector store, judged on the type the real selector returns. |
 | `d4eb825` | **B-073 (2 of 3).** Finance example uses the shared routing resolver and exits on a missing profile; `embed_model` default is the registered `-bf16` id. |
+| `a731e8c` | **B-062.** Prereg bar range-checked at load (finite; alpha ∈ (0, 0.05]; min_effect ≥ 0; min_n ≥ 30; known test); `evaluate_gate` re-checks it and fails closed on non-finite input. |
+| `13038c5` | **B-061.** `adapters promote --report` needs an HMAC-signed report from `hearth eval` on this install, about this adapter (id, task, base, weights hash, incumbent), with a prereg committed before the measurement in the golden set's repo. |
+| `58890fa` | **B-070 (eval half).** `hearth eval` exits 2 on an unregistered HEARTH_DEFAULT_MODEL or an empty/`auto`/unservable base; serving side still open. |

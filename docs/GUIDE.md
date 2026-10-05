@@ -1127,7 +1127,8 @@ uv run --no-sync hearth adapters retire <adapter-id>
 
 *(`prereg init/check`, `eval` without `--promote`, `eval --promote` without a prereg,
 `adapters list/retire/promote` were run on echo with a synthetic 6-row golden set and a fake
-registered adapter.)*
+registered adapter, before B-061; `eval` now also needs the adapter's weights on disk and a
+registered base model.)*
 
 **Datasets and `hearth train`.**
 
@@ -1179,28 +1180,46 @@ gate: FAIL n=6 alpha=0.05 mcnemar_exact p=1.0000 (b=0, c=0)
 
 Without `--promote`, `eval` **exits 0 once it has measured, even when the gate FAILs**: read
 the `gate:` line, not the exit code. It exits 1 when it refuses to measure (unknown adapter,
-bad golden set or prereg, `--temperature` above 0 without `--allow-sampling`). With
-`--promote`, it exits 0 only if the adapter was promoted.
+adapter weights missing on disk, bad golden set or prereg, a bar looser than the gate allows,
+`--temperature` above 0 without `--allow-sampling`), and 2 when `HEARTH_DEFAULT_MODEL` names
+an unregistered model or the adapter's base model is empty, `auto` or not servable — it never
+measures on a silent fallback model (B-070). With `--promote`, it exits 0 only if the adapter
+was promoted.
 
 **The promotion gate** (CLAUDE.md §7). You cannot promote an adapter on a score you typed.
 `hearth eval --promote` requires all of the following:
 
 - a `--prereg` that is **git-committed and unmodified** (without one: `Promotion refused:
-  --promote requires --prereg. …`, exit 1);
+  --promote requires --prereg. …`, exit 1), whose last commit is **no later than the start
+  of the measurement**, and which lives in the **same git repository as the golden set**,
+  with the golden set committed and unmodified there (B-061);
+- a bar no looser than the defaults: α in (0, 0.05], `min_effect` ≥ 0, `min_n` ≥ 30, a
+  known `test`, every number finite (B-062: a NaN or α = 1 used to disable the gate);
 - evaluation at **temperature 0** (`--temperature > 0` is refused unless `--allow-sampling`,
   and then it cannot gate);
 - an **incumbent**: the promoted adapter for the task, or the **base model** when none is
   promoted;
 - **significance over paired per-example vectors** (exact McNemar or paired bootstrap) at the
   prereg's α;
-- beating the **empty / majority-label / copy-input** baselines.
+- beating the **empty / majority-label / copy-input** baselines;
+- the adapter's base model as registered (not a `--base` override), and weights that hash the
+  same when promoted as when scored.
 
 **n ≥ 5 is the mathematical floor** at α = 0.05, because the smallest achievable p is 0.5ⁿ.
-The default `min_n = 30` is a power floor above that. The repo's golden sets are n = 5 and
-n = 6, below that floor (B-010). `hearth adapters promote` requires `--report` (from
-`hearth eval --report-json`) and `--prereg`, and recomputes the gate itself; the removed
-`--candidate-score/--incumbent-score` flags exit 2. Background:
-[docs/LEARNING_plan.md](LEARNING_plan.md).
+The default `min_n = 30` is a power floor above that; a prereg may raise it, never lower it.
+The repo's golden sets are n = 5 and n = 6, below that floor (B-010).
+
+`hearth adapters promote` requires `--report` and `--prereg`. The report must be one
+`hearth eval --report-json` wrote **on this install**: it is HMAC-signed with
+`~/.hearth/eval-report.key` (created 0600 on first use), and an unsigned, edited or
+other-install report is refused (`Unusable eval report: …`). It must also be about this
+adapter — same id, task, base model and weights path, weights that still hash to what was
+measured — and the incumbent it beat must still be the incumbent; then the gate is recomputed
+from its vectors and the prereg's provenance re-checked as above. The proof records the
+commit that last changed the prereg (not HEAD), the weights hash and the report sha. The
+removed `--candidate-score/--incumbent-score` flags exit 2. *(These paths run in CI on a fake
+provider — `tests/test_promotion_evidence.py`, `tests/test_cli_eval.py`; a promotion with
+real scores was not run.)* Background: [docs/LEARNING_plan.md](LEARNING_plan.md).
 
 ---
 
