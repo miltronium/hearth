@@ -253,3 +253,51 @@ def test_F_eval_promote_refuses_an_incumbent_retrained_while_it_was_scored(world
     assert result.exit_code == 1, _flat(result)
     assert "incumbent 'extract-0''s weights changed during the eval" in _flat(result)
     assert world.status() == "candidate"
+
+
+# -- L5: the incumbent is scored on its own base (B-085) ---------------------------------
+
+OTHER_BASE = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"  # registered in models.yaml
+
+
+def test_L5_the_incumbent_adapter_is_scored_on_its_own_base(world, monkeypatch):
+    world.adapter("extract-0", base=OTHER_BASE)
+    world.store.promote("extract-0", gate_passed=True)
+    world.registered()
+    seen = []
+
+    class _Recording(pe._Provider):
+        def generate(self, req):
+            seen.append((req.adapter and req.adapter.rsplit("/", 1)[-1], req.model))
+            return super().generate(req)
+
+    monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _Recording())
+    payload = world.eval_report()
+    assert {m for a, m in seen if a == "extract-0"} == {OTHER_BASE}
+    assert {m for a, m in seen if a == "extract-1"} == {pe.BASE}
+    assert payload["incumbent"]["model_id"] == f"{OTHER_BASE}+extract-0"
+    assert payload["incumbent_base_model"] == OTHER_BASE
+    result = world.promote()
+    assert result.exit_code == 0, _flat(result)
+    assert world.store.get("extract-0").status == "retired"
+
+
+def test_L5_a_report_that_scored_the_incumbent_on_the_candidate_base_is_refused(world):
+    world.adapter("extract-0", base=OTHER_BASE)
+    world.store.promote("extract-0", gate_passed=True)
+    world.registered()
+    payload = world.eval_report()
+    del payload["signature"]
+    payload["incumbent"]["model_id"] = f"{pe.BASE}+extract-0"  # the old, wrong configuration
+    world.write_report(payload, resign=True)
+    result = world.promote()
+    assert result.exit_code == 1 and "incumbent report model_id" in _flat(result)
+    assert world.status() == "candidate"
+
+
+@pytest.mark.parametrize("base", ["auto", "not-a/registered-model"])
+def test_L5_an_incumbent_with_no_servable_base_is_not_measured(world, base):
+    world.adapter("extract-0", base=base)
+    world.store.promote("extract-0", gate_passed=True)
+    result = world.eval("extract-1")
+    assert result.exit_code == 2, _flat(result)

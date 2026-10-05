@@ -94,7 +94,8 @@ def report_problems(
             problems.extend(
                 _weights_problems(current, payload.get("incumbent_weights_sha"), role="incumbent")
             )
-        expected_model = f"{base}+{current.id}"
+        # The incumbent serves on ITS base, so that is where it must have been scored (B-085).
+        expected_model = f"{current.base_model}+{current.id}"
     else:
         if role != "base" or incumbent_id != base:
             problems.append(

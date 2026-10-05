@@ -1596,7 +1596,7 @@ def eval_adapter(
     # requires them to be the committed blob, in the prereg's repository (check_provenance).
     golden_git = golden_git_status(golden, data=golden_bytes)
 
-    def _generate_with(adapter_path: str | None):
+    def _generate_with(adapter_path: str | None, model: str | None = None):
         def _gen(prompt: str) -> str:
             messages = []
             if system:
@@ -1604,7 +1604,7 @@ def eval_adapter(
             messages.append(Message(role="user", content=prompt))
             req = GenRequest(
                 messages=messages,
-                model=base_model,
+                model=model or base_model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 adapter=adapter_path,
@@ -1613,10 +1613,10 @@ def eval_adapter(
 
         return _gen
 
-    def _score(adapter_path: str | None, model_id: str):
+    def _score(adapter_path: str | None, model_id: str, model: str | None = None):
         return score_candidate(
             golden_set,
-            _generate_with(adapter_path),
+            _generate_with(adapter_path, model),
             metric=metric,
             model_id=model_id,
             config=config,
@@ -1643,16 +1643,29 @@ def eval_adapter(
     incumbent_entry = store.promoted_for(entry.task)
     incumbent_weights = ""
     incumbent_path: str | None = None
+    incumbent_base = base_model
     if incumbent_entry is not None and incumbent_entry.id != adapter_id:
         incumbent_id = incumbent_entry.id
         incumbent_role = "incumbent"
+        # The incumbent is scored as it SERVES: its adapter on ITS registered base (B-085).
+        # Loading it onto the candidate's base measured a configuration that never serves
+        # (and, across architectures, one whose LoRA shapes do not even fit).
+        incumbent_base = (incumbent_entry.base_model or "").strip()
+        if incumbent_base in AUTO_MODEL_IDS:
+            console.print(
+                f"[red]Refusing to measure the incumbent {incumbent_id!r}:[/red] it records no "
+                f"concrete base model (base_model={incumbent_entry.base_model!r})."
+            )
+            raise typer.Exit(code=2)
+        _require_known_model(provider, incumbent_base)
         incumbent_path = store.resolve_path(incumbent_id)
         try:
             incumbent_weights = adapter_weights_sha(incumbent_path)
         except AdapterError as exc:
             console.print(f"[red]Refusing to measure the incumbent {incumbent_id!r}:[/red] {exc}")
             raise typer.Exit(code=1) from None
-        incumbent = _score(incumbent_path, f"{base_model}+{incumbent_id}")
+        incumbent = _score(incumbent_path, f"{incumbent_base}+{incumbent_id}",
+                           model=incumbent_base)
     else:
         incumbent_id = base_model
         incumbent_role = "base"
@@ -1743,6 +1756,8 @@ def eval_adapter(
             "incumbent_role": incumbent_role,
             "incumbent_id": incumbent_id,
             "incumbent_weights_sha": incumbent_weights,
+            "incumbent_base_model": incumbent_base,
+
             "baselines": {k: v.to_json() for k, v in baselines.items()},
             "gate": gate.as_proof(),
         }
