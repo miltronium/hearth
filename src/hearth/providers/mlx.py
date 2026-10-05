@@ -366,6 +366,19 @@ class MLXProvider:
             )
         run_on_mlx_thread(self._load_variant, None)
 
+    def preflight(self, model_id: str | None = None) -> None:
+        """Raise if a load of the base weights cannot start — WITHOUT loading anything.
+
+        Resolves the weights exactly as :meth:`_load_variant` will (disk only unless
+        downloads are opted in), so :class:`ModelNotOnDiskError` surfaces here, before the
+        :class:`~hearth.serving.ModelManager` evicts any resident to make room (B-072).
+        """
+        if model_id is not None and model_id != self.model_id:
+            raise ModelMismatchError(
+                f"provider for {self.model_id!r} was asked to preflight {model_id!r}"
+            )
+        resolve_local_model(self.model_id)
+
     def unload(self, model_id: str | None = None) -> None:
         """Drop every cached variant and return the memory to the allocator (MLX thread)."""
         run_on_mlx_thread(self._unload_here)

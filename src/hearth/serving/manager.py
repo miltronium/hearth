@@ -23,6 +23,12 @@ Design notes:
   * **Graceful degradation.** A provider whose ``load()``/construction raises is not
     marked resident (its RAM is not counted), and the error propagates to the caller so
     the gateway can fall back — a failed load never corrupts the accounting.
+  * **No eviction for a load that cannot start.** The ceiling check and the provider's
+    ``preflight`` (weights resolve on disk, for MLX) run before any resident is evicted, so
+    a missing model leaves the residents intact (B-072). A load that passes preflight and
+    then fails (a corrupt checkpoint) has already freed its victims: restoring them would
+    mean overshooting the ceiling on every load or another multi-GB reload that can fail
+    too. They stay ``loaded_once`` with weights on disk, so they reload on demand.
 """
 
 from __future__ import annotations
@@ -142,6 +148,14 @@ class ModelManager:
             raise ModelTooLargeError(
                 f"{model_id} needs {ram_gb} GB > ceiling {self.ram_ceiling_gb} GB"
             )
+        # Nothing is evicted until the load is known to be able to start (B-072). A
+        # provider's ``preflight`` checks what it can without loading (MLX: the weights
+        # resolve on disk); it raises on a load that cannot work, leaving every resident in
+        # place. A request for a registered-but-never-pulled model used to unload a working
+        # 14B first and fail second.
+        preflight = getattr(provider, "preflight", None)
+        if callable(preflight):
+            preflight(model_id)
         self._evict_until_fits(ram_gb)
         # Load only after we've made room, so a heavy load doesn't briefly overshoot.
         load = getattr(provider, "load", None)
