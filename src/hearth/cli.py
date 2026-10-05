@@ -978,9 +978,19 @@ def train(
     except AdapterError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
+    # A candidate serves only once it passes the eval gate (CLAUDE.md §7). Name the commands
+    # that can promote it, with the evidence each one requires — `adapters promote` alone
+    # refuses without --report and --prereg (B-046).
     console.print(
-        f"Registered candidate [cyan]{adapter_id}[/cyan]. "
-        "Eval it, then [bold]hearth adapters promote[/bold] to serve it."
+        f"Registered candidate [cyan]{adapter_id}[/cyan]. It is not served until it passes "
+        "the eval gate:\n"
+        f"  [bold]hearth eval {adapter_id} --golden <set> --prereg <committed prereg> "
+        "--promote[/bold]\n"
+        f"  or: hearth eval {adapter_id} --golden <set> --prereg <committed prereg> "
+        "--report-json <file>,\n"
+        f"      then hearth adapters promote {adapter_id} --report <file> "
+        "--prereg <committed prereg>",
+        highlight=False,
     )
 
 

@@ -51,6 +51,45 @@ def test_train_reports_dataset_error_cleanly(tmp_path):
     assert "Dataset error" in result.stdout
 
 
+def test_train_success_points_at_a_promotion_path_that_can_work(tmp_path, monkeypatch):
+    """B-046: the post-train message said "Eval it, then `hearth adapters promote`", but
+    `adapters promote` refuses without --report and --prereg. Every promotion command the
+    message names must carry the evidence that command requires."""
+    import hearth.training as training
+    from hearth.training.lora import TrainOutcome
+
+    data = tmp_path / "data.jsonl"
+    data.write_text(
+        '{"kind": "hearth.dataset.header", "schema_version": 1, "task": "extract"}\n'
+        '{"prompt": "p1", "completion": "c1"}\n{"prompt": "p2", "completion": "c2"}\n'
+    )
+
+    def fake_train(config, train_run_id=""):  # no MLX, no model, no subprocess
+        return TrainOutcome(train_run_id, config.base_model, config.task,
+                            tmp_path / "run" / "adapters", [], len(config.dataset))
+
+    monkeypatch.setattr(training, "train", fake_train)
+    result = runner.invoke(
+        app,
+        ["train", "--task", "extract", "--base", "org/base", "--data", str(data),
+         "--out", str(tmp_path / "run")],
+        env=_env(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    lines = [ln.strip() for ln in result.stdout.splitlines()]
+    registered = next(ln for ln in lines if ln.startswith("Registered candidate"))
+    adapter_id = registered.split()[2].rstrip(".")
+    one_step = [ln for ln in lines if "--promote" in ln]
+    assert one_step and all(
+        f"hearth eval {adapter_id}" in ln and "--prereg" in ln and "--golden" in ln
+        for ln in one_step
+    ), result.stdout
+    promote = [ln for ln in lines if "adapters promote" in ln]
+    assert promote and all("--report" in ln and "--prereg" in ln for ln in promote), (
+        result.stdout
+    )
+
+
 def test_adapters_list_renders(tmp_path):
     _seed_adapter(tmp_path)
     result = runner.invoke(app, ["adapters", "list"], env=_env(tmp_path))
