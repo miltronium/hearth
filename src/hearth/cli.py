@@ -19,6 +19,7 @@ Phase 0/1 commands:
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -256,12 +257,14 @@ def serve(
 
     bind_host = host or settings.host
     bind_port = port or settings.port
+    with _routing_profile_required():
+        gateway = create_app(provider=provider, settings=settings)
     console.print(
         f"[bold]HEARTH[/bold] {__version__} — backend=[cyan]{provider.name}[/cyan] "
         f"model=[cyan]{get_registry().default_id}[/cyan]"
     )
     console.print(f"Serving on http://{bind_host}:{bind_port}  (OpenAI-compatible /v1)")
-    uvicorn.run(create_app(provider=provider, settings=settings), host=bind_host, port=bind_port)
+    uvicorn.run(gateway, host=bind_host, port=bind_port)
 
 
 def _log_hearth_to_stderr() -> None:
@@ -315,7 +318,8 @@ def run(
     # that consumes it arrives in Phase 2. Surface it so `--intent` is observably wired.
     if intent:
         console.print(f"[dim]intent={intent}[/dim]")
-    router = Router(local_provider=provider)
+    with _routing_profile_required():
+        router = Router(local_provider=provider)
     routed = router.route(
         GenRequest(
             messages=[Message(role="user", content=text)],
@@ -347,6 +351,25 @@ def _require_known_model(provider, model: str) -> None:
         check_model(provider, get_registry(), model)
     except UnknownModelError as exc:
         console.print(f"[red]Unknown model:[/red] {exc}", markup=True, highlight=False)
+        raise typer.Exit(code=2) from None
+
+
+@contextmanager
+def _routing_profile_required():
+    """Exit 2 with the router's own message when the selected routing profile is missing.
+
+    Wraps the code that actually builds the router (``Router()`` -> ``get_policy()``), so
+    the error caught is the one the router raised, not a re-derivation of it (B-033: it used
+    to surface as a full traceback before the one line that says how to fix it).
+    """
+    from rich.markup import escape
+
+    from .router.policy import RoutingProfileNotFoundError
+
+    try:
+        yield
+    except RoutingProfileNotFoundError as exc:
+        console.print(f"[red]Routing profile not found:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from None
 
 
@@ -498,7 +521,9 @@ def agent(
         # `vetted_only` is left at its default of True and is not plumbed to a flag; see the
         # docstring. The router is entered with allow_escalation=False by the loop itself,
         # which then verifies the executed route actually reported the local backend.
-        runner = Agent(Router(local_provider=provider), tools, budget=budget, model=model_id)
+        with _routing_profile_required():
+            router = Router(local_provider=provider)
+        runner = Agent(router, tools, budget=budget, model=model_id)
     except AgentConfigError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from None
@@ -557,7 +582,8 @@ def mcp() -> None:
     try:
         from .mcp import server
 
-        server.run()
+        with _routing_profile_required():
+            server.run()
     except ModuleNotFoundError as exc:
         # The `mcp` SDK is an optional extra (server.py imports it lazily at run time, so
         # the failure surfaces here rather than at import). Fail loudly with the fix instead
@@ -827,7 +853,8 @@ def rag_query(
     from .memory import RagIndex
 
     provider = select_provider(get_settings())
-    index = RagIndex(router=Router(local_provider=provider))
+    with _routing_profile_required():
+        index = RagIndex(router=Router(local_provider=provider))
     result = index.query(collection, query, k=k, answer=answer)
 
     if not result.chunks:
