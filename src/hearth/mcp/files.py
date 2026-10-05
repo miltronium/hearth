@@ -53,6 +53,8 @@ import io
 import json
 import logging
 import stat
+import threading
+import warnings
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time
 from itertools import zip_longest
@@ -202,7 +204,8 @@ def read_text_file(path: str | Path, settings: Settings | None = None) -> str:
     appears in the message.
     """
     reader, data, requested = _gated_bytes(path, settings, _READERS, "read")
-    return reader(data, requested)
+    with _quiet_parse():
+        return reader(data, requested)
 
 
 def read_table(path: str | Path, settings: Settings | None = None) -> list[list[str]]:
@@ -221,7 +224,8 @@ def read_table(path: str | Path, settings: Settings | None = None) -> list[list[
     that means.
     """
     reader, data, requested = _gated_bytes(path, settings, _TABLE_READERS, "read as a table")
-    return reader(data, requested)
+    with _quiet_parse():
+        return reader(data, requested)
 
 
 # -- format handlers ------------------------------------------------------------------
@@ -296,6 +300,46 @@ def _silenced(logger_name: str):
     finally:
         logger.setLevel(previous)
         logger.propagate = previously_propagated
+
+
+#: The third-party loggers a parser can write through. pypdf logs under ``pypdf.*`` (its
+#: ``logger_warning`` uses each module's ``__name__``); openpyxl is listed for completeness.
+_PARSER_LOGGERS = ("pypdf", "openpyxl")
+
+# Serializes _quiet_parse: it swaps process-global state (warning filters, sys.stdout,
+# sys.stderr). Two overlapping, unserialized swaps can restore in the wrong order and leave
+# the sink installed as the real stdout for good.
+_QUIET_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _quiet_parse():
+    """Close every side channel a parser can write file content through, for one parse.
+
+    The exception path is already closed (refusals never quote the file), and a logger is not
+    the only other way out. openpyxl reports odd workbook metadata with ``warnings.warn``,
+    quoting it: a custom document property of an unknown type prints
+    ``UserWarning: Unknown type for <the property's name>`` to stderr (``packaging/custom.py``),
+    and that name is whatever the author typed - a holder's name, an SSN (B-090). A print-area
+    defined name is quoted the same way (``reader/workbook.py``), and one openpyxl path
+    ``print()``s a style index straight to stdout (``styles/cell_style.py``). On an MCP stdio
+    server, stdout is the protocol channel itself.
+
+    So for the duration of the parse: every warning is ignored, the parser loggers are
+    silenced, and ``sys.stdout``/``sys.stderr`` point at a discarded buffer. Applied in
+    :func:`read_text_file` and :func:`read_table` around the handler, so it covers every format
+    (CSV and JSON too) and every lazy read openpyxl does while the sheets are iterated. The
+    cost: a line another thread prints during the parse is dropped, not shown - dropped is the
+    safe failure, and the lock keeps the swaps themselves from interleaving.
+    """
+    with _QUIET_LOCK, warnings.catch_warnings(), contextlib.ExitStack() as stack:
+        warnings.simplefilter("ignore")
+        for name in _PARSER_LOGGERS:
+            stack.enter_context(_silenced(name))
+        sink = io.StringIO()
+        stack.enter_context(contextlib.redirect_stdout(sink))
+        stack.enter_context(contextlib.redirect_stderr(sink))
+        yield
 
 
 def _read_pdf(data: bytes, requested: str) -> str:

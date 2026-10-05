@@ -24,7 +24,9 @@ import json
 import random
 import re
 import string
+import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,14 @@ from hearth.mcp.files import read_table
 
 REPO = Path(__file__).resolve().parent.parent
 _SCRIPT = REPO / "scripts" / "hearth_map_draft.py"
+
+_HOSTILE_SPEC = importlib.util.spec_from_file_location(
+    "hostile_statements", REPO / "tests" / "fixtures" / "hostile_statements.py"
+)
+hostile = importlib.util.module_from_spec(_HOSTILE_SPEC)
+_HOSTILE_SPEC.loader.exec_module(hostile)
+#: Strings planted in workbook metadata; none may reach stdout or stderr.
+META_SECRETS = ("Jane", "Public", "HOLDER", "SSN", "123-45", "6789", "987654321", "JANE_Q")
 
 if "hearth_map_draft" in sys.modules:
     md = sys.modules["hearth_map_draft"]
@@ -66,11 +76,22 @@ def _fresh_settings():
 
 
 def _run(root: Path, capsys, monkeypatch, *extra: str) -> tuple[int, str]:
+    """Run the real main() and return (exit code, stdout); stderr and warnings must be empty.
+
+    Warnings are recorded with every filter forced to "always": pytest's own capture would
+    otherwise swallow a ``warnings.warn`` that quotes file metadata (B-090), and the run would
+    look clean here while printing it on a real terminal.
+    """
     monkeypatch.setenv("HEARTH_FILE_ROOTS", str(root))
     get_settings.cache_clear()
     out_dir = root.parent / f"{root.name}-mappings"
-    code = md.main([str(root), "--out", str(out_dir), *extra])
-    return code, capsys.readouterr().out
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        code = md.main([str(root), "--out", str(out_dir), *extra])
+    captured = capsys.readouterr()
+    assert captured.err == "", f"stderr is not empty:\n{captured.err}"
+    assert [str(w.message) for w in seen] == [], "a warning was emitted during the run"
+    return code, captured.out
 
 
 class FakeModel:
@@ -245,6 +266,40 @@ def test_index_out_maps_ids_to_paths_locally_and_prints_none_of_it(
     lines = index.read_text(encoding="utf-8").splitlines()
     assert lines[0] == f"F1\t{root / PREAMBLE_FILE}"
     assert lines[1] == f"D1\t{tmp_path / 'in-mappings' / 'format-1.yaml'}"
+
+
+# -- B-090: workbook metadata on stderr --------------------------------------------------------
+
+
+def test_workbook_metadata_reaches_neither_stdout_nor_stderr_in_a_real_process(tmp_path):
+    """Run as the operator runs it. In-process, pytest owns stderr and the warnings filters
+    and either can hide a leak; a subprocess's stderr is exactly what reaches a terminal.
+    Before B-090 this printed ``UserWarning: Unknown type for HOLDER Jane Q Public SSN
+    123-45-6789``."""
+    pytest.importorskip("openpyxl")
+    root = tmp_path / "in"
+    root.mkdir()
+    (root / "statement.xlsx").write_bytes(hostile.xlsx_with_metadata())
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HEARTH_FILE_ROOTS": str(root),
+           "HEARTH_HOME": str(tmp_path / ".hearth"), "PYTHONWARNINGS": "always"}
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), str(root), "--no-model", "--out", str(tmp_path / "m")],
+        capture_output=True, text=True, env=env, timeout=120, check=False,
+    )
+    assert proc.stderr == "", f"stderr:\n{proc.stderr}"
+    for secret in META_SECRETS + ("SECRETMERCHANT", "12.50"):
+        assert secret not in proc.stdout, f"{secret!r} printed:\n{proc.stdout}"
+    assert "[0] Date" in proc.stdout
+
+
+def test_workbook_metadata_is_not_printed_in_process_either(tmp_path, capsys, monkeypatch):
+    pytest.importorskip("openpyxl")
+    root = tmp_path / "in"
+    root.mkdir()
+    (root / "statement.xlsx").write_bytes(hostile.xlsx_with_metadata())
+    _code, out = _run(root, capsys, monkeypatch, "--no-model")  # asserts stderr/warnings empty
+    for secret in META_SECRETS:
+        assert secret not in out
 
 
 # -- the model path: it may SEE what it needs; nothing it returns prints raw -------------------
@@ -453,7 +508,12 @@ def test_property_no_random_text_or_digit_run_reaches_stdout(
             folder = root / f"{dir_word}_{rng.randint(100, 99999)}"
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{file_word}_{rng.randint(100, 10**10)}.csv"
-            path.write_text(_csv(rows), encoding="utf-8")
+            if rng.random() < 0.2:  # a workbook whose metadata also carries secrets
+                path = path.with_suffix(".xlsx")
+                path.write_bytes(hostile.xlsx_with_metadata(rows))
+                all_secrets += list(META_SECRETS)
+            else:
+                path.write_text(_csv(rows), encoding="utf-8")
             expected_names += shown
             if skip is not None:
                 expected_skips[path] = skip

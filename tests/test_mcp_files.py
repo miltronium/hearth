@@ -17,6 +17,9 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import io
+import sys
+import warnings
+from pathlib import Path
 
 import pytest
 
@@ -797,3 +800,80 @@ def test_a_malformed_pdf_leaks_nothing_to_stderr(tmp_path, root, capfd):
     assert "CANARY" not in captured.err
     assert "CANARY" not in captured.out
     assert captured.err == ""
+
+
+# -- B-090: warnings and prints are side channels too ------------------------------------
+
+_HOSTILE_SPEC = importlib.util.spec_from_file_location(
+    "hostile_statements", Path(__file__).parent / "fixtures" / "hostile_statements.py"
+)
+hostile = importlib.util.module_from_spec(_HOSTILE_SPEC)
+_HOSTILE_SPEC.loader.exec_module(hostile)
+
+_METADATA_VARIANTS = {
+    "custom_property": dict(custom_property=True, print_area=False, bad_sheet_index=False),
+    "print_area": dict(custom_property=False, print_area=True, bad_sheet_index=False),
+    "bad_sheet_index": dict(custom_property=False, print_area=False, bad_sheet_index=True),
+}
+
+
+@needs_openpyxl
+@pytest.mark.parametrize("variant", sorted(_METADATA_VARIANTS))
+@pytest.mark.parametrize("reader", [read_table, read_text_file], ids=["table", "text"])
+def test_workbook_metadata_never_reaches_a_warning_or_a_stream(
+    tmp_path, root, capfd, variant, reader
+):
+    """openpyxl ``warnings.warn``s workbook metadata, quoting it (B-090).
+
+    A custom property of an unknown type printed ``UserWarning: Unknown type for HOLDER Jane
+    Q Public SSN 123-45-6789`` to stderr from both shape scripts. The logger silencing that
+    closed pypdf's channel does not touch ``warnings``. Asserted on the OUTCOME twice over:
+    a warning recorder with every filter forced to "always" (pytest's own warning capture
+    would otherwise swallow it, and this test would pass on the broken code), and the real
+    file descriptors.
+    """
+    target = root / "statement.xlsx"
+    target.write_bytes(hostile.xlsx_with_metadata(**_METADATA_VARIANTS[variant]))
+    settings = _settings(tmp_path, [root])
+
+    capfd.readouterr()
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        result = reader(target, settings=settings)
+    captured = capfd.readouterr()
+
+    assert result  # the workbook itself is fine and still reads
+    assert [str(w.message) for w in seen] == []
+    for secret in ("Jane", "123-45", "987654321", "HOLDER", "sheet index"):
+        assert secret not in captured.out and secret not in captured.err
+    assert captured.err == "" and captured.out == ""
+
+
+def test_quiet_parse_restores_streams_and_filters_even_when_the_parser_raises():
+    """The swap must not outlive the parse: a stuck redirect would eat the caller's output."""
+    before = (sys.stdout, sys.stderr, list(warnings.filters))
+    with pytest.raises(RuntimeError):
+        with files_module._quiet_parse():
+            print("SWALLOWED-CANARY")
+            warnings.warn("SWALLOWED-CANARY", stacklevel=1)
+            raise RuntimeError("boom")
+    assert (sys.stdout, sys.stderr, list(warnings.filters)) == before
+
+
+def test_a_print_or_warning_inside_any_handler_is_discarded(tmp_path, root, capfd, monkeypatch):
+    """Any handler, any format: a stray print() or warning during a parse goes nowhere."""
+
+    def noisy(data, requested):
+        print("PRINTED-CANARY 4417")
+        print("STDERR-CANARY 4417", file=sys.stderr)
+        warnings.warn("WARNED-CANARY 4417", stacklevel=1)
+        return [["Date"], ["x"]]
+
+    monkeypatch.setitem(files_module._TABLE_READERS, ".csv", noisy)
+    (root / "s.csv").write_text("Date\nx\n")
+    capfd.readouterr()
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        read_table(root / "s.csv", settings=_settings(tmp_path, [root]))
+    captured = capfd.readouterr()
+    assert seen == [] and "CANARY" not in captured.out + captured.err

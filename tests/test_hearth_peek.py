@@ -20,7 +20,9 @@ import random
 import re
 import shutil
 import string
+import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,14 @@ FIXTURES = REPO / "tests" / "fixtures" / "peek"
 #: The shared privacy rule (VOCAB, header detection, file ids); its fixed strings print too.
 SHAPE = REPO / "src" / "hearth" / "finance" / "shape.py"
 
+_HOSTILE_SPEC = importlib.util.spec_from_file_location(
+    "hostile_statements", REPO / "tests" / "fixtures" / "hostile_statements.py"
+)
+hostile = importlib.util.module_from_spec(_HOSTILE_SPEC)
+_HOSTILE_SPEC.loader.exec_module(hostile)
+#: Strings planted in workbook metadata; none may reach stdout or stderr.
+META_SECRETS = ("Jane", "Public", "HOLDER", "SSN", "123-45", "6789", "987654321", "JANE_Q")
+
 
 def _load_peek():
     spec = importlib.util.spec_from_file_location("hearth_peek", SCRIPT)
@@ -40,6 +50,13 @@ def _load_peek():
 
 
 def _run_on(root: Path, monkeypatch, capsys, *extra: str) -> tuple[int, str]:
+    """Run the real main() and return (exit code, stdout).
+
+    stderr and the warnings channel are part of what an operator pastes, so every run also
+    asserts both are empty (B-090). Warnings are recorded with every filter forced to
+    "always": left to pytest's own capture, a ``warnings.warn`` quoting file metadata would be
+    swallowed by the test harness and never fail anything, while reaching a real terminal.
+    """
     monkeypatch.setenv("HEARTH_FILE_ROOTS", str(root))
     from hearth.config import get_settings
 
@@ -47,10 +64,15 @@ def _run_on(root: Path, monkeypatch, capsys, *extra: str) -> tuple[int, str]:
     peek = _load_peek()
     monkeypatch.setattr(sys, "argv", ["hearth_peek.py", str(root), *extra])
     try:
-        code = peek.main()
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            code = peek.main()
     finally:
         get_settings.cache_clear()
-    return code, capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.err == "", f"stderr is not empty:\n{captured.err}"
+    assert [str(w.message) for w in seen] == [], "a warning was emitted during the run"
+    return code, captured.out
 
 
 def _run(tmp_path, monkeypatch, capsys, files: dict[str, str]) -> str:
@@ -122,6 +144,45 @@ def test_json_keys_are_printed_only_when_in_the_vocabulary(tmp_path, monkeypatch
     })
     assert "Jane" not in out
     assert "Amount" in out and "Date" in out and "(withheld)" in out
+
+
+# -- B-090: workbook metadata on stderr ---------------------------------------------------
+
+
+def _hostile_workbook_dir(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "statement.xlsx").write_bytes(hostile.xlsx_with_metadata())
+    return root
+
+
+def test_workbook_metadata_reaches_neither_stdout_nor_stderr_in_a_real_process(tmp_path):
+    """The integrator's reproduction, run as the operator runs it: a separate process.
+
+    In-process, pytest owns sys.stderr and the warnings machinery, and either can hide a
+    leak. A subprocess has neither: whatever reaches its stderr is what reaches a terminal.
+    Before B-090 this printed ``UserWarning: Unknown type for HOLDER Jane Q Public SSN
+    123-45-6789`` on stderr.
+    """
+    pytest.importorskip("openpyxl")
+    root = _hostile_workbook_dir(tmp_path / "in")
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HEARTH_FILE_ROOTS": str(root),
+           "HEARTH_HOME": str(tmp_path / ".hearth"), "PYTHONWARNINGS": "always"}
+    proc = subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True,
+                          text=True, env=env, timeout=120, check=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stderr == "", f"stderr:\n{proc.stderr}"
+    for secret in META_SECRETS + ("SECRETMERCHANT",):
+        assert secret not in proc.stdout, f"{secret!r} printed:\n{proc.stdout}"
+    assert "Date" in proc.stdout and "Amount" in proc.stdout  # still useful
+
+
+def test_workbook_metadata_is_not_printed_in_process_either(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("openpyxl")
+    root = _hostile_workbook_dir(tmp_path / "in")
+    code, out = _run_on(root, monkeypatch, capsys)  # asserts stderr and warnings are empty
+    assert code == 0
+    for secret in META_SECRETS:
+        assert secret not in out
 
 
 # -- file names and paths ----------------------------------------------------------------
@@ -331,6 +392,10 @@ def test_property_no_random_cell_text_or_digit_run_is_ever_printed(
                 objs = [dict(zip(keys, r, strict=False)) for r in rows[-len(rows) // 2:]]
                 (folder / f"{name}.json").write_text(json.dumps(objs))
                 all_secrets += [k.lower() for k in keys]
+            elif rng.random() < 0.2:  # a workbook whose metadata also carries secrets
+                (folder / f"{name}.xlsx").write_bytes(hostile.xlsx_with_metadata(rows))
+                all_secrets += [s.lower() for s in META_SECRETS]
+                expected += shown
             else:
                 (folder / f"{name}.csv").write_text(_csv(rows))
                 expected += shown
