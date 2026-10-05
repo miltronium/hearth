@@ -48,6 +48,34 @@ class PreRegError(ValueError):
     """Raised on a malformed, mismatched, or uncommitted pre-registration."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` that refuses a mapping with a repeated key.
+
+    PyYAML silently keeps the LAST of two equal keys, so ``min_n: 30`` followed further
+    down by ``min_n: 5`` reads as 5 while a reviewer skimming the file sees 30 — the bar
+    that is enforced is not the bar that is read. A duplicated key makes the file
+    ambiguous, and an ambiguous bar is not a registered one.
+    """
+
+    def construct_mapping(self, node, deep=False):  # type: ignore[override]
+        seen: set[object] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in seen
+            except TypeError:  # unhashable key: let the base class report it
+                break
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"found duplicate key {key!r} — a repeated key silently keeps only "
+                    "the last value, so the file does not say one thing",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 @dataclass(frozen=True)
 class GitStatus:
     """Whether a file is committed to git and unmodified since.
@@ -142,7 +170,7 @@ def load_prereg(path: Path | str) -> PreRegistration:
     except OSError as exc:
         raise PreRegError(f"cannot read pre-registration {str(path)!r}: {exc}") from None
     try:
-        obj = yaml.safe_load(text)
+        obj = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
     except yaml.YAMLError as exc:
         raise PreRegError(f"invalid YAML in {str(path)!r}: {exc}") from None
     if not isinstance(obj, dict):

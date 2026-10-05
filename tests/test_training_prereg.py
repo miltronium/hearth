@@ -304,3 +304,24 @@ def test_the_reviewer_nan_and_loose_bars_no_longer_load(tmp_path):
         )
         with pytest.raises(PreRegError):
             load_prereg(path)
+
+
+@pytest.mark.parametrize(
+    "bar",
+    [
+        # The block form a reviewer skims: the second min_n silently won.
+        "bar:\n  alpha: 0.05\n  min_n: 30\n  min_effect: 0.0\n  min_n: 31\n",
+        # A repeated top-level key: the later golden_sha replaced the first.
+        f"golden_sha: {'ef' * 32}\nbar: {{alpha: 0.05, min_n: 30}}\n",
+    ],
+)
+def test_a_prereg_with_a_duplicated_key_is_refused(tmp_path, bar):
+    """B-083 (L3): PyYAML keeps the LAST of two equal keys; the file must say one thing."""
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        f"task: classify\ngolden_sha: {GOLDEN.sha}\nmetric: exact\nhypothesis: h\n"
+        f"stopping_rule: s\nkill_condition: k\n{bar}",
+        encoding="utf-8",
+    )
+    with pytest.raises(PreRegError, match="duplicate key"):
+        load_prereg(path)
