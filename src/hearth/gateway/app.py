@@ -141,12 +141,18 @@ def create_app(
 
     @app.get("/v1/hearth/admin/health")
     def health() -> dict:
-        return {
+        body = {
             "status": "ok",
             "version": __version__,
             "backend": provider.name,
             "model": registry.default_id,
         }
+        # Liveness stays "ok" (the process is up), but an auto->echo fallback is named here
+        # too, so no probe can read a stub as real inference (B-006).
+        stub_reason = getattr(provider, "fallback_reason", None)
+        if stub_reason:
+            body["backend_fallback"] = stub_reason
+        return body
 
     @app.get("/v1/hearth/admin/ready")
     def ready():
@@ -168,8 +174,9 @@ def create_app(
         Residency is reported separately: ``loaded`` (the default holds weights right now)
         and ``resident`` (ids in memory). 503 ``loading`` while the first load runs; 503
         ``failed`` with the ``reason`` when the load failed, the weights are gone, or
-        ``HEARTH_DEFAULT_MODEL`` names no servable model. The echo backend is always ready
-        (nothing to load).
+        ``HEARTH_DEFAULT_MODEL`` names no servable model. The echo backend is ready when
+        chosen explicitly (nothing to load) and 503 ``stub`` when ``HEARTH_BACKEND=auto``
+        fell back to it because mlx_lm is not importable.
         """
         default_id = registry.default_id
         loaded = _weights_loaded(manager, default_id)
@@ -190,6 +197,12 @@ def create_app(
             return JSONResponse(status_code=code, content=body)
 
         if provider.name == "echo":
+            # An echo that `auto` fell back to (mlx_lm not importable) is not inference: a
+            # pruned venv must not come up green answering every request with an echo
+            # labelled as a real model (B-006). An explicit HEARTH_BACKEND=echo is ready.
+            stub_reason = getattr(provider, "fallback_reason", None)
+            if stub_reason:
+                return respond(503, "stub", stub_reason)
             return respond(200, "ready")
         problem = _default_model_problem(provider, registry)
         if problem is not None:

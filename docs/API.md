@@ -199,7 +199,13 @@ Kick off / inspect LoRA runs. Long-running → returns a `run_id`; poll for stat
   | 503 | `failed` | `default model is not servable: …` | the default is registered but not a chat model of this backend |
 
   Every body also carries `backend`, `model` (the default id), `loaded` (the default holds
-  weights right now) and `resident` (ids in memory). The `echo` backend is always ready.
+  weights right now) and `resident` (ids in memory). The `echo` backend is ready when chosen
+  explicitly (`HEARTH_BACKEND=echo`). When `HEARTH_BACKEND=auto` (the default) falls back to
+  echo because `mlx_lm` is not importable — usually a venv pruned by a bare `uv run` — `/ready`
+  is `503` with `status: "stub"`, `backend: "echo"` and a `reason` naming the repair command,
+  `/health` adds a `backend_fallback` field with the same text, and a WARNING is logged at
+  startup. The server still starts (admin/metrics and non-inference CLI paths keep working);
+  it just cannot be mistaken for real inference.
   Measured on 2026-10-05 with real weights (warmup on): `503 loading` at 0.05 s after start,
   `200 ready` at ~1.05 s (7B from page cache).
 - `GET /admin/models` — what is resident right now, read off the provider instances
