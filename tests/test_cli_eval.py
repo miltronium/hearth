@@ -87,8 +87,12 @@ def _git(tmp_path, *args: str) -> None:
 def _committed_prereg(tmp_path, rows, *, task="extract", name="prereg.yaml", **bar) -> str:
     """Write a matching pre-registration and commit it — with the golden set, when one has
     been written — to a throwaway repo. Promotion requires the prereg to live in the
-    repository that versions the golden set, both committed before the measurement."""
+    repository that versions the golden set, both committed before the measurement, and
+    that repository to be the install's anchored evals repository (B-081)."""
     _git(tmp_path, "init", "-q")
+    from hearth.training.prereg import pin_anchor
+
+    pin_anchor(tmp_path / ".hearth", tmp_path)
     body = {
         "task": task,
         "hypothesis": "the adapter learns the labels the base model cannot guess",
@@ -129,6 +133,9 @@ def real_lift(monkeypatch):
     """Install a provider where the adapter genuinely beats the base model."""
     answers = {r["prompt"]: r["expected"] for r in ROWS}
     monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _FakeProvider(answers))
+    from test_promotion_evidence import allow_test_backends
+
+    allow_test_backends(monkeypatch)  # the fake stands in for the MLX pool (B-084)
 
 
 def test_help_lists_eval_and_prereg():

@@ -479,3 +479,41 @@ def test_beats_incumbent_no_longer_promotes_on_a_missing_incumbent():
     """F2 at the wrapper: "no incumbent" used to mean "any score above zero wins"."""
     cand = EvalReport(task="extract", metric="f1", score=0.5)
     assert beats_incumbent(cand, None) is False
+
+
+def test_score_candidate_refuses_a_golden_set_that_repeats_a_prompt():
+    """B-080: n counts distinct items. The library refuses too, not just the CLI."""
+    from hearth.training.eval import as_golden_set as _gs
+
+    golden = _gs("extract", [(f"q{i % 3}", "A") for i in range(30)])
+    assert len(golden.duplicate_prompts()) == 3
+    with pytest.raises(ValueError, match="repeats 3 prompt"):
+        score_candidate(golden, lambda p: "A", metric="exact")
+
+
+# -- B-086 (cont.): survivors of a full mutation re-run on the B-062 guards ----------------
+
+
+def test_check_bar_names_a_non_finite_alpha_as_non_finite():
+    from hearth.training.eval import check_bar
+
+    with pytest.raises(ValueError, match="alpha must be a finite number"):
+        check_bar(alpha=float("nan"), margin=0.0, min_n=30, test="auto")
+
+
+def test_check_bar_refuses_a_bool_where_a_number_belongs():
+    """`margin: false` in YAML is a bool, and False == 0 — it must not pass as a margin."""
+    from hearth.training.eval import check_bar
+
+    with pytest.raises(ValueError, match="min_effect/margin must be a finite number"):
+        check_bar(alpha=0.05, margin=False, min_n=30, test="auto")
+
+
+def test_gate_refuses_a_report_whose_n_disagrees_with_its_vector():
+    cfg = EvalConfig(max_tokens=24)
+    cand = EvalReport(task="t", metric="exact_match", score=1.0, per_example=[1.0] * 40, n=400,
+                      golden_sha="g", config=cfg)
+    inc = EvalReport(task="t", metric="exact_match", score=0.0, per_example=[0.0] * 40, n=40,
+                     golden_sha="g", config=cfg)
+    with pytest.raises(GateProvenanceError, match="says n=400"):
+        evaluate_gate(cand, inc, incumbent_role="base")

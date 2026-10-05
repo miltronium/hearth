@@ -18,8 +18,13 @@ Promotion refuses unless an eval gate proof is attached — the store never trus
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
+import os
+import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -31,6 +36,9 @@ STATUS_PROMOTED = "promoted"
 STATUS_RETIRED = "retired"
 _STATUSES = (STATUS_CANDIDATE, STATUS_PROMOTED, STATUS_RETIRED)
 
+# "The caller did not say which incumbent it beat" — distinct from None ("the base model").
+_UNCHECKED = object()
+
 
 class AdapterError(RuntimeError):
     """Raised on an invalid adapter operation (unknown id, failed gate, bad state)."""
@@ -38,6 +46,10 @@ class AdapterError(RuntimeError):
 
 class GateNotPassedError(AdapterError):
     """Raised when promotion is attempted without a passing eval-gate proof (ADR-006)."""
+
+
+class IncumbentChangedError(AdapterError):
+    """The incumbent a promotion was measured against is no longer the incumbent (B-082)."""
 
 
 def adapter_weights_sha(adapter_path: str | Path) -> str:
@@ -115,13 +127,27 @@ class AdapterEntry:
 class AdapterStore:
     """Persistent adapter registry, backed by a single JSON file under ``~/.hearth``.
 
-    All mutations reload → mutate → rewrite so concurrent CLIs and a running daemon see a
-    consistent file (the volume is tiny — a handful of adapters — so this is cheap).
+    Every mutation is reload → mutate → rewrite **under an exclusive ``fcntl.flock``** on a
+    sibling ``.lock`` file, and the rewrite is atomic (temp file in the same directory,
+    fsync, ``os.replace``), so concurrent CLIs and a running daemon never lose an update
+    and a reader never sees a half-written file (B-082). Reads take no lock: with atomic
+    replacement a read sees either the old file or the new one.
     """
 
     def __init__(self, path: Path | None = None, settings: Settings | None = None) -> None:
         settings = settings or get_settings()
         self.path = path or (settings.home / "adapters.json")
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
     # -- lifecycle --------------------------------------------------------------------
 
@@ -136,20 +162,21 @@ class AdapterStore:
         eval_scores: dict[str, float] | None = None,
     ) -> AdapterEntry:
         """Register a newly-trained adapter as a **candidate** (ADR-006)."""
-        entries = self._load()
-        if adapter_id in entries:
-            raise AdapterError(f"adapter already registered: {adapter_id!r}")
-        entry = AdapterEntry(
-            id=adapter_id,
-            base_model=base_model,
-            task=task,
-            train_run_id=train_run_id,
-            adapter_path=adapter_path,
-            status=STATUS_CANDIDATE,
-            eval_scores=dict(eval_scores or {}),
-        )
-        entries[adapter_id] = entry
-        self._save(entries)
+        with self._locked():
+            entries = self._load()
+            if adapter_id in entries:
+                raise AdapterError(f"adapter already registered: {adapter_id!r}")
+            entry = AdapterEntry(
+                id=adapter_id,
+                base_model=base_model,
+                task=task,
+                train_run_id=train_run_id,
+                adapter_path=adapter_path,
+                status=STATUS_CANDIDATE,
+                eval_scores=dict(eval_scores or {}),
+            )
+            entries[adapter_id] = entry
+            self._save(entries)
         return entry
 
     def promote(
@@ -159,6 +186,8 @@ class AdapterStore:
         gate_passed: bool | None = None,
         proof: dict[str, object] | None = None,
         gate: object | None = None,
+        expected_incumbent: object = _UNCHECKED,
+        precondition: Callable[[], list[str]] | None = None,
     ) -> AdapterEntry:
         """Promote a candidate to **promoted** — only if the eval gate passed (ADR-006).
 
@@ -175,6 +204,13 @@ class AdapterStore:
         Refuses with :class:`GateNotPassedError` when the gate didn't pass — this is the
         promotion safety guarantee. Any previously-promoted adapter for the same task is
         retired so exactly one is promoted per task.
+
+        ``expected_incumbent`` is the id of the promoted adapter the candidate was measured
+        against, or ``None`` when it beat the base model; ``precondition`` returns every
+        reason the evidence no longer holds (e.g. weights re-hashed). Both are evaluated
+        **under the registry lock, against the file as it is at write time** (B-082): the
+        check and the write used to be separate steps, so an adapter promoted in between
+        was silently retired by a report that had only ever beaten the base model.
         """
         if gate is not None:
             if gate_passed is not None:
@@ -189,34 +225,56 @@ class AdapterStore:
         if gate_passed is None:
             raise AdapterError("promote requires 'gate' (a GateResult) or 'gate_passed'")
 
-        entries = self._load()
-        entry = self._require(entries, adapter_id)
-        if entry.status == STATUS_RETIRED:
-            raise AdapterError(f"cannot promote a retired adapter: {adapter_id!r}")
-        if not gate_passed:
-            reason = ""
-            if gate is not None:
-                reason = f": {getattr(gate, 'reason', '')}"
-            raise GateNotPassedError(
-                f"refusing to promote {adapter_id!r}: eval gate not passed "
-                f"(candidate did not beat the incumbent){reason}"
-            )
-        for other in entries.values():
-            if other.task == entry.task and other.status == STATUS_PROMOTED:
-                other.status = STATUS_RETIRED
-        entry.status = STATUS_PROMOTED
-        entry.promotion_proof = dict(proof or {})
-        entry.promotion_proof.setdefault("gate", "unverified")
-        entry.promotion_proof.setdefault("gate_passed", True)
-        self._save(entries)
+        with self._locked():
+            entries = self._load()
+            entry = self._require(entries, adapter_id)
+            if entry.status == STATUS_RETIRED:
+                raise AdapterError(f"cannot promote a retired adapter: {adapter_id!r}")
+            if not gate_passed:
+                reason = ""
+                if gate is not None:
+                    reason = f": {getattr(gate, 'reason', '')}"
+                raise GateNotPassedError(
+                    f"refusing to promote {adapter_id!r}: eval gate not passed "
+                    f"(candidate did not beat the incumbent){reason}"
+                )
+            if expected_incumbent is not _UNCHECKED:
+                current = next(
+                    (e.id for e in entries.values() if e.task == entry.task
+                     and e.status == STATUS_PROMOTED and e.id != adapter_id),
+                    None,
+                )
+                if current != expected_incumbent:
+                    beaten = expected_incumbent or "the base model"
+                    raise IncumbentChangedError(
+                        f"refusing to promote {adapter_id!r}: it was measured against "
+                        f"{beaten!r}, but the promoted adapter for {entry.task!r} is now "
+                        f"{current or 'none (the base model)'!r} — re-run `hearth eval`"
+                    )
+            if precondition is not None:
+                problems = precondition()
+                if problems:
+                    raise IncumbentChangedError(
+                        f"refusing to promote {adapter_id!r}: the evidence changed while "
+                        "promoting — " + "; ".join(problems)
+                    )
+            for other in entries.values():
+                if other.task == entry.task and other.status == STATUS_PROMOTED:
+                    other.status = STATUS_RETIRED
+            entry.status = STATUS_PROMOTED
+            entry.promotion_proof = dict(proof or {})
+            entry.promotion_proof.setdefault("gate", "unverified")
+            entry.promotion_proof.setdefault("gate_passed", True)
+            self._save(entries)
         return entry
 
     def retire(self, adapter_id: str) -> AdapterEntry:
         """Retire an adapter (from any non-retired state)."""
-        entries = self._load()
-        entry = self._require(entries, adapter_id)
-        entry.status = STATUS_RETIRED
-        self._save(entries)
+        with self._locked():
+            entries = self._load()
+            entry = self._require(entries, adapter_id)
+            entry.status = STATUS_RETIRED
+            self._save(entries)
         return entry
 
     # -- queries ----------------------------------------------------------------------
@@ -270,9 +328,22 @@ class AdapterStore:
         }
 
     def _save(self, entries: dict[str, AdapterEntry]) -> None:
+        """Atomically replace the registry file (caller holds :meth:`_locked`)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"adapters": [e.to_json() for e in entries.values()]}
-        self.path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     @staticmethod
     def _require(entries: dict[str, AdapterEntry], adapter_id: str) -> AdapterEntry:
@@ -287,6 +358,7 @@ __all__ = [
     "AdapterStore",
     "AdapterError",
     "GateNotPassedError",
+    "IncumbentChangedError",
     "STATUS_CANDIDATE",
     "STATUS_PROMOTED",
     "STATUS_RETIRED",

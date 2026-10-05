@@ -51,9 +51,29 @@ class _Provider:
         return GenResult(text=ANSWERS[prompt] if good else "A", model=req.model, backend="fake")
 
 
+class _TestBackends(frozenset):
+    """The real promotable-backend allowlist, plus fake providers defined in test modules.
+
+    Promotion refuses scores from anything but the MLX pool (B-084); these offline tests
+    stand a fake in for it. Only classes whose module is a ``test_*`` module are admitted,
+    so the echo stub and any plugin stay refused even here.
+    """
+
+    def __contains__(self, identity: object) -> bool:
+        return super().__contains__(identity) or str(identity).startswith("test_")
+
+
+def allow_test_backends(monkeypatch) -> None:
+    from hearth.training import promotion
+
+    monkeypatch.setattr(promotion, "PROMOTABLE_BACKENDS",
+                        _TestBackends(promotion.PROMOTABLE_BACKENDS))
+
+
 @pytest.fixture(autouse=True)
 def fake_provider(monkeypatch):
     monkeypatch.setattr("hearth.cli.select_provider", lambda settings: _Provider())
+    allow_test_backends(monkeypatch)
 
 
 def _git(cwd: Path, *args: str, env: dict | None = None) -> str:
@@ -78,6 +98,10 @@ class World:
         self.prereg = self.repo / "prereg.yaml"
         self.report = tmp_path / "report.json"
         self.store = AdapterStore(path=self.home / "adapters.json")
+        # The repo is this install's evals repository (B-081), set before any measurement.
+        from hearth.training.prereg import pin_anchor
+
+        pin_anchor(self.home, self.repo)
 
     @property
     def env(self) -> dict[str, str]:

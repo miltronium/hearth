@@ -11,9 +11,11 @@ harness refuses to run without it, so the habit cannot erode under deadline pres
 
     evals/<task>/prereg-<YYYY-MM-DD>-<slug>.yaml
 
-Git is consulted by shelling out (``git ls-files`` / ``git diff``) rather than by parsing
-``.git`` — a repository is the source of truth about its own index, and the check must be
-the same one a reviewer would run by hand.
+Git is consulted by shelling out rather than by parsing ``.git``, but never asked "is this
+file modified?": that question is answered from the index, which ``--assume-unchanged``
+can make lie (B-078). Instead the bytes on disk are hashed here and compared with the blob
+HEAD records (``git rev-parse HEAD:<path>``) — a comparison a reviewer can repeat with
+``git hash-object --no-filters``.
 """
 
 from __future__ import annotations
@@ -48,6 +50,34 @@ class PreRegError(ValueError):
     """Raised on a malformed, mismatched, or uncommitted pre-registration."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` that refuses a mapping with a repeated key.
+
+    PyYAML silently keeps the LAST of two equal keys, so ``min_n: 30`` followed further
+    down by ``min_n: 5`` reads as 5 while a reviewer skimming the file sees 30 — the bar
+    that is enforced is not the bar that is read. A duplicated key makes the file
+    ambiguous, and an ambiguous bar is not a registered one.
+    """
+
+    def construct_mapping(self, node, deep=False):  # type: ignore[override]
+        seen: set[object] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in seen
+            except TypeError:  # unhashable key: let the base class report it
+                break
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"found duplicate key {key!r} — a repeated key silently keeps only "
+                    "the last value, so the file does not say one thing",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 @dataclass(frozen=True)
 class GitStatus:
     """Whether a file is committed to git and unmodified since.
@@ -57,6 +87,11 @@ class GitStatus:
     NOT ``rev-parse HEAD``: HEAD moves with every unrelated commit, so recording it said
     nothing about when the bar was written (B-061). ``introduced_commit`` is the commit
     that first added the file.
+
+    ``blob`` is the committed blob id the bytes on disk were compared against,
+    ``rel_path`` the file's path inside the repository, and ``content_sha256`` the SHA-256
+    of the exact bytes that were compared — so a caller that parsed the file can prove it
+    parsed the bytes that were verified (B-078).
     """
 
     committed: bool
@@ -65,6 +100,9 @@ class GitStatus:
     repo_root: str = ""
     committed_at: str = ""
     introduced_commit: str = ""
+    blob: str = ""
+    rel_path: str = ""
+    content_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,11 +176,12 @@ def load_prereg(path: Path | str) -> PreRegistration:
     """
     path = Path(path)
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         raise PreRegError(f"cannot read pre-registration {str(path)!r}: {exc}") from None
     try:
-        obj = yaml.safe_load(text)
+        obj = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
     except yaml.YAMLError as exc:
         raise PreRegError(f"invalid YAML in {str(path)!r}: {exc}") from None
     if not isinstance(obj, dict):
@@ -201,7 +240,7 @@ def load_prereg(path: Path | str) -> PreRegistration:
 
     return PreRegistration(
         path=path,
-        sha=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        sha=hashlib.sha256(data).hexdigest(),
         task=str(obj["task"]),
         golden_sha=str(obj["golden_sha"]),
         golden_version=str(obj.get("golden_version", "")),
@@ -253,18 +292,30 @@ def _checked_bar(bar: dict) -> dict[str, object]:
     }
 
 
-def verify_committed(path: Path | str) -> GitStatus:
-    """Is ``path`` tracked by git and identical to its committed content?
+def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatus:
+    """Are ``path``'s bytes exactly the blob committed at HEAD? (B-061, B-078)
 
-    The two failure modes that matter are both covered: an untracked file (the bar was
-    never registered) and a tracked-but-edited file (the bar was moved after the fact).
-    Anything that prevents an answer — no git, no repository, a git error — is reported as
-    *not committed*, because the gate must fail closed.
+    Compares the bytes on disk (or ``data``, the bytes a caller already read and will use)
+    with the blob HEAD records for the path: the blob id of ``data`` is computed here, in
+    Python, and must equal ``git rev-parse HEAD:<path>``. It used to ask ``git diff --quiet
+    HEAD``, which consults the INDEX: ``git update-index --assume-unchanged`` (or
+    ``--skip-worktree``, or a clean filter) makes git report an edited file as unmodified,
+    so an edited prereg or golden set passed as "committed and unmodified" — the check and
+    the checked thing were different objects (CLAUDE.md §3). Hashing the bytes ourselves
+    asks nothing of the index, attributes or filters; a file a filter legitimately
+    rewrites on commit (LFS, eol conversion) is refused, which is the fail-closed side.
+
+    An untracked file, a file absent from HEAD, edited bytes, no git, no repository, or
+    any git error are all reported as *not committed*: the gate fails closed.
     """
     path = Path(path)
-    if not path.exists():
-        return GitStatus(committed=False, reason=f"file does not exist: {path}")
-    directory = str(path.resolve().parent)
+    if data is None:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return GitStatus(committed=False, reason=f"file does not exist: {path}")
+    resolved = path.resolve()
+    directory = str(resolved.parent)
 
     try:
         root = _git(["rev-parse", "--show-toplevel"], cwd=directory)
@@ -273,7 +324,10 @@ def verify_committed(path: Path | str) -> GitStatus:
     except _GitError as exc:
         return GitStatus(committed=False, reason=f"not inside a git repository ({exc})")
 
-    rel = str(path.resolve())
+    try:
+        rel = resolved.relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        return GitStatus(committed=False, reason=f"{path} is not inside {root}", repo_root=root)
     try:
         _git(["ls-files", "--error-unmatch", "--", rel], cwd=root)
     except _GitError:
@@ -283,13 +337,20 @@ def verify_committed(path: Path | str) -> GitStatus:
             repo_root=root,
         )
     try:
-        _git(["diff", "--quiet", "HEAD", "--", rel], cwd=root)
+        committed_blob = _git(["rev-parse", "--verify", "--quiet", f"HEAD:{rel}"], cwd=root)
     except _GitError:
         return GitStatus(
             committed=False,
+            reason=f"{path} is staged but not in any commit — commit it first",
+            repo_root=root,
+        )
+    if _blob_id(data, _object_format(root)) != committed_blob:
+        return GitStatus(
+            committed=False,
             reason=(
-                f"{path} has uncommitted modifications — the registered bar must match "
-                "the committed one"
+                f"{path} has uncommitted modifications — its bytes are not the committed "
+                "blob (git's index is not consulted, so --assume-unchanged / "
+                "--skip-worktree cannot hide an edit)"
             ),
             repo_root=root,
         )
@@ -298,12 +359,12 @@ def verify_committed(path: Path | str) -> GitStatus:
         introduced = _git(
             ["log", "--diff-filter=A", "--format=%H", "--", rel], cwd=root
         ).splitlines()
-    except _GitError as exc:  # pragma: no cover - the file is tracked and unmodified
+    except _GitError as exc:  # pragma: no cover - the file is in HEAD
         return GitStatus(
             committed=False, reason=f"cannot read the file's history ({exc})", repo_root=root
         )
     commit, _, committed_at = last.partition(" ")
-    if not commit or not committed_at:  # pragma: no cover - tracked implies a commit
+    if not commit or not committed_at:  # pragma: no cover - in HEAD implies a commit
         return GitStatus(
             committed=False, reason=f"{path} has no commit history", repo_root=root
         )
@@ -314,42 +375,118 @@ def verify_committed(path: Path | str) -> GitStatus:
         repo_root=root,
         committed_at=committed_at,
         introduced_commit=introduced[-1] if introduced else commit,
+        blob=committed_blob,
+        rel_path=rel,
+        content_sha256=hashlib.sha256(data).hexdigest(),
     )
 
 
+def _object_format(root: str) -> str:
+    """The repository's object hash (``sha1``, or ``sha256`` for a SHA-256 repository)."""
+    try:
+        fmt = _git(["rev-parse", "--show-object-format"], cwd=root)
+    except _GitError:  # git too old to know the flag predates SHA-256 repositories
+        return "sha1"
+    return fmt if fmt in ("sha1", "sha256") else "sha1"
+
+
+def _blob_id(data: bytes, fmt: str) -> str:
+    """git's object id for ``data`` as a blob — computed here, never by asking git."""
+    return hashlib.new(fmt, b"blob %d\x00" % len(data) + data).hexdigest()
+
+
+def committed_golden_problems(golden_git: dict, *, task: str, golden_sha: str) -> list[str]:
+    """Re-derive the golden set from the committed blob and compare it with the measurement.
+
+    The report says which golden set was scored (``golden_sha``) and where it was committed
+    (``golden_git``: repository, commit, path). This reads the blob out of git at that
+    commit — not the working tree, not the report — parses it with the same parser the
+    eval used, and requires its content sha to be the one measured and every prompt
+    distinct (B-078, B-080). A golden set edited in the working tree and hidden from git
+    is a different sha from the committed blob, so it cannot pass as the registered one.
+    """
+    from .eval import parse_golden_jsonl
+
+    root = str(golden_git.get("repo_root") or "")
+    commit = str(golden_git.get("commit") or "")
+    rel = str(golden_git.get("rel_path") or "")
+    if not (root and commit and rel):
+        return ["the report does not say where the golden set was committed "
+                "(repo_root/commit/rel_path): re-run `hearth eval` with this version"]
+    try:
+        text = _git(["cat-file", "blob", f"{commit}:{rel}"], cwd=root, strip=False)
+    except (_GitError, FileNotFoundError, NotADirectoryError) as exc:
+        return [f"cannot read the committed golden set {rel} at {commit[:12]} in {root}: {exc}"]
+    try:
+        committed = parse_golden_jsonl(text, task=task)
+    except ValueError as exc:
+        return [f"the committed golden set {rel} at {commit[:12]} does not parse: {exc}"]
+    problems = []
+    if committed.sha != golden_sha:
+        problems.append(
+            f"the golden set committed at {commit[:12]} ({rel}) hashes to "
+            f"{committed.sha[:12]}, but the measurement scored {golden_sha[:12] or '<none>'}: "
+            "what was scored is not what was committed"
+        )
+    if committed.duplicate_prompts():
+        problems.append(f"the committed golden set {rel} repeats a prompt")
+    return problems
+
+
 def check_provenance(
-    registration: PreRegistration, *, measured_at: str, golden_git: dict
+    registration: PreRegistration,
+    *,
+    first_measurement: dict,
+    golden_git: dict,
+    golden_sha: str,
 ) -> GitStatus:
-    """Require the prereg to predate the measurement, in the repo that versions the golden set.
+    """Require the prereg to predate the adapter's FIRST measurement, next to the golden set.
 
-    Raises :class:`PreRegError`; returns the prereg's :class:`GitStatus` on success. Three
-    things must hold, each one an outcome rather than a configuration (B-061):
+    ``first_measurement`` is the adapter's earliest record in the measurement ledger
+    (:mod:`hearth.training.ledger`) — any golden set, with or without a prereg — and
+    ``golden_git`` / ``golden_sha`` describe the measurement being promoted. Raises
+    :class:`PreRegError`; returns the prereg's :class:`GitStatus` on success. Each check
+    asserts an outcome rather than a configuration (B-061, B-078, B-079):
 
-    1. **Committed and unmodified** (:func:`verify_committed`).
-    2. **Committed before the measurement.** The commit that last changed the file must be
-       no later than ``measured_at`` (the time the eval started, recorded in the — signed —
-       report). A bar committed seconds *after* the score was seen is the exact failure
-       pre-registration exists to prevent. Committer timestamps are second-granular and
-       set by whoever commits, so this stops the honest-but-post-hoc case and a casual
-       forger, not one who deliberately backdates a commit.
+    1. **Committed and unmodified** (:func:`verify_committed`): the bytes on disk are the
+       committed blob, and they are the bytes ``registration`` was parsed from.
+    2. **Committed before the adapter was first measured.** It used to be "before THIS
+       run", so an operator could measure with no prereg, read PASS, then commit a bar and
+       re-measure (B-079). Two forms of "before", because each alone is weak:
+
+       * the commit that last changed the prereg has a committer time no later than the
+         first measurement's ``measured_at``;
+       * that commit is an ancestor of the HEAD the golden set's repository was at when the
+         first measurement started (recorded in the ledger then). Committer timestamps
+         are second-granular and settable with ``GIT_COMMITTER_DATE``; a commit hash
+         recorded at measurement time cannot contain a commit made afterwards.
     3. **In the repository that versions the golden set**, and the golden set itself
-       committed and unmodified there at measurement time (``golden_git``, recorded by
-       ``hearth eval``). Any-repo-will-do let a prereg be committed into a throwaway repo
-       created for the purpose; requiring the golden set's own repository puts the bar and
-       the evidence in one history an auditor can read, and makes "commit a bar somewhere"
-       insufficient.
+       committed and unmodified there (``golden_git``) — re-derived from the committed
+       blob, whose content sha must be the ``golden_sha`` that was scored
+       (:func:`committed_golden_problems`).
+    4. **That repository is the anchored evals repository** recorded in the ledger at the
+       first measurement (:func:`resolve_anchor`, B-081).
     """
     status = verify_committed(registration.path)
     if not status.committed:
         raise PreRegError(f"pre-registration is not git-committed: {status.reason}")
+    if status.content_sha256 != registration.sha:
+        raise PreRegError(
+            f"{registration.path} changed between being read and being verified: the bar "
+            "that was parsed is not the bar that is committed"
+        )
+    first_at = str(first_measurement.get("measured_at") or "")
+    adapter = first_measurement.get("adapter_id")
     committed = _parse_time(status.committed_at, "prereg commit time")
-    measured = _parse_time(measured_at, "measurement time")
+    measured = _parse_time(first_at, "first measurement time")
     if committed > measured:
         raise PreRegError(
             f"pre-registration was committed at {status.committed_at} (commit "
-            f"{status.commit[:12]}), AFTER the measurement started at {measured_at}: the bar "
-            "must be registered before the score is seen — re-run `hearth eval` now that it "
-            "is committed"
+            f"{status.commit[:12]}), AFTER the measurement started at {first_at} — the "
+            f"first recorded measurement of {adapter!r} (ledger record "
+            f"{first_measurement.get('seq')}). The bar must be registered before ANY score "
+            "of the adapter is seen; an adapter measured before its bar existed cannot be "
+            "promoted under it"
         )
     if not golden_git.get("committed"):
         raise PreRegError(
@@ -364,7 +501,43 @@ def check_provenance(
             f"versioned in {golden_root}: register the bar in the repository that holds the "
             "golden set"
         )
+    # The repository is not "wherever the golden file happens to be": a copy of the golden
+    # set in a throwaway `git init` satisfied that (B-081). It must be the evals repository
+    # HEARTH was anchored to when the adapter was FIRST measured — a choice recorded in the
+    # signed ledger before any score existed, so it cannot be made after seeing one.
+    anchor = first_measurement.get("anchor") or {}
+    anchor_dir = str(anchor.get("common_dir") or "")
+    if not anchor_dir or _repo_identity(status.repo_root)[1] != anchor_dir:
+        raise PreRegError(
+            f"the pre-registration and golden set live in {status.repo_root}, which is not "
+            f"the evals repository HEARTH was anchored to when {adapter!r} was first measured "
+            f"({anchor.get('path') or 'none resolved'}): register the bar next to the golden "
+            "set in the anchored repository (`hearth prereg anchor` shows it), before the "
+            "adapter is first measured"
+        )
+    first_head = str((first_measurement.get("golden_git") or {}).get("head") or "")
+    if not first_head or not _is_ancestor(status.commit, first_head, root=status.repo_root):
+        raise PreRegError(
+            f"pre-registration commit {status.commit[:12]} was not in the history of "
+            f"{status.repo_root} when {adapter!r} was first measured at {first_at} (HEAD then: "
+            f"{first_head[:12] or 'no commit'}): the bar was registered AFTER the measurement, "
+            "or in another repository — an adapter measured before its bar existed cannot be "
+            "promoted under it"
+        )
+    problems = committed_golden_problems(golden_git, task=registration.task,
+                                         golden_sha=golden_sha)
+    if problems:
+        raise PreRegError("; ".join(problems))
     return status
+
+
+def _is_ancestor(commit: str, head: str, *, root: str) -> bool:
+    """Is ``commit`` reachable from ``head`` in the repository at ``root``? (False on error)."""
+    try:
+        _git(["merge-base", "--is-ancestor", commit, head], cwd=root)
+    except (_GitError, FileNotFoundError, NotADirectoryError):
+        return False
+    return True
 
 
 def provenance_proof(status: GitStatus, golden_git: dict) -> dict[str, object]:
@@ -383,15 +556,77 @@ def provenance_proof(status: GitStatus, golden_git: dict) -> dict[str, object]:
     }
 
 
-def golden_git_status(path: Path | str) -> dict[str, object]:
-    """The git status of a golden-set file, as recorded in an eval report."""
-    status = verify_committed(path)
+def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[str, object]:
+    """The git status of a golden-set file, as recorded in an eval report.
+
+    Pass ``data`` — the bytes the eval actually parsed and scored — so the status is about
+    those bytes, not a second read of the file that could differ.
+    """
+    status = verify_committed(path, data=data)
+    head = ""
+    if status.repo_root:
+        try:  # the repository's HEAD at measurement time, committed file or not (B-079)
+            head = _git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=status.repo_root)
+        except (_GitError, FileNotFoundError):
+            head = ""
     return {
         "committed": status.committed,
         "reason": status.reason,
         "repo_root": status.repo_root,
         "commit": status.commit,
+        "rel_path": status.rel_path,
+        "blob": status.blob,
+        "head": head,
     }
+
+
+# -- the evals-repository anchor (B-081) --------------------------------------------------
+
+ANCHOR_FILENAME = "evals-repo"
+
+
+def _repo_identity(directory: str | Path) -> tuple[str, str]:
+    """``(toplevel, common_dir)`` of the repository containing ``directory`` ("" on failure).
+
+    The identity is the resolved common git dir, so every worktree of one repository is the
+    same repository, and a copy of its files in a fresh ``git init`` is not.
+    """
+    try:
+        top = _git(["rev-parse", "--show-toplevel"], cwd=str(directory))
+        common = _git(["rev-parse", "--git-common-dir"], cwd=str(directory))
+    except (_GitError, FileNotFoundError, NotADirectoryError):
+        return "", ""
+    return top, str((Path(directory) / common).resolve())
+
+
+def resolve_anchor(home: Path | str) -> dict[str, str]:
+    """The evals repository promotions are anchored to, as of now.
+
+    ``<HEARTH_HOME>/evals-repo`` (written by ``hearth prereg anchor``) names it; unset, it
+    is HEARTH's own repository — the one holding the ``data/<task>_golden.jsonl`` sets the
+    runbook registers bars next to. Returns ``{"path", "common_dir", "source"}``;
+    ``common_dir`` is "" when the anchor does not resolve to a git repository.
+    """
+    pin = Path(home) / ANCHOR_FILENAME
+    if pin.exists():
+        target = pin.read_text(encoding="utf-8").strip()
+        source = str(pin)
+    else:
+        target = str(Path(__file__).resolve().parent)
+        source = "HEARTH's own repository (default)"
+    top, common = _repo_identity(target) if Path(target).is_dir() else ("", "")
+    return {"path": top or target, "common_dir": common, "source": source}
+
+
+def pin_anchor(home: Path | str, repo: Path | str) -> dict[str, str]:
+    """Anchor promotions to the git repository containing ``repo``; raise if it is none."""
+    top, common = _repo_identity(repo) if Path(repo).is_dir() else ("", "")
+    if not common:
+        raise PreRegError(f"{repo} is not inside a git repository")
+    Path(home).mkdir(parents=True, exist_ok=True)
+    (Path(home) / ANCHOR_FILENAME).write_text(top + "\n", encoding="utf-8")
+    return resolve_anchor(home)
+
 
 
 def _parse_time(value: str, label: str) -> datetime:
@@ -477,8 +712,8 @@ class _GitError(RuntimeError):
     """A git invocation returned non-zero."""
 
 
-def _git(args: list[str], *, cwd: str) -> str:
-    """Run ``git <args>`` in ``cwd`` and return stripped stdout; raise on failure."""
+def _git(args: list[str], *, cwd: str, strip: bool = True) -> str:
+    """Run ``git <args>`` in ``cwd`` and return its stdout (stripped); raise on failure."""
     proc = subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -488,7 +723,7 @@ def _git(args: list[str], *, cwd: str) -> str:
     )
     if proc.returncode != 0:
         raise _GitError((proc.stderr or proc.stdout).strip() or f"git {args[0]} failed")
-    return proc.stdout.strip()
+    return proc.stdout.strip() if strip else proc.stdout
 
 
 def _metric_name(metric: str) -> str:
@@ -505,7 +740,11 @@ __all__ = [
     "GitStatus",
     "PreRegError",
     "PreRegistration",
+    "ANCHOR_FILENAME",
     "check_provenance",
+    "committed_golden_problems",
+    "pin_anchor",
+    "resolve_anchor",
     "golden_git_status",
     "provenance_proof",
     "load_prereg",

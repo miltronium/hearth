@@ -143,6 +143,17 @@ must fail when the fix is reverted.
 - ~~[B-111](#b-111) Untested: `policy_rungs` honouring `defaults.local_model`; the agent route's `on_close=cancel.set` (P3)~~ — fixed in `e1102b9`
 - ~~[B-112](#b-112) An unknown-model 404 (`check_model`) leaves no record, while an adapter 404 now does (P3)~~ — fixed in `132fe0e`
 
+**Added 2026-10-05 (second adversarial review of the promotion gate)**
+- ~~[B-078](#b-078) "Committed and unmodified" asked git's index: `--assume-unchanged` hid an edited prereg or golden set (P0)~~ — fixed in `5035970`
+- ~~[B-079](#b-079) The prereg only had to predate THIS run: measure, see PASS, then commit the bar and re-run (P0)~~ — fixed in `7736ce2`
+- ~~[B-080](#b-080) Duplicate golden rows satisfied min_n: 3 items x 10 copies = "n=30" (P1)~~ — fixed in `5236962`
+- ~~[B-081](#b-081) "Same repo as the golden set" was met by copying the golden file into a throwaway repo (P1)~~ — fixed in `3f5b114`
+- ~~[B-082](#b-082) Incumbent check and registry write not atomic; `_save` unlocked, non-atomic (P1)~~ — fixed in `165fb73`
+- ~~[B-083](#b-083) A duplicated YAML key in a prereg silently kept the last value (P2)~~ — fixed in `8bd0ed6`
+- ~~[B-084](#b-084) Signed reports did not record the backend; echo/plugin scores could promote (P2)~~ — fixed in `ce9a8e6`
+- ~~[B-085](#b-085) The incumbent adapter was scored on the candidate's base, not its own (P2)~~ — fixed in `8bc10f0`
+- ~~[B-086](#b-086) Four promotion guards could be deleted with no test failing (P2)~~ — fixed in `07b6e81`, `0f27170`
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -1566,6 +1577,152 @@ must fail when the fix is reverted.
   an adapter 404 on the same route is recorded. A routed rung's 404 inside `route()` is
   recorded (B-066), so only the up-front refusal is invisible to `hearth stats`.
 - **Fix outline:** `router.record_refused(gen_req, exc, ...)` at both up-front checks.
+
+### B-078
+**"Committed and unmodified" asked git's index: `git update-index --assume-unchanged` hid an edited prereg or golden set**
+
+- **Priority:** P0 · **Status:** **FIXED** in `5035970` · **Effort:** S
+- **Evidence:** `prereg.verify_committed` (~286) ran `git diff --quiet HEAD`, which consults
+  the index; `--assume-unchanged` / `--skip-worktree` / a clean filter make it report an
+  edited file as clean. Reviewer attacks D (prereg moved after the score, hidden) and E
+  (committed golden = 40 items the candidate loses, working tree = a cherry-picked set,
+  hidden) both promoted. (second adversarial review, 2026-10-05.)
+- **Fix:** the file's bytes are hashed in Python as a git blob (sha1 or sha256 repo) and
+  compared with `rev-parse HEAD:<path>`; nothing asks the index. `load_prereg` hashes the raw
+  bytes and `check_provenance` refuses if the verified bytes are not the ones parsed. `eval`
+  reads the golden set once and records the git status of those bytes; at promotion
+  `committed_golden_problems` reads the golden blob out of git at the recorded commit,
+  parses it with the eval's parser (`training.eval.parse_golden_jsonl`) and requires its
+  content sha to equal the scored `golden_sha`. Report schema `hearth.eval-report/3`.
+- **Verified:** attacks D and E (both flags) refused on both promotion paths; a re-signed
+  `golden_git.committed: true` refused from the blob; 5 guard mutations killed.
+- **Remains:** a file a clean filter legitimately rewrites (LFS, eol conversion) is refused —
+  the fail-closed side.
+
+### B-079
+**The prereg only had to predate THIS run: `hearth eval` with no prereg printed PASS and p, then the bar was committed and the run repeated**
+
+- **Priority:** P0 · **Status:** **FIXED** in `7736ce2` · **Effort:** M
+- **Evidence:** `check_provenance` (~345-353) compared the prereg commit with this eval's
+  `measured_at`. Reviewer attack A: measure without a prereg (PASS), write + commit the bar,
+  re-measure deterministically, promote — promoted. The bar was chosen after the outcome.
+- **Fix:** `training/ledger.py` — `~/.hearth/measurements.jsonl`, one HMAC-signed record per
+  `hearth eval` (same per-install key), chained by `seq` + previous MAC, flock'd appends,
+  0600. `eval` appends (adapter id, weights hash, task, base, golden sha and the golden repo's
+  HEAD, metric, decode fingerprint, backend, anchor, time) **before scoring**; no ledger, no
+  measurement; an unknown `--metric` is refused before anything is recorded. Promotion takes
+  the adapter's FIRST record (matched by id or weights hash) and requires the prereg's
+  last-change commit to be no later in committer time AND an ancestor of the HEAD recorded
+  then (a backdated commit cannot be). `adapters promote` requires the report's measurement
+  in the ledger with matching fields. **Decision:** `eval` without `--prereg` still prints the
+  verdict, labelled "Exploratory measurement" with the consequence (promotable only under a
+  prereg committed before the first measurement): with the ledger the verdict cannot be used
+  to pick a bar for that adapter, and hiding PASS/FAIL would only hide diagnostics (n too
+  small, no lift) — the score table reveals the outcome anyway.
+- **Verified:** attack A refused on both paths; a peek on a scratch set outside git counts;
+  backdated commit refused by ancestry; same weights under a new id; deleted ledger orphans
+  the report; a tampered ledger refuses promotion and new measurements; 12 guard mutations
+  killed (one redundant guard removed).
+- **Remains (trust assumptions):** whoever can read the key can re-sign a rewritten ledger;
+  whoever can write `~/.hearth` can delete it or truncate its tail, after which new
+  measurements start a fresh history (an orphaned report is still refused). Perturbing the
+  weights makes a new candidate. Knowledge from peeking at a sibling adapter trained the
+  same way is not, and cannot be, tracked. Local wall-clock `measured_at` is trusted.
+
+### B-080
+**Duplicate golden rows satisfied min_n: three distinct items repeated 10x were "n=30"**
+
+- **Priority:** P1 · **Status:** **FIXED** in `5236962` · **Effort:** S
+- **Evidence:** `evaluate_gate` (~578) took n from the vector length. Reviewer attack B: 3
+  distinct items x 10 copies passed min_n=30 and a 30-pair McNemar test — promoted.
+- **Fix:** `GoldenSet.duplicate_prompts()` / `require_distinct()`: a prompt that occurs twice
+  after whitespace-collapsing and case-folding is refused in `score_candidate` (library),
+  `eval`, `prereg init`, `prereg check --golden`, and in the committed blob at promotion.
+  Keyed by prompt, not prompt+expected (one prompt with two labels is not two examples);
+  refused, not deduped (dropping rows would change the sha a prereg pins).
+- **Verified:** attack B refused; near-duplicates refused; 6 guard mutations killed.
+
+### B-081
+**"Same repository as the golden set" was satisfied by copying the golden file into a throwaway repo**
+
+- **Priority:** P1 · **Status:** **FIXED** in `3f5b114` · **Effort:** S–M
+- **Evidence:** `check_provenance` (~335-366) compared only the prereg's repo with the golden
+  file's repo. Reviewer attack C: `git init` a throwaway, copy the golden set, commit it with
+  the prereg, measure, promote — promoted.
+- **Fix:** an **anchored evals repository**: HEARTH's own repository by default (the runbook
+  already registers bars next to `data/<task>_golden.jsonl`), or the one pinned with the new
+  `hearth prereg anchor <repo>` (`~/.hearth/evals-repo`). Each ledger record stores the anchor
+  in force; promotion requires the prereg's repository to be the anchor recorded at the
+  adapter's FIRST measurement. Identity is the resolved common git dir (a worktree counts, a
+  copy does not).
+- **Verified:** attack C refused on both paths; re-anchoring after the first measurement
+  refused; a worktree promotes; 4 guard mutations killed.
+- **Remains:** the anchor is install config — re-pinning before an adapter's first
+  measurement is allowed (and recorded per measurement).
+
+### B-082
+**The incumbent check and the registry write were not atomic; `AdapterStore._save` had no lock and was not atomic**
+
+- **Priority:** P1 · **Status:** **FIXED** in `165fb73` · **Effort:** S
+- **Evidence:** cli.py (~2084-2158) checked the incumbent, then `store.promote` (adapters.py
+  ~192-211) retired whatever was promoted at write time. Reviewer attack F: a promotion landing
+  between check and write was silently retired by a report that had only beaten the base.
+  `_save` was `write_text` with no lock (lost updates; a crash could truncate the registry).
+- **Fix:** every mutation under `fcntl.flock` on `adapters.json.lock`; `_save` writes temp +
+  fsync + `os.replace`. `promote(expected_incumbent=..., precondition=...)` re-checks, under
+  the lock, that the promoted adapter is the one beaten and (precondition) re-runs the report
+  binding checks / re-hashes candidate and incumbent weights.
+- **Verified:** attack F refused (both paths); incumbent weights swapped between check and
+  write refused; 8 threads x 6 registrations lose nothing; failed fsync leaves the file
+  intact; 9 guard mutations killed.
+
+### B-083
+**A duplicated key in a prereg YAML silently kept the last value**
+
+- **Priority:** P2 · **Status:** **FIXED** in `8bd0ed6` · **Effort:** S
+- **Evidence:** PyYAML keeps the last of two equal keys: `min_n: 30 … min_n: 31` read as 31
+  while a reader sees 30.
+- **Fix:** `load_prereg` uses a `SafeLoader` subclass that raises on a repeated key, at any
+  depth. **Verified:** block-form bar and top-level key refused; mutation killed.
+
+### B-084
+**Signed reports did not record the provider/backend; scores from the echo stub or a plugin could promote**
+
+- **Priority:** P2 · **Status:** **FIXED** in `ce9a8e6` · **Effort:** S
+- **Fix:** reports (and ledger records) carry `backend` = `module.Class:name` of the
+  provider; both promotion paths refuse anything but `hearth.serving.pool.ModelPool:mlx`
+  (class, not name: a plugin calling itself "mlx" is refused). Offline suites admit their
+  fakes via a test-only allowlist limited to `test_*` modules.
+- **Verified:** the same passing run is refused without the test allowlist; 3 guard
+  mutations killed. **Remains:** a plugin runs in-process and could patch anything.
+
+### B-085
+**The incumbent adapter was scored on the candidate's base model, not its own**
+
+- **Priority:** P2 · **Status:** **FIXED** in `8bc10f0` · **Effort:** S
+- **Evidence (reviewer: PLAUSIBLE; confirmed):** cli.py (~1642-1652) generated the incumbent
+  with `model=<candidate base>`; promotion.py (~97) expected that model_id. An incumbent
+  trained on another base was measured in a configuration that never serves.
+- **Fix:** the incumbent is scored on its registered base (refused if empty/auto/unservable,
+  exit 2), the report records `incumbent_base_model`, promotion expects
+  `<incumbent base>+<id>`. **Verified:** the pre-fix eval body, reapplied, fails the new
+  test; 4 guard mutations killed.
+
+### B-086
+**Four promotion guards could be deleted with no test failing**
+
+- **Priority:** P2 · **Status:** **FIXED** in `07b6e81`, `0f27170` · **Effort:** S
+- **Evidence:** the reviewer's mutation run: deleting `registration.mismatches(candidate)` in
+  `adapters promote`; setting `GitStatus.commit` to the introducing commit; dropping path +
+  size from the weights digest; the naive-timestamp refusal — all survived.
+- **Fix:** tests that fail on each (a report at another max_tokens/metric; the proof names
+  the last-change commit and a bar tightened after the first measurement is refused in the
+  same second; renaming a file / moving bytes between files changes the digest; a naive
+  timestamp raises). **Verified:** all four (and weights-dotskip) killed. A full re-run of
+  the reviewer's 56 mutations plus ~55 new ones then left four more alive (`0f27170`):
+  bar-alpha-finite, bar-isnumber-bool and vals-n (which also survive at 46125d8 — the
+  B-062 tests matched only the exception type) and a candidate-block measured_at the ledger
+  binding made look redundant. All now killed; the run ends with no survivors.
 
 ---
 

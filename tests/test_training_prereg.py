@@ -304,3 +304,77 @@ def test_the_reviewer_nan_and_loose_bars_no_longer_load(tmp_path):
         )
         with pytest.raises(PreRegError):
             load_prereg(path)
+
+
+@pytest.mark.parametrize(
+    "bar",
+    [
+        # The block form a reviewer skims: the second min_n silently won.
+        "bar:\n  alpha: 0.05\n  min_n: 30\n  min_effect: 0.0\n  min_n: 31\n",
+        # A repeated top-level key: the later golden_sha replaced the first.
+        f"golden_sha: {'ef' * 32}\nbar: {{alpha: 0.05, min_n: 30}}\n",
+    ],
+)
+def test_a_prereg_with_a_duplicated_key_is_refused(tmp_path, bar):
+    """B-083 (L3): PyYAML keeps the LAST of two equal keys; the file must say one thing."""
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        f"task: classify\ngolden_sha: {GOLDEN.sha}\nmetric: exact\nhypothesis: h\n"
+        f"stopping_rule: s\nkill_condition: k\n{bar}",
+        encoding="utf-8",
+    )
+    with pytest.raises(PreRegError, match="duplicate key"):
+        load_prereg(path)
+
+
+def test_check_provenance_refuses_a_prereg_that_changed_after_it_was_parsed(tmp_path):
+    """B-078: the bar enforced must be the bytes verified, not an earlier read of the file."""
+    from hearth.training.prereg import check_provenance
+
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    registration = load_prereg(path)
+    _write(tmp_path, _prereg_body(hypothesis="a different claim"))
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    assert verify_committed(path).committed
+    with pytest.raises(PreRegError, match="changed between being read and being verified"):
+        check_provenance(registration,
+                         first_measurement={"measured_at": "2999-01-01T00:00:00+00:00"},
+                         golden_git={}, golden_sha=GOLDEN.sha)
+
+
+def test_verify_committed_compares_bytes_not_the_index(tmp_path):
+    """`--assume-unchanged` makes `git diff` lie; the blob comparison does not."""
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    _write(tmp_path, _prereg_body(hypothesis="moved after the fact"))
+    _git(tmp_path, "update-index", "--assume-unchanged", "prereg.yaml")
+    status = verify_committed(path)
+    assert status.committed is False
+    assert "uncommitted modifications" in status.reason
+
+
+def test_verify_committed_refuses_a_staged_but_uncommitted_file(tmp_path):
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    status = verify_committed(path)
+    assert status.committed is False
+    assert "not in any commit" in status.reason
+
+
+def test_check_provenance_refuses_a_naive_measurement_timestamp(tmp_path):
+    """B-086: a timestamp with no zone cannot be ordered against a commit time."""
+    from hearth.training.prereg import check_provenance
+
+    _repo(tmp_path)
+    path = _write(tmp_path, _prereg_body())
+    _git(tmp_path, "add", "prereg.yaml")
+    _git(tmp_path, "commit", "-qm", "prereg")
+    with pytest.raises(PreRegError, match="has no timezone"):
+        check_provenance(load_prereg(path),
+                         first_measurement={"measured_at": "2999-01-01T00:00:00"},
+                         golden_git={}, golden_sha=GOLDEN.sha)
