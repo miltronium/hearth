@@ -45,7 +45,7 @@ must fail when the fix is reverted.
 - [B-014](#b-014) Untested end to end: a cmux open-tier launch; the `/chat` agent toggle in a browser
 
 **P3: hygiene**
-- [B-015](#b-015) `scripts/train_lora_real.sh --promote` always fails (removed flags)
+- ~~[B-015](#b-015) `scripts/train_lora_real.sh --promote` always fails (removed flags)~~ — fixed in `6fcb1c4`
 - [B-016](#b-016) `docs/RESULTS.md` and `docs/HANDOFF.md` are stale; HANDOFF isn't monitored
 - [B-017](#b-017) `docs/LEARNING_plan.md` cites stale line numbers and a wrong class count
 - [B-018](#b-018) ruff: 82 findings outside `src/`
@@ -544,7 +544,7 @@ must fail when the fix is reverted.
 ### B-015
 **`scripts/train_lora_real.sh --promote` always fails: it passes flags the CLI has removed**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `6fcb1c4` (post-training eval path not run: needs the GPU) · **Effort:** S
 - **Evidence:** `scripts/train_lora_real.sh:147,153-154` requires `--candidate-score` and
   calls `hearth adapters promote <id> --candidate-score ... [--incumbent-score ...]`.
   `cli.py:1270-1301` keeps those options hidden only to reject them: it prints "have been
@@ -1910,3 +1910,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `a372aaf` | **B-126.** Ledger chain clauses, append flock, MAC lookup and committed-blob duplicate check each killed by a test. **B-123** documented as residual trust. |
 | `cb5bb84` | **B-013 (part).** `search_files` agent tool; the gateway reachability check derives from one FILE_TOOLS set. |
 | `bccd7f3` | **B-012.** HTTP agent gets the ledger tools when a ledger exists, and a request `collection` pins rag_search. |
+| `6fcb1c4` | **B-015.** train_lora_real.sh --promote runs `hearth eval --prereg --promote`; golden/prereg checked before training; typed-score flags refused. |
