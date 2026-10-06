@@ -52,7 +52,7 @@ must fail when the fix is reverted.
 - [B-019](#b-019) Unregistered weights on disk: `Qwen/Qwen2.5-0.5B-Instruct`
 - [B-020](#b-020) Starlette deprecation: `httpx` with `starlette.testclient`
 - [B-021](#b-021) `audit_resolution` swaps `socket.socket.connect` process-wide
-- [B-022](#b-022) `REASON_LOCAL_FAILURE` is declared and never used
+- ~~[B-022](#b-022) `REASON_LOCAL_FAILURE` is declared and never used~~ — fixed in `dba1169`
 - [B-023](#b-023) Test-infra trap: empty `NO_PROXY` hides client disconnects from loopback tests
 
 **Added 2026-10-03 (found while closing B-001)**
@@ -664,7 +664,7 @@ must fail when the fix is reverted.
 ### B-022
 **`REASON_LOCAL_FAILURE` is declared and never used**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `dba1169` (removed) · **Effort:** S
 - **Evidence:** `router/route.py:40`. `grep -rn REASON_LOCAL_FAILURE src tests` hits only the
   declaration.
 - **Impact:** It suggests local failures get recorded with a reason. They don't (B-003).
