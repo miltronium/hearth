@@ -1285,7 +1285,6 @@ From `status/probes.py:_EXTRA_ENV_NAMES`:
 | `HEARTH_TRAIN_TASK` | `extract` | `scripts/train_lora_real.sh` only | |
 | `HEARTH_TRAIN_ITERS` | `200` | `scripts/train_lora_real.sh` only | |
 | `HEARTH_TRAIN_OUT` | — | `scripts/train_lora_real.sh` only | |
-| `HEARTH_CANDIDATE_SCORE`, `HEARTH_INCUMBENT_SCORE` | — | `scripts/train_lora_real.sh` only | feed the removed typed-score promote path; promotion fails (B-015) |
 
 Used only by examples (not HEARTH itself): `HEARTH_URL`, `HEARTH_TOKEN`
 (`examples/cambot_offload.py`), `HEARTH_REPO` (`examples/cmux/pane_offload_live.sh`).

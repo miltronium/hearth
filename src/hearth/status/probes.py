@@ -1000,8 +1000,6 @@ _EXTRA_ENV_NAMES = frozenset(
         "HEARTH_TRAIN_ITERS",
         "HEARTH_TRAIN_OUT",
         "HEARTH_TRAIN_TASK",
-        "HEARTH_CANDIDATE_SCORE",
-        "HEARTH_INCUMBENT_SCORE",
     }
 )
 

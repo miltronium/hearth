@@ -87,3 +87,31 @@ def test_the_script_uses_the_checker_not_a_hub_only_lookup():
     text = _SCRIPT.read_text()
     assert "check_base_on_disk.py" in text
     assert "snapshot_download" not in text, "a hub-only cache check is back in the script"
+
+
+# -- B-015: --promote goes through the real gate, and is checked before any training --------
+
+import subprocess as _sp  # noqa: E402
+from pathlib import Path as _P  # noqa: E402
+
+_SCRIPT = _P(__file__).resolve().parent.parent / "scripts" / "train_lora_real.sh"
+
+
+def _run_script(tmp_path, *args):
+    data = tmp_path / "d.jsonl"
+    data.write_text("{}\n")
+    return _sp.run(["bash", str(_SCRIPT), "--data", str(data), *args],
+                   capture_output=True, text=True, timeout=60)
+
+
+def test_promote_without_a_golden_set_and_prereg_refuses_before_training(tmp_path):
+    r = _run_script(tmp_path, "--promote")
+    assert r.returncode == 2
+    assert "requires --golden and --prereg" in r.stderr
+    assert "Training" not in r.stdout  # no GPU spent on a run that could not be promoted
+
+
+def test_the_removed_typed_score_flags_are_refused(tmp_path):
+    for flag in ("--candidate-score", "--incumbent-score"):
+        r = _run_script(tmp_path, flag, "0.9")
+        assert r.returncode == 2 and "was removed" in r.stderr, flag

@@ -21,8 +21,8 @@ DATA="${HEARTH_TRAIN_DATA:-}"
 TASK="${HEARTH_TRAIN_TASK:-extract}"
 ITERS="${HEARTH_TRAIN_ITERS:-200}"
 OUT="${HEARTH_TRAIN_OUT:-}"
-CANDIDATE_SCORE="${HEARTH_CANDIDATE_SCORE:-}"
-INCUMBENT_SCORE="${HEARTH_INCUMBENT_SCORE:-}"
+GOLDEN=""
+PREREG=""
 DO_PROMOTE=0
 
 usage() {
@@ -44,20 +44,23 @@ Options:
                            code). Default: extract.
   --iters <n>              Training iterations. Default: 200.
   --out <dir>              Run output dir. Default: ~/.hearth/train/<timestamp>.
-  --promote                After training, promote the candidate. Requires --candidate-score.
-  --candidate-score <f>    Candidate eval score in [0,1] proving it beat the incumbent.
-  --incumbent-score <f>    Incumbent eval score (omit if no incumbent for this task).
+  --promote                After training, measure the candidate and promote it only if it
+                           passes the gate: runs `hearth eval <id> --golden G --prereg P
+                           --promote`. Requires --golden and --prereg. The prereg must be
+                           committed BEFORE this run (this run is the adapter's first
+                           measurement) — see docs/RUNBOOK_training.md §4.
+  --golden <file>          Golden set JSONL (committed in the evals repository).
+  --prereg <file>          Committed pre-registration YAML (`hearth prereg init`).
   -h, --help               Show this help.
 
 Environment equivalents: HEARTH_BASE_MODEL, HEARTH_TRAIN_DATA, HEARTH_TRAIN_TASK,
-HEARTH_TRAIN_ITERS, HEARTH_TRAIN_OUT, HEARTH_CANDIDATE_SCORE, HEARTH_INCUMBENT_SCORE.
+HEARTH_TRAIN_ITERS, HEARTH_TRAIN_OUT.
 
 Example:
   scripts/train_lora_real.sh --data data/extract.jsonl --task extract --iters 300
-  # inspect: hearth adapters list --task extract
-  # eval it (see runbook), then:
+  # train, then measure + promote under a bar committed beforehand:
   scripts/train_lora_real.sh --data data/extract.jsonl --task extract \
-      --promote --candidate-score 0.82 --incumbent-score 0.71
+      --promote --golden data/extract_golden.jsonl --prereg prereg/extract.yaml
 USAGE
 }
 
@@ -70,14 +73,25 @@ while [ $# -gt 0 ]; do
     --iters) ITERS="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --promote) DO_PROMOTE=1; shift ;;
-    --candidate-score) CANDIDATE_SCORE="$2"; shift 2 ;;
-    --incumbent-score) INCUMBENT_SCORE="$2"; shift 2 ;;
+    --golden) GOLDEN="$2"; shift 2 ;;
+    --prereg) PREREG="$2"; shift 2 ;;
+    --candidate-score|--incumbent-score)
+      echo "error: $1 was removed: a typed score cannot promote an adapter (B-015)." >&2
+      echo "       Use --promote --golden <file> --prereg <file>; see docs/RUNBOOK_training.md §4-6." >&2
+      exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# --promote is checked BEFORE training: a missing golden set or prereg must not cost a GPU run.
+if [ "${DO_PROMOTE}" -eq 1 ]; then
+  [ -n "${GOLDEN}" ] && [ -n "${PREREG}" ] || { echo "error: --promote requires --golden and --prereg" >&2; exit 2; }
+  [ -f "${GOLDEN}" ] || { echo "error: golden set not found: ${GOLDEN}" >&2; exit 2; }
+  [ -f "${PREREG}" ] || { echo "error: pre-registration not found: ${PREREG}" >&2; exit 2; }
+fi
 
 # --- offline enforcement: never touch the network ------------------------------------
 # Force HF into offline mode so a missing cache errors out instead of silently downloading.
@@ -138,15 +152,14 @@ uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}"
 
 # --- promote (optional, eval-gated) --------------------------------------------------
 if [ "${DO_PROMOTE}" -eq 1 ]; then
-  [ -n "${CANDIDATE_SCORE}" ] || die "--promote requires --candidate-score (prove the eval gate passed)"
   # hearth train names the candidate <task>-<run-id>; the newest one is what we just made.
   ADAPTER_ID="$(uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}" --status candidate \
     | awk 'NR>3 {print $1}' | grep -v '^$' | tail -1 || true)"
   [ -n "${ADAPTER_ID}" ] || die "could not find a candidate adapter to promote for task '${TASK}'"
-  echo "==> Promoting ${ADAPTER_ID} (candidate=${CANDIDATE_SCORE} incumbent=${INCUMBENT_SCORE:-none})…"
-  PROMOTE_CMD=(uv run --no-sync --project "$REPO_ROOT" hearth adapters promote "${ADAPTER_ID}" --candidate-score "${CANDIDATE_SCORE}")
-  [ -n "${INCUMBENT_SCORE}" ] && PROMOTE_CMD+=(--incumbent-score "${INCUMBENT_SCORE}")
-  "${PROMOTE_CMD[@]}"
+  echo "==> Measuring ${ADAPTER_ID} under ${PREREG}; promoting only if the gate passes…"
+  # Exit status is the gate's: a FAIL or any refusal leaves the adapter a candidate.
+  uv run --no-sync --project "$REPO_ROOT" hearth eval "${ADAPTER_ID}" \
+    --golden "${GOLDEN}" --prereg "${PREREG}" --promote
   echo "==> Final adapter state:"
   uv run --no-sync --project "$REPO_ROOT" hearth adapters list --task "${TASK}"
 fi

@@ -931,14 +931,8 @@ Read directly from the environment, outside Settings:
 \fBHEARTH_BASE_MODEL\fR (default: mlx\-community/Qwen2.5\-Coder\-7B\-Instruct\-4bit)
 Base model for scripts/train_lora_real.sh only.
 .TP
-\fBHEARTH_CANDIDATE_SCORE\fR (default: unset)
-scripts/train_lora_real.sh only; feeds the removed typed\-score promote path.
-.TP
 \fBHEARTH_DEFAULT_MODEL\fR (default: the default: key of config/models.yaml)
 Registry id served when a request names no model (or 'auto' finds no per\-class rung). Must be a registered id: an unregistered value is currently ignored with a warning, doctor shows a WARN row, and /v1/hearth/admin/ready reports failed (docs/BUGS.md B\-047 tracks making it a startup error). The name is HEARTH_DEFAULT_MODEL, not HEARTH_MODEL; misspelled HEARTH_* names are silently ignored. Confirm with hearth models list.
-.TP
-\fBHEARTH_INCUMBENT_SCORE\fR (default: unset)
-scripts/train_lora_real.sh only; feeds the removed typed\-score promote path.
 .TP
 \fBHEARTH_MODELS_YAML\fR (default: <repo>/config/models.yaml)
 Alternate model registry file.
