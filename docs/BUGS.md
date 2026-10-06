@@ -49,8 +49,8 @@ must fail when the fix is reverted.
 - ~~[B-016](#b-016) `docs/RESULTS.md` and `docs/HANDOFF.md` are stale; HANDOFF isn't monitored~~ — fixed in `470f3db`
 - ~~[B-017](#b-017) `docs/LEARNING_plan.md` cites stale line numbers and a wrong class count~~ — fixed in `470f3db`
 - [B-018](#b-018) ruff: 82 findings outside `src/`
-- [B-019](#b-019) Unregistered weights on disk: `Qwen/Qwen2.5-0.5B-Instruct`
-- [B-020](#b-020) Starlette deprecation: `httpx` with `starlette.testclient`
+- ~~[B-019](#b-019) Unregistered weights on disk: `Qwen/Qwen2.5-0.5B-Instruct`~~ — kept by operator decision 2026-10-06 (CoreML reference model)
+- ~~[B-020](#b-020) Starlette deprecation: `httpx` with `starlette.testclient`~~ — fixed 2026-10-06 (`httpx2` in the `dev` extra)
 - [B-021](#b-021) `audit_resolution` swaps `socket.socket.connect` process-wide
 - ~~[B-022](#b-022) `REASON_LOCAL_FAILURE` is declared and never used~~ — fixed in `dba1169`
 - [B-023](#b-023) Test-infra trap: empty `NO_PROXY` hides client disconnects from loopback tests
@@ -637,7 +637,11 @@ must fail when the fix is reverted.
 ### B-019
 **Unregistered weights on disk: `Qwen/Qwen2.5-0.5B-Instruct`**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **DECIDED 2026-10-06: kept** (operator) · **Effort:** S
+- **Correction 2026-10-06:** not "served by nothing" in the repo sense:
+  `scripts/coreml_stateful_reference.py:57` uses it as the CoreML export reference model.
+  No `config/` or `src/` path serves it. The status `UNREGISTERED` warn is expected and stays;
+  it is accurate (nothing in `config/models.yaml` names it).
 - **Evidence:** Status: `[warn ] Qwen/Qwen2.5-0.5B-Instruct: on disk but UNREGISTERED (953.3
   MiB) — weights in the hub cache name no entry in config/models.yaml`.
 - **Impact:** 953 MiB nothing can serve and nothing will garbage-collect. Someone may also
@@ -650,14 +654,36 @@ must fail when the fix is reverted.
 ### B-020
 **Starlette deprecation: `httpx` with `starlette.testclient`**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED 2026-10-06**: `httpx2>=2.13.1` in the `dev` extra,
+  added by the operator from their own shell (lockfile: +4 packages, all from pypi.org) ·
+  **Effort:** S
+- **Verified:** the replacement acceptance test errored at import before the change and
+  passes after it (93 gateway tests). Control with the filter set in code: hiding `httpx2`
+  raises the warning as an error, and with it installed the import is clean. (Plain
+  `python -W error::starlette.exceptions...` silently ignores the filter, because the class is
+  not importable at interpreter startup. pytest resolves it later.) Full suite: 1807 passed,
+  1 skipped.
+- **Correction 2026-10-06 — the acceptance test below could not fail.**
+  `StarletteDeprecationWarning` subclasses `UserWarning` (`starlette/exceptions.py:36`), not
+  `DeprecationWarning`. Measured: `-W error::DeprecationWarning` gives `7 passed` on
+  `tests/test_gateway.py` with the warning present; the class-specific filter errors at
+  import. Use the replacement acceptance test.
+- **Do not run `uv add` from a Claude session here:** the session sets `UV_DEFAULT_INDEX` to an
+  internal mirror, and `uv add` wrote it into `pyproject.toml` (`[[tool.uv.index]]`) and
+  rewrote every `uv.lock` source to it (reverted). Run it from the operator's own shell, and
+  check `uv.lock` names only `pypi.org`. `dev` is an *extra* here, so the command is
+  `uv add --optional dev httpx2 --no-sync`, not `--dev` (which would create a separate uv
+  dependency group), and `--no-sync` avoids the CLAUDE.md §1 prune.
 - **Evidence:** Importing `fastapi.testclient` prints `StarletteDeprecationWarning: Using
   httpx with starlette.testclient is deprecated; install httpx2 instead.` (seen while running
   the B-003 probe).
 - **Impact:** None today. It breaks when Starlette drops httpx support.
 - **Fix outline:** Move to the replacement Starlette names, under the pyproject ceiling.
   Pin the version that does.
-- **Acceptance test:** `pytest -W error::DeprecationWarning` over the gateway tests passes.
+- **Acceptance test (replaced 2026-10-06):**
+  `pytest -W error::starlette.exceptions.StarletteDeprecationWarning tests/test_gateway*.py`
+  passes, and fails again if `httpx2` is uninstalled. `uv.lock` contains no non-`pypi.org`
+  registry.
 
 ### B-021
 **`providers/mlx.py:audit_resolution` swaps `socket.socket.connect` process-wide**

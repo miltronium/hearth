@@ -213,15 +213,44 @@ them (CLAUDE.md §4). Commit them in the repo (the evals anchor).
 
 ## 6. Optional cleanups — *your files / your config*
 
-- **Unregistered weights (B-019):** `Qwen/Qwen2.5-0.5B-Instruct` (953 MiB) sits in the HF cache,
-  served by nothing. Delete it, or register it in `config/models.yaml` if you want it:
-  `rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct`
-- **Claude sandbox allowlist:** `~/.claude/apple/tool_allowlist.csv` has `acc,contains_match`
-  — any command containing "acc" (accept, access, accuracy…) runs outside the sandbox. Narrow
-  it to the exact command you meant (e.g. `acc,exact` or the full command line).
-- **Starlette deprecation (B-020):** fixing it means adding a dependency (`httpx2`); your call
-  whether to change the lockfile (`uv add --dev httpx2`, then
-  `uv sync --extra mlx --extra mcp --extra dev --extra files`).
+- **0.5B weights (B-019): kept, 2026-10-06.** `Qwen/Qwen2.5-0.5B-Instruct` (953 MiB, HF
+  cache) is not served by HEARTH but is the reference model of
+  `scripts/coreml_stateful_reference.py`. The status `UNREGISTERED` warn is expected.
+- **Claude sandbox allowlist:** `~/.claude/apple/tool_allowlist.csv` is wider than one entry.
+  As of 2026-10-06 it has 31 `contains_match` entries, and each one lets *any* command that
+  contains the string run outside the sandbox. Among them: `python3`, `bash`, `sudo`, `curl`,
+  `git`, `ssh`, `docker`, `node`, `x.com` and `acc` (which also matches accept, access,
+  accuracy…). The valid match types are `contains_match` and `exact_match`; there is no prefix
+  match, so a short CLI name cannot be narrowed to "commands starting with it". Either remove
+  an entry, or replace it with `exact_match` lines for the full commands you actually run.
+  Review in the ACC Dashboard's **Tools** tab, which shows what each entry opens. This is your
+  config: an agent should not edit it.
+- **Starlette deprecation (B-020): done 2026-10-06.** It added `httpx2` to the `dev` extra. Kept here as the procedure for any future dependency change. **Run this from your own
+  shell, not a Claude session.** Claude sessions set `UV_DEFAULT_INDEX` to an internal mirror,
+  and `uv add` writes it into `pyproject.toml` and every `uv.lock` source. This should print
+  nothing:
+
+  ```sh
+  env | grep '^UV_'
+  ```
+
+  Add it without syncing. `dev` is an extra, so it takes `--optional dev`, not `--dev`:
+
+  ```sh
+  uv add --optional dev httpx2 --no-sync
+  ```
+
+  Check: a small diff, and `0` lockfile lines naming any registry other than pypi.org:
+
+  ```sh
+  git diff --stat pyproject.toml uv.lock; grep 'registry = ' uv.lock | grep -vc 'pypi.org/simple'
+  ```
+
+  Then sync every extra in one command (CLAUDE.md §1):
+
+  ```sh
+  uv sync --extra mlx --extra mcp --extra dev --extra files
+  ```
 
 ## 7. Decisions that are yours
 
