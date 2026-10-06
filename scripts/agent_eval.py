@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,20 @@ def extract_corpus(commit: str, path: str, dest: Path) -> Path:
     if not root.is_dir():
         raise RuntimeError(f"{path!r} is not a directory at {commit}")
     return root
+
+
+def corpus_dir(commit: str) -> Path:
+    """A fixed extraction directory for ``commit``, recreated empty on every run.
+
+    Not a random ``mkdtemp`` name: the corpus path appears in every tool observation, so a
+    different directory name per run is different prompt text, and greedy decoding diverged on
+    it. With random names the same code scored 9/10 and then 8/10, which made every comparison
+    between tool versions noise.
+    """
+    path = Path(tempfile.gettempdir()) / f"hearth-agent-eval-{commit[:12]}"
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True)
+    return path
 
 
 def corpus_files(root: Path) -> dict[str, str]:
@@ -248,8 +263,9 @@ def main() -> int:
     args = ap.parse_args()
 
     commit, path, items = load_spec(args.spec)
-    with tempfile.TemporaryDirectory(prefix="hearth-agent-eval-") as tmp:
-        root = extract_corpus(commit, path, Path(tmp))
+    workdir = corpus_dir(commit)
+    try:
+        root = extract_corpus(commit, path, workdir)
         problems = verify_key(items, corpus_files(root))
         if problems:
             print("ANSWER KEY DOES NOT HOLD at the pinned commit:", file=sys.stderr)
@@ -260,6 +276,8 @@ def main() -> int:
         if args.check_only:
             return 0
         outcomes = run_items(items, root, args)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
     summary = summarize(outcomes, args, commit)
     print(json.dumps(summary, indent=2))

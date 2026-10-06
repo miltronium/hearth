@@ -399,7 +399,8 @@ def test_a_completed_run_streams_steps_then_a_terminal_event_then_done(
     assert [s["index"] for s in steps] == [1, 2, 3]
     assert steps[0]["tool"] == "list_files"
     assert steps[1]["tool"] == "read_file"
-    assert steps[1]["arguments"] == {"path": path}
+    # The validated arguments the tool ran with, defaults included (B-130 added the range).
+    assert steps[1]["arguments"] == {"path": path, "start_line": 1, "max_lines": 0}
     assert "120.50" in steps[1]["observation"]
     assert steps[1]["model_seconds"] >= 0.0 and steps[1]["backend"] == "scripted"
     assert steps[2]["kind"] == "answer"

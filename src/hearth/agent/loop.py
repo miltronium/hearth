@@ -554,7 +554,11 @@ class Agent:
             tool=action.name,
             arguments=dict(outcome.arguments),
             observation=(
-                render_observation(outcome.value, self.budget.max_observation_chars)
+                render_observation(
+                    outcome.value,
+                    self.budget.max_observation_chars,
+                    self.registry.get(action.name).truncation_hint,
+                )
                 if outcome.ok
                 else None
             ),

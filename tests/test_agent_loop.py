@@ -564,3 +564,37 @@ def test_the_built_in_toolset_passes_the_vetting_gate(local_policy, settings):
 def test_a_bound_that_could_never_stop_anything_is_refused(kwargs):
     with pytest.raises(AgentConfigError):
         Budget(**kwargs)
+
+
+# -- B-130: a fact past the observation cap is reachable through the real read_file ---------
+
+
+def test_a_fact_past_the_observation_cap_is_reachable_by_a_ranged_read(tmp_path, local_policy):
+    from hearth.agent.builtins import read_file_tool
+    from hearth.config import Settings
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    lines = [f"filler line {n} " + "x" * 40 for n in range(1, 301)]
+    lines[199] = "`require_answer()` raises"
+    lines[200] = "`AgentIncompleteError` naming the stop reason."
+    path = root / "AGENT.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tool = read_file_tool(settings=Settings(file_roots=str(root), home=tmp_path / ".hearth"))
+
+    agent = _agent(
+        [
+            _call("read_file", path=str(path)),
+            _call("read_file", path=str(path), start_line=198, max_lines=5),
+            _answer("require_answer()"),
+        ],
+        [tool],
+        local_policy,
+    )
+    run = agent.run("Which method raises AgentIncompleteError?")
+
+    first, second = run.steps[0].observation, run.steps[1].observation
+    assert "require_answer()" not in first  # the whole-file read is cut before the fact
+    assert "truncated" in first and "start_line" in first  # and says how to go further
+    assert "200: `require_answer()` raises" in second
+    assert run.completed and run.answer == "require_answer()"

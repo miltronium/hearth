@@ -128,6 +128,13 @@ class Tool:
     ``returns`` describes the shape of what comes back, in one line, for the same reason
     parameter descriptions exist — a model that does not know what a tool returns cannot plan
     the step after it.
+
+    ``truncation_hint`` is what the truncation marker tells the model to do next when this
+    tool's output was cut. It must name something the tool really accepts: the generic "narrow
+    the request" sent the agent to a ``read_file`` that took only a path (B-130). It is a
+    string, or a callable ``(shown, full) -> str`` when the advice depends on where the cut
+    fell: a hint without a concrete line number was read as a *character* offset
+    (``start_line: 4001`` on a 655-line file).
     """
 
     name: str
@@ -135,6 +142,7 @@ class Tool:
     call: Callable[..., Any]
     params: tuple[ToolParam, ...] = ()
     returns: str = ""
+    truncation_hint: str | Callable[[str, str], str] = ""
 
     def __post_init__(self) -> None:
         if not _NAME_RE.match(self.name):
@@ -286,20 +294,28 @@ class ToolOutcome:
         return self.error is None
 
 
-def render_observation(value: Any, limit: int) -> str:
+def render_observation(
+    value: Any, limit: int, hint: str | Callable[[str, str], str] = ""
+) -> str:
     """Render a tool's return value as the text the model sees, truncated **visibly**.
 
     Truncation is the point. A single ``read_file`` on a large document can consume an
     agent's entire token budget in one step, so observations are capped — but a silently
     shortened observation is a model reasoning over data it thinks it has and doesn't. The
     marker states the cut and the original size, so the model can narrow its next call
-    instead of confidently summarising a fragment.
+    instead of confidently summarising a fragment. ``hint`` is the calling tool's
+    :attr:`Tool.truncation_hint`, saying *how* to narrow it.
     """
     text = value if isinstance(value, str) else _to_text(value)
     if limit > 0 and len(text) > limit:
+        shown = text[:limit]
+        if callable(hint):
+            advice = hint(shown, text)
+        else:
+            advice = hint or "Narrow the request if you need the rest."
         return (
-            f"{text[:limit]}\n[... truncated: showing the first {limit} of {len(text)} "
-            "characters. Narrow the request if you need the rest.]"
+            f"{shown}\n[... truncated: showing the first {limit} of {len(text)} "
+            f"characters. {advice}]"
         )
     return text
 

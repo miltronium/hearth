@@ -266,8 +266,9 @@ them (CLAUDE.md §4). Commit them in the repo (the evals anchor).
   so B-009 stays open as a design task. Do not run that profile until it has a real signal.
 - **Agent eval set (rest of B-013).** **Smoke set built 2026-10-06:** `data/agent_eval.yaml`,
   10 questions you vouched for, over `docs/` pinned at `a50d2be`. Run it with the command
-  below. First result: 9/10 with Coder-7B at 6 steps; the miss is a tool limit (B-130). Grow
-  it to ≥ 30 before claiming anything about the step cap.
+  below. With Coder-7B at 6 steps (fixed-path runner, reproducible): 8/10 on the old tools, 9/10
+  after the B-130 fix. One item is not a significant difference. Grow it to ≥ 30 before
+  claiming anything about the step cap or a tool change.
 
   ```sh
   uv run --no-sync python scripts/agent_eval.py --max-iterations 6 --out /tmp/agent_eval.json

@@ -32,6 +32,7 @@ settings object, so two agents in one process cannot reach each other's data.
 from __future__ import annotations
 
 import datetime
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,9 @@ FILE_TOOLS = frozenset({"read_file", "list_files", "search_files"})
 DEFAULT_SEARCH_FILES = 500
 DEFAULT_SEARCH_MATCHES = 40
 SEARCH_SNIPPET_CHARS = 200
+#: Most context lines search_files will show around a match. Each one costs observation space
+#: that the loop caps (Budget.max_observation_chars), so this stays small.
+MAX_SEARCH_CONTEXT = 3
 
 #: Cap on how many ledger rows ``finance_rows`` will return in one call.
 DEFAULT_ROW_LIMIT = 50
@@ -76,6 +80,33 @@ def _under_roots(path: str, settings: Any | None = None) -> str:
     return path  # unresolvable: let resolve_under_roots produce the real refusal
 
 
+_RANGE_HEADER = re.compile(r"\[lines (\d+)-(\d+) of (\d+)\]")
+_NUMBERED_LINE = re.compile(r"^(\d+): ", re.MULTILINE)
+
+
+def _read_file_hint(shown: str, full: str) -> str:
+    """Where to resume a cut-off ``read_file``, as a *file* line number.
+
+    A whole-file read counts the newlines that were shown. A ranged read counts nothing
+    itself: its lines carry their own numbers, and counting the observation's newlines said
+    "line 60 of 60" for lines 253-312, which would send the model backwards. Either way the
+    line the cut falls inside was not seen whole, so reading resumes *at* it.
+    """
+    header = _RANGE_HEADER.match(full)
+    if header:
+        numbered = _NUMBERED_LINE.findall(shown)
+        next_line = int(numbered[-1]) if numbered else int(header.group(1))
+        total = int(header.group(3))
+    else:
+        next_line = shown.count("\n") + 1
+        total = full.count("\n") + (0 if full.endswith("\n") else 1)
+    return (
+        f"You saw up to part of line {next_line} of {total}. To read on, call read_file with "
+        f"start_line={next_line} and max_lines=60 (start_line counts lines, not characters), "
+        "or use search_files to find the line you need."
+    )
+
+
 def read_file_tool(*, settings: Any | None = None) -> Tool:
     """A tool that reads one allowlisted local file as text.
 
@@ -84,16 +115,36 @@ def read_file_tool(*, settings: Any | None = None) -> Tool:
     and the refusal message names the path and the reason but never the content — which
     matters more here than in MCP, because this message is written back into a prompt and
     then into a stored transcript.
+
+    ``start_line`` / ``max_lines`` select a range, returned with line numbers that match
+    ``search_files``'s. Without them a file longer than the loop's observation cap was readable
+    only up to the cap: a fact at character 10,617 of a 37,562-character file could not be
+    reached, and the truncation marker told the model to narrow a call that had nothing to
+    narrow (B-130).
     """
 
-    def read_file(path: str) -> str:
-        return read_text_file(_under_roots(path, settings), settings=settings)
+    def read_file(path: str, start_line: int = 1, max_lines: int = 0) -> str:
+        text = read_text_file(_under_roots(path, settings), settings=settings)
+        if start_line == 1 and max_lines == 0:
+            return text
+        if start_line < 1:
+            raise ValueError("start_line counts from 1")
+        if max_lines < 0:
+            raise ValueError("max_lines must be 0 (to the end) or more")
+        lines = text.splitlines()
+        if start_line > len(lines):
+            raise ValueError(f"start_line {start_line} is past the end: the file has "
+                             f"{len(lines)} line(s)")
+        end = len(lines) if max_lines == 0 else min(len(lines), start_line + max_lines - 1)
+        body = "\n".join(f"{n}: {lines[n - 1]}" for n in range(start_line, end + 1))
+        return f"[lines {start_line}-{end} of {len(lines)}]\n{body}"
 
     return Tool(
         name="read_file",
         description=(
             "Read one local file as text. Only paths inside the operator's allowed roots "
-            "can be read; use list_files first if you do not already know the exact path."
+            "can be read; use list_files first if you do not already know the exact path. "
+            "For a long file, read part of it with start_line and max_lines."
         ),
         call=read_file,
         params=(
@@ -105,8 +156,29 @@ def read_file_tool(*, settings: Any | None = None) -> Tool:
                     "to an allowed root works; so does an absolute one."
                 ),
             ),
+            ToolParam(
+                name="start_line",
+                type="integer",
+                description=(
+                    "First line to return, counting from 1. To read around a search_files "
+                    "match on line N, use a few lines before N."
+                ),
+                required=False,
+                default=1,
+            ),
+            ToolParam(
+                name="max_lines",
+                type="integer",
+                description="How many lines to return from start_line; 0 means to the end.",
+                required=False,
+                default=0,
+            ),
         ),
-        returns="the file's text (CSV and spreadsheets come back as 'a | b | c' rows)",
+        returns=(
+            "the file's text (CSV and spreadsheets come back as 'a | b | c' rows); with "
+            "start_line or max_lines, the selected lines, each prefixed 'N: '"
+        ),
+        truncation_hint=_read_file_hint,
     )
 
 
@@ -141,6 +213,13 @@ def _walk(root: str, pattern: str, settings: Any | None):
                 yield str(resolved)
 
 
+def _snippet(line: str) -> str:
+    snippet = line.strip()
+    if len(snippet) > SEARCH_SNIPPET_CHARS:
+        snippet = snippet[:SEARCH_SNIPPET_CHARS] + "…"
+    return snippet
+
+
 def search_files_tool(
     *,
     settings: Any | None = None,
@@ -157,12 +236,16 @@ def search_files_tool(
     to get wrong). Files that cannot be read are counted, never quoted.
     """
 
-    def search_files(text: str, root: str = "", pattern: str = "*") -> list[str]:
+    def search_files(
+        text: str, root: str = "", pattern: str = "*", context: int = 0
+    ) -> list[str]:
         needle = text.strip().casefold()
         if not needle:
             raise ValueError("text must not be empty: say what to look for")
+        if not 0 <= context <= MAX_SEARCH_CONTEXT:
+            raise ValueError(f"context must be between 0 and {MAX_SEARCH_CONTEXT}")
         hits: list[str] = []
-        scanned = skipped = 0
+        scanned = skipped = matches = 0
         for path in _walk(root, pattern, settings):
             if scanned >= max_files:
                 hits.append(
@@ -175,17 +258,28 @@ def search_files_tool(
             except FileAccessError:
                 skipped += 1
                 continue
-            for number, line in enumerate(body.splitlines(), start=1):
+            lines = body.splitlines()
+            for number, line in enumerate(lines, start=1):
                 if needle in line.casefold():
-                    snippet = line.strip()
-                    if len(snippet) > SEARCH_SNIPPET_CHARS:
-                        snippet = snippet[:SEARCH_SNIPPET_CHARS] + "…"
-                    hits.append(f"{path}:{number}: {snippet}")
-                    if len(hits) >= max_matches:
+                    # Context lines use '-' where the match uses ':', as grep -C does, and do
+                    # not count toward max_matches.
+                    for n in range(max(1, number - context), number):
+                        hits.append(f"{path}-{n}- {_snippet(lines[n - 1])}")
+                    hits.append(f"{path}:{number}: {_snippet(line)}")
+                    for n in range(number + 1, min(len(lines), number + context) + 1):
+                        hits.append(f"{path}-{n}- {_snippet(lines[n - 1])}")
+                    matches += 1
+                    if matches >= max_matches:
                         hits.append(f"[... truncated at {max_matches} matches. Search for "
                                     "something more specific.]")
                         return hits
-        if not hits:
+        if not hits and scanned == 0:
+            # Not "the text is absent": no file name matched the glob, so nothing was searched.
+            # Said plainly, because a model told "no match" retried *.txt, *.log, *.conf ... and
+            # never the '*' that would have found the file (B-130 eval).
+            hits.append(f"[no file name matches pattern {pattern!r}, so nothing was searched. "
+                        "Use pattern '*' to search every file.]")
+        elif not hits:
             hits.append(f"[no match in {scanned} file(s)"
                         + (f"; {skipped} could not be read" if skipped else "") + "]")
         elif skipped:
@@ -219,8 +313,24 @@ def search_files_tool(
                 required=False,
                 default="*",
             ),
+            ToolParam(
+                name="context",
+                type="integer",
+                description=(
+                    f"Lines to show before and after each match, 0 to {MAX_SEARCH_CONTEXT}. "
+                    "Use 1 or 2 when the answer may sit on a line next to the match."
+                ),
+                required=False,
+                default=0,
+            ),
         ),
-        returns=f"'path:line: text' for each matching line, at most {max_matches} of them",
+        returns=(
+            f"'path:line: text' for each matching line, at most {max_matches} of them; with "
+            "context, neighbouring lines as 'path-line- text'"
+        ),
+        truncation_hint=(
+            "Search for something more specific, or pass a narrower root or pattern."
+        ),
     )
 
 

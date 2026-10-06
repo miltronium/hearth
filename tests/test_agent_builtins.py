@@ -385,3 +385,140 @@ def test_a_run_with_only_file_tools_and_no_roots_is_still_unreachable():
 
     assert _is_reachable(sorted(FILE_TOOLS), roots=[]) is False
     assert _is_reachable(["read_file", "list_files", "search_files", "rag_search"], roots=[])
+
+
+# -- B-130: reaching past the observation cap ------------------------------------------------
+
+
+def _long_file(rooted, fact_line: int = 200, total: int = 300):
+    """A file well past the loop's 4,000-char cap, with the fact one line above its keyword."""
+    lines = [f"filler line {n} " + "x" * 40 for n in range(1, total + 1)]
+    lines[fact_line - 1] = "`require_answer()` raises"
+    lines[fact_line] = "`AgentIncompleteError` naming the stop reason."
+    path = rooted.root / "long.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_read_file_with_a_range_returns_numbered_lines(rooted):
+    path = _long_file(rooted)
+    tool = read_file_tool(settings=rooted.settings)
+    out = tool.call(**tool.validate({"path": str(path), "start_line": 199, "max_lines": 3}))
+    assert out.splitlines() == [
+        "[lines 199-201 of 300]",
+        f"199: filler line 199 {'x' * 40}",
+        "200: `require_answer()` raises",
+        "201: `AgentIncompleteError` naming the stop reason.",
+    ]
+
+
+def test_read_file_range_line_numbers_match_search_files(rooted):
+    path = _long_file(rooted)
+    hit = _search(rooted, text="AgentIncompleteError")[0]
+    number = int(hit.split(":")[-2])
+    tool = read_file_tool(settings=rooted.settings)
+    out = tool.call(path=str(path), start_line=number, max_lines=1)
+    assert out.splitlines()[1] == f"{number}: `AgentIncompleteError` naming the stop reason."
+
+
+def test_read_file_with_no_range_is_unchanged(rooted):
+    tool = read_file_tool(settings=rooted.settings)
+    assert tool.call(path=str(rooted.root / "march.txt")) == "March total was 120.\n"
+
+
+def test_read_file_max_lines_zero_reads_to_the_end(rooted):
+    path = _long_file(rooted)
+    out = read_file_tool(settings=rooted.settings).call(path=str(path), start_line=299)
+    assert out.splitlines()[0] == "[lines 299-300 of 300]"
+
+
+@pytest.mark.parametrize(
+    ("start_line", "max_lines", "match"),
+    [(0, 0, "counts from 1"), (1, -1, "max_lines"), (301, 0, "past the end")],
+)
+def test_read_file_refuses_a_bad_range(rooted, start_line, max_lines, match):
+    path = _long_file(rooted)
+    with pytest.raises(ValueError, match=match):
+        read_file_tool(settings=rooted.settings).call(
+            path=str(path), start_line=start_line, max_lines=max_lines
+        )
+
+
+def test_a_ranged_read_still_refuses_outside_the_roots(rooted):
+    tool = read_file_tool(settings=rooted.settings)
+    with pytest.raises(FileAccessError):
+        tool.call(path=str(rooted.outside / "secrets.txt"), start_line=1, max_lines=1)
+
+
+def test_read_file_truncation_hint_names_a_parameter_it_accepts():
+    tool = read_file_tool()
+    assert "start_line=" in tool.truncation_hint("a\nb", "a\nb\nc\n")
+    assert "start_line" in {p.name for p in tool.params}
+
+
+def _search_ctx(rooted, text, context, max_matches=40):
+    from hearth.agent.builtins import search_files_tool
+
+    tool = search_files_tool(settings=rooted.settings, max_matches=max_matches)
+    return tool.call(**tool.validate({"text": text, "context": context}))
+
+
+def test_search_files_context_shows_the_neighbouring_lines(rooted):
+    path = _long_file(rooted).resolve()
+    hits = _search_ctx(rooted, "AgentIncompleteError", context=1)
+    assert hits == [
+        f"{path}-200- `require_answer()` raises",
+        f"{path}:201: `AgentIncompleteError` naming the stop reason.",
+        f"{path}-202- filler line 202 {'x' * 40}",
+    ]
+
+
+def test_search_files_context_lines_do_not_count_as_matches(rooted):
+    path = rooted.root / "many.txt"
+    path.write_text("needle\nother\n" * 5)
+    hits = _search_ctx(rooted, "needle", context=1, max_matches=3)
+    match_lines = [h for h in hits if h.startswith(f"{path.resolve()}:")]
+    context_lines = [h for h in hits if h.startswith(f"{path.resolve()}-")]
+    assert len(match_lines) == 3 and len(context_lines) >= 3
+    assert hits[-1].startswith("[... truncated at 3 matches")
+
+
+def test_search_files_context_is_bounded(rooted):
+    with pytest.raises(ValueError, match="between 0 and 3"):
+        _search_ctx(rooted, "March", context=4)
+
+
+def test_search_files_context_stops_at_the_file_edges(rooted):
+    path = (rooted.root / "march.txt").resolve()
+    assert _search_ctx(rooted, "March total", context=2) == [f"{path}:1: March total was 120."]
+
+
+def test_read_file_truncation_names_the_line_to_resume_from():
+    from hearth.agent.tools import render_observation
+
+    tool = read_file_tool()
+    text = "".join(f"line {n:03d} " + "x" * 90 + "\n" for n in range(1, 101))  # 100 lines
+    out = render_observation(text, 1000, tool.truncation_hint)
+    # 1000 chars of 100-char lines: lines 1-10 whole, the cut inside line 11.
+    assert "up to part of line 11 of 100" in out
+    assert "start_line=11" in out
+    assert "not characters" in out
+
+
+def test_a_cut_off_ranged_read_resumes_at_a_file_line_not_an_observation_line(rooted):
+    from hearth.agent.tools import render_observation
+
+    path = _long_file(rooted)
+    tool = read_file_tool(settings=rooted.settings)
+    ranged = tool.call(path=str(path), start_line=253, max_lines=60)
+    out = render_observation(ranged, 1000, tool.truncation_hint)
+    # A 23-char header, then 62-char numbered lines: (1000 - 23) / 62 = 15.8, so lines
+    # 253-267 are whole and the cut falls inside file line 268.
+    assert "start_line=268" in out and "of 300" in out
+    assert "start_line=60" not in out and "line 1 of" not in out
+
+
+def test_search_files_says_when_the_pattern_matched_no_file(rooted):
+    hits = _search(rooted, text="March", pattern="*.log")
+    assert hits == ["[no file name matches pattern '*.log', so nothing was searched. "
+                    "Use pattern '*' to search every file.]"]

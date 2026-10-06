@@ -156,7 +156,7 @@ must fail when the fix is reverted.
 
 **Added 2026-10-06 (operator run of `docs/YOUR_TURN.md` §1–§4)**
 - [B-129](#b-129) `hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind (P3)
-- [B-130](#b-130) Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context (P2)
+- ~~[B-130](#b-130) Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context (P2)~~ — fixed 2026-10-06
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -515,6 +515,12 @@ must fail when the fix is reverted.
   `--max-iterations 6`: **9/10** correct, 10/10 answered, 0 hit the cap, correct runs took 2–3
   steps. The failure, `read-require-answer`, reproduced twice and is B-130, not the step cap.
   n=10 cannot license a step-cap claim; grow it to ≥ 30 for that.
+- **Correction 2026-10-06: the first runs were not reproducible.** The runner extracted the
+  corpus to a random `mkdtemp` directory, whose path appears in every observation, so the
+  same code produced different prompts per run. Greedy decoding diverged on that: 9/10, then
+  8/10 with no code change. The corpus now goes to a fixed `hearth-agent-eval-<commit>`
+  directory, and two runs of the same code gave identical per-item results. The "9/10" above
+  came from a random path; the fixed-path baseline for the same code is **8/10**.
 - **Evidence:** The built-in tools are `read_file`, `list_files` (a glob over *names*,
   `agent/builtins.py:119`), `rag_search`, and the three `finance_*` tools
   (`builtins.py:87, 153, 232, 324-344`). None searches file contents.
@@ -1886,7 +1892,30 @@ must fail when the fix is reverted.
 ### B-130
 **Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Priority:** P2 · **Status:** **FIXED 2026-10-06** (reachability); see "Result" ·
+  **Effort:** S–M
+- **Fix:**
+  - `read_file(path, start_line=1, max_lines=0)`: a range returns `[lines a-b of N]` and
+    `N: text` lines, numbered like `search_files`. With no range, behavior is unchanged.
+  - `Tool.truncation_hint` (a string or `(shown, full) -> str`) replaces the generic "narrow
+    the request". `read_file`'s hint names the file line to resume at.
+  - `search_files(context=0..3)` adds grep-style neighbor lines. When no file name matches the
+    glob, it says so and suggests `'*'`.
+- **Two regressions found by the real-model eval and fixed before commit.** Tests passed for
+  both; only the eval showed them:
+  - A hint with no number ("start_line past what you have seen") was read as a *character*
+    offset: `start_line: 4001` on a 655-line file. Fixed by naming the line.
+  - On a cut-off *ranged* read, the hint counted observation lines ("line 60 of 60" for lines
+    253-312), sending the model backwards. Fixed by reading the file line numbers.
+- **Result (fair A/B, same fixed-path runner, each run reproducible):** old tools 8/10, new
+  9/10. `two-step-allow-escalation` flipped to pass; two items took 1-2 more steps. One
+  discordant item gives exact McNemar p = 1.0: **no evidence of a score improvement.** What is
+  established is reachability, by `tests/test_agent_loop.py::test_a_fact_past_the_observation_cap_is_reachable_by_a_ranged_read`
+  and the `read_file`/`search_files` tests. Each part was mutation-checked: dropping the hint,
+  the range, the context lines, or the ranged-hint arithmetic each fails a test.
+- **Remaining:** `read-require-answer` still fails, now for a different reason. The model read
+  lines 193-252, which contain the fact on line 194, and kept reading. That is the model's
+  comprehension, not reachability.
 - **Evidence:** `scripts/agent_eval.py` item `read-require-answer` ("In AGENT.md, which method
   raises AgentIncompleteError?"). It failed twice with the same steps:
   `list_files > read_file > search_files`. `read_file(path)` returned

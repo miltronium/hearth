@@ -96,3 +96,13 @@ def test_words_are_case_insensitive_tokens():
     item = _item(kind="two-step", answer="false", term="x", file="x")
     assert ae.score(item, "They set it to False.", NAMES)[0]
     assert not ae.score(item, "a falsey value", NAMES)[0]
+
+
+def test_the_corpus_directory_is_the_same_on_every_run():
+    # The path is in every observation the model reads; a random name per run made the same
+    # code score differently from run to run.
+    commit, _, _ = ae.load_spec(ae.DEFAULT_SPEC)
+    first, second = ae.corpus_dir(commit), ae.corpus_dir(commit)
+    assert first == second
+    assert commit[:12] in first.name
+    first.rmdir()
