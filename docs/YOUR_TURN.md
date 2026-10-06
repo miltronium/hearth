@@ -86,8 +86,15 @@ uv run --no-sync hearth adapters retire classify-20260710T020135Z   # stop servi
 ```
 
 or keep it knowingly, or re-qualify it later (needs §5 first; then a prereg committed before
-its first ledger measurement — see `docs/RUNBOOK_training.md` §4–6). **Recommendation:** retire
-it until it can pass the gate; the base model then serves classify.
+its first ledger measurement — see `docs/RUNBOOK_training.md` §4–6).
+
+**What it is:** a July 2026 demo adapter that learned an arbitrary ticket-routing convention
+(incident text → queue codes `QX-1`..`QX-9`) from 45 synthetic examples; its "proof" is a typed
+1.0-vs-0.2 score. **Measured 2026-10-06 (real weights, same prompt with and without it):** on
+three ordinary classify prompts (spam / sentiment / spending category, labels given in the
+prompt) it changed nothing — it does not hijack classifications that name their own labels.
+That is n=3, not proof of no effect. **Recommendation:** retire it when convenient (it serves
+no real task of yours and is unverified); not urgent.
 
 ## 5. Grow the golden sets to ≥ 30 distinct examples — *needs your judgement*
 
