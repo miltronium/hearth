@@ -28,7 +28,8 @@ and `hearth doctor --offline`. They measure; docs describe.
 | [INTEGRATION.md](INTEGRATION.md) | How any client consumes HEARTH (CAMBOT, Claude Code MCP, OpenAI SDKs, shell) | current in substance. Its `.mcp.json` uses a bare `hearth` command, so use the venv's absolute path (GUIDE §7) |
 | [STATUS.md](STATUS.md) | What `scripts/hearth_status.py` measures and what it cannot see | current |
 | [BUGS.md](BUGS.md) | Known defects and gaps, prioritized, with file:line evidence and acceptance tests | current (the backlog) |
-| [RESUME.md](RESUME.md) | Handoff for picking up HEARTH development mid-stream | current as of 2026-10-03 |
+| [RESUME.md](RESUME.md) | Handoff for picking up HEARTH development mid-stream | current as of 2026-10-06 |
+| [YOUR_TURN.md](YOUR_TURN.md) | What only the operator can do, with exact commands | current as of 2026-10-06 |
 
 ## Design and reference
 

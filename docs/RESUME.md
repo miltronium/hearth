@@ -1,4 +1,4 @@
-# HEARTH — RESUME HERE (handoff, 2026-10-05)
+# HEARTH — RESUME HERE (handoff, 2026-10-06)
 
 Read this first, then CLAUDE.md. Written for a human or an agent picking up mid-stream. Every
 claim was measured on 2026-10-05; re-verify with §2 before trusting it.
@@ -86,22 +86,22 @@ Full record: `docs/BUGS.md` → "Fixed recently".
 
 ## 4. Work queue
 
-1. **Kernel-level + real-TCP verification by the operator** (§2) — the two things no agent could
-   measure this session.
-2. **Finish round 4** (the gate agent stopped at the daily API budget cap): **B-126** — kill the
-   surviving ledger mutants (its uncommitted draft is in worktree
-   `.claude/worktrees/agent-ac83996e6c19c8912`, `tests/test_training_ledger.py`; review it, then
-   remove the worktree); **B-123** — decide/document unledgered measurement paths (alternate
-   HEARTH_HOME, gateway candidate serving, library `score_candidate`). Then run one more
-   independent review of the round-3/4 gate changes (each round so far found something).
-3. **Open backlog** (`docs/BUGS.md`, 18 open of 112 at handoff): P0 **B-002** (cmux panes not contained
-   by the seal — do not run confidential work through cmux); P1 B-009 (confidence stub under
-   the remote profile), B-010 (promoted classify adapter lacks a significance proof; golden
-   sets below min_n); P2 B-012/B-013 (agent: finance tools over HTTP, search tool, eval set),
-   B-014 (untested: cmux open-tier launch, `/chat` agent toggle in a browser); P3 hygiene.
-4. **Golden sets:** grow `data/*_golden.jsonl` to ≥ 30 distinct examples before any training.
-5. **Graduation:** `cmux/integration` → `main` only after the graduation gate is green
-   (docs/cmux/TODO.md). Ask before any push or PR.
+**First: `docs/YOUR_TURN.md`** — the operator's list (kernel-level + real-TCP verification, the
+`/chat` browser check, the classify-adapter decision, golden sets, cleanups, push/PR).
+
+Done 2026-10-06 (agent, alone): B-126 ledger test gaps closed; B-123 documented as residual
+trust (RUNBOOK_training §6); all seven round-3 gate fixes independently mutation-verified;
+`search_files` agent tool (B-013, live: 2 steps instead of reading files in order); HTTP agent
+gets ledger tools + a pinnable RAG collection (B-012); train_lora_real.sh --promote uses the
+real gate (B-015); dead constant removed (B-022); stale docs marked historical and monitored
+(B-016/B-017).
+
+Open (10 of 112 in `docs/BUGS.md`): P0 **B-002** (cmux pane containment — no confidential work
+through cmux); P1 B-009 (confidence stub, remote profile only), B-010 (promoted classify
+adapter — operator decision, YOUR_TURN §4); P2 B-014 (browser check — YOUR_TURN §3); P3
+B-019, B-020 (operator), B-021, B-023, B-028, B-030 (environment / minor). Remaining agent work
+when the budget allows: one more independent review of the round-3 gate changes; B-028; the
+agent tool-calling eval set once the operator supplies tasks (B-013 remainder).
 
 ## 5. Gotchas that cost real time
 
