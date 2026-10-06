@@ -39,7 +39,6 @@ REASON_INTENT = "intent"
 REASON_CLASS_POLICY = "class_policy"
 REASON_LOW_CONFIDENCE = "low_confidence"
 REASON_EXPLICIT = "explicit"
-REASON_LOCAL_FAILURE = "local_failure"
 # Not an escalation reason: the reason a request that tried to escalate was served LOCAL.
 REASON_REMOTE_FAILURE = "remote_failed; served local"
 
