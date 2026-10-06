@@ -88,6 +88,7 @@ def create_app(
     metrics: MetricsStore | None = None,
     rag: RagIndex | None = None,
     manager: ModelManager | None = None,
+    finance=None,
 ) -> FastAPI:
     """Build the HEARTH FastAPI app. Pass ``provider``/``router`` to inject stubs in tests."""
     settings = settings or get_settings()
@@ -133,6 +134,14 @@ def create_app(
     app.state.router = router
     app.state.metrics = metrics
     app.state.rag = rag
+    # The agent route's ledger tools (B-012): the same rule as `hearth agent` — offered only
+    # when a finance ledger actually exists. Read-only; they never compute a figure in a model.
+    if finance is None:
+        from ..finance.store import FinanceStore
+
+        candidate = FinanceStore(settings=settings)
+        finance = candidate if candidate.path.exists() else None
+    app.state.finance = finance
     app.state.manager = manager
     app.state.warmup = warmup_state
 

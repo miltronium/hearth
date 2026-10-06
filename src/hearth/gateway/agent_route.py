@@ -119,6 +119,7 @@ def register_agent_route(app: FastAPI) -> None:
             settings=settings,
             rag=getattr(state, "rag", None),
             finance=getattr(state, "finance", None),
+            collection=req.collection or None,
         )
         budget, applied = _clamp(req.budget)
         roots = allowed_roots(settings)

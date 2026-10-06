@@ -261,6 +261,9 @@ class AgentRunRequest(BaseModel):
     task: str
     model: str = "auto"
     budget: AgentBudgetRequest | None = None
+    # Pins rag_search to one indexed collection, as `hearth agent --collection` does (B-012).
+    # Without it the model had to guess a collection name. Narrows reach; grants none.
+    collection: str | None = None
 
     model_config = {"extra": "forbid"}
 

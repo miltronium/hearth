@@ -19,7 +19,9 @@ The load-bearing assertions are not about the happy path. They are:
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -51,6 +53,7 @@ from hearth.providers.base import (
     GenResult,
     ResourceEstimate,
 )
+from hearth.providers.echo import EchoProvider
 from hearth.router import Router
 
 # -- fakes -------------------------------------------------------------------------------
@@ -177,8 +180,10 @@ def test_no_request_field_can_disable_tool_vetting():
     walk(AgentRunRequest)
     assert "vetted_only" not in names
     assert not {n for n in names if "vet" in n or "unsafe" in n or "tool" in n}
-    # Nor a way to name a root, a path, a shell or extra tools.
-    assert names == {"task", "model", "budget", "max_iterations", "max_seconds",
+    # Nor a way to name a root, a path, a shell or extra tools. `collection` (B-012) names an
+    # already-indexed RAG collection and only NARROWS rag_search, which can already search any
+    # collection by name — it grants no reach.
+    assert names == {"task", "model", "budget", "collection", "max_iterations", "max_seconds",
                      "max_total_tokens"}
 
 
@@ -560,3 +565,45 @@ def test_a_failure_inside_the_stream_generator_still_ends_with_done(
     assert events[-1] == "[DONE]"
     errors = [e for e in events if isinstance(e, dict) and "error" in e]
     assert errors and errors[-1]["error"]["code"] == "hearth.stream.internal_error"
+
+
+# -- B-012: HTTP parity with `hearth agent` ---------------------------------------------------
+
+
+def test_the_http_agent_gets_the_ledger_tools_when_a_ledger_exists(tmp_path, local_policy):
+    from hearth.finance.store import FinanceStore
+
+    settings = Settings(backend="echo", require_auth=False, home=tmp_path / "h",
+                        file_roots=str(tmp_path))
+    FinanceStore(settings=settings).path.parent.mkdir(parents=True, exist_ok=True)
+    FinanceStore(settings=settings).path.write_bytes(b"")  # a ledger exists
+    app = create_app(provider=EchoProvider(), settings=settings)
+    assert app.state.finance is not None
+    events = _events(TestClient(app).post("/v1/hearth/agent", json={"task": "t"}))
+    assert {"finance_total", "finance_rows", "finance_explain"} <= set(events[0]["tools"])
+
+
+def test_the_http_agent_has_no_ledger_tools_without_a_ledger(tmp_path):
+    settings = Settings(backend="echo", require_auth=False, home=tmp_path / "h",
+                        file_roots=str(tmp_path))
+    app = create_app(provider=EchoProvider(), settings=settings)
+    assert app.state.finance is None
+    events = _events(TestClient(app).post("/v1/hearth/agent", json={"task": "t"}))
+    assert not any(t.startswith("finance_") for t in events[0]["tools"])
+
+
+def test_a_collection_in_the_request_pins_rag_search(monkeypatch):
+    from hearth.gateway import agent_route
+
+    seen = {}
+    real = agent_route.local_toolset
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(agent_route, "local_toolset", spy)
+    app = create_app(provider=EchoProvider(), settings=Settings(
+        backend="echo", require_auth=False, home=Path(tempfile.mkdtemp())))
+    TestClient(app).post("/v1/hearth/agent", json={"task": "t", "collection": "notes"})
+    assert seen.get("collection") == "notes"

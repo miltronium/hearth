@@ -150,8 +150,12 @@ A missing or empty collection returns `"chunks": []` without embedding the query
 ### `POST /v1/hearth/agent`
 
 The bounded, read-only agent loop, streamed as SSE: a start event, one event per step, a
-final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget": {...}}`
-(unknown fields are refused). While a step runs the stream carries a `: keepalive` SSE comment
+final event, then `[DONE]`. Request: `{"task": "...", "model": "auto", "budget": {...},
+"collection": "notes"}` — `collection` (optional) pins `rag_search` to one indexed collection,
+as `hearth agent --collection` does; unknown fields are refused. Tools: `read_file`,
+`list_files`, `search_files` (gated by `HEARTH_FILE_ROOTS`), `rag_search` when a RAG index is
+attached, and the read-only ledger tools (`finance_total`, `finance_explain`, `finance_rows`)
+when a finance ledger exists at `~/.hearth/finance/ledger.db` — the same rule as the CLI. While a step runs the stream carries a `: keepalive` SSE comment
 every second; a client that disconnects stops the run (the in-flight generation ends at its
 next token, `stopped_reason: "cancelled"`). Full contract, events and budgets:
 [docs/AGENT.md](AGENT.md) §9.
