@@ -46,8 +46,8 @@ must fail when the fix is reverted.
 
 **P3: hygiene**
 - ~~[B-015](#b-015) `scripts/train_lora_real.sh --promote` always fails (removed flags)~~ — fixed in `6fcb1c4`
-- [B-016](#b-016) `docs/RESULTS.md` and `docs/HANDOFF.md` are stale; HANDOFF isn't monitored
-- [B-017](#b-017) `docs/LEARNING_plan.md` cites stale line numbers and a wrong class count
+- ~~[B-016](#b-016) `docs/RESULTS.md` and `docs/HANDOFF.md` are stale; HANDOFF isn't monitored~~ — fixed in `470f3db`
+- ~~[B-017](#b-017) `docs/LEARNING_plan.md` cites stale line numbers and a wrong class count~~ — fixed in `470f3db`
 - [B-018](#b-018) ruff: 82 findings outside `src/`
 - [B-019](#b-019) Unregistered weights on disk: `Qwen/Qwen2.5-0.5B-Instruct`
 - [B-020](#b-020) Starlette deprecation: `httpx` with `starlette.testclient`
@@ -566,7 +566,7 @@ must fail when the fix is reverted.
 ### B-016
 **`docs/RESULTS.md` and `docs/HANDOFF.md` are stale, and the status script doesn't track HANDOFF**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `470f3db` (marked historical / caveated; monitored) · **Effort:** S
 - **Evidence:** Status: `docs/RESULTS.md: 2026-07-20 @ 5cbd061, 87 commits since`.
   `docs/HANDOFF.md` was last changed at `e5ed305` (2026-07-10), **91** commits ago
   (`git rev-list --count e5ed305..HEAD`). It isn't in `KEY_DOCS`
@@ -584,7 +584,7 @@ must fail when the fix is reverted.
 ### B-017
 **`docs/LEARNING_plan.md` cites stale line numbers and a wrong class count**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED** in `470f3db` (marked historical / caveated; monitored) · **Effort:** S
 - **Evidence:** It cites `_confidence` at `router/route.py:348-360` (`:245, 281, 977, 1100`),
   but it is now `route.py:425-437`. It cites `Router.route` at `route.py:232-245`
   (`:295, 330, 523`), now `route.py:189-263`. Adapter resolution at `route.py:310-333`
