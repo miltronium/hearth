@@ -64,18 +64,21 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8771/v1/hearth/admin/
 kill %1
 ```
 
-## 3. What happened on 2026-10-05 (110+ commits since 13b1438)
+## 3. What happened on 2026-10-05 (133 commits since 13b1438; suite 1791 passed, 1 skipped)
 
 Model selection (B-004/B-005) merged and live-verified in-process with real 3B/7B/14B weights;
 three bug batches (CLI, gateway, docs hygiene); the user guide, man page and full `--help`;
-then **three adversarial review rounds**, each of which found real defects that were fixed with
+then **four adversarial review rounds**, each of which found real defects that were fixed with
 tests that fail on the old code and survive mutation checks. Notable catches:
 - **Promotion gate:** a hand-typed report could promote a nonexistent adapter; a NaN /
   vacuous bar passed a 0.033-vs-1.0 candidate; `git update-index --assume-unchanged` hid a
   post-hoc prereg/golden edit; a prereg could be written after seeing the score.
 - **Privacy:** `hearth_peek.py` and `hearth_map_draft.py` printed statement preambles
   ("Jane Q Public") as headers while claiming "no cell values were printed"; openpyxl leaked
-  workbook metadata (incl. an SSN-shaped property) to stderr.
+  workbook metadata (incl. an SSN-shaped property) to stderr; and (round 4) MCP tool errors
+  returned spreadsheet cell text verbatim to the calling agent (B-115).
+- **Gate, rounds 3–4:** `git replace` could fake prereg history; extra files reset an adapter's
+  history; a "menu" of preregs allowed picking the bar after seeing scores (B-120..B-125).
 - **Serving:** `/ready` green while a whole class 503'd (ladder; RAM ceiling); concurrent chat
   failing on MLX thread-locality; abandoned streams holding the GPU; a bad adapter forcing a
   base reload on every request.
@@ -85,13 +88,19 @@ Full record: `docs/BUGS.md` → "Fixed recently".
 
 1. **Kernel-level + real-TCP verification by the operator** (§2) — the two things no agent could
    measure this session.
-2. **Open backlog** (`docs/BUGS.md`, 16 open at handoff): P0 **B-002** (cmux panes not contained
+2. **Finish round 4** (the gate agent stopped at the daily API budget cap): **B-126** — kill the
+   surviving ledger mutants (its uncommitted draft is in worktree
+   `.claude/worktrees/agent-ac83996e6c19c8912`, `tests/test_training_ledger.py`; review it, then
+   remove the worktree); **B-123** — decide/document unledgered measurement paths (alternate
+   HEARTH_HOME, gateway candidate serving, library `score_candidate`). Then run one more
+   independent review of the round-3/4 gate changes (each round so far found something).
+3. **Open backlog** (`docs/BUGS.md`, 18 open of 112 at handoff): P0 **B-002** (cmux panes not contained
    by the seal — do not run confidential work through cmux); P1 B-009 (confidence stub under
    the remote profile), B-010 (promoted classify adapter lacks a significance proof; golden
    sets below min_n); P2 B-012/B-013 (agent: finance tools over HTTP, search tool, eval set),
    B-014 (untested: cmux open-tier launch, `/chat` agent toggle in a browser); P3 hygiene.
-3. **Golden sets:** grow `data/*_golden.jsonl` to ≥ 30 distinct examples before any training.
-4. **Graduation:** `cmux/integration` → `main` only after the graduation gate is green
+4. **Golden sets:** grow `data/*_golden.jsonl` to ≥ 30 distinct examples before any training.
+5. **Graduation:** `cmux/integration` → `main` only after the graduation gate is green
    (docs/cmux/TODO.md). Ask before any push or PR.
 
 ## 5. Gotchas that cost real time
