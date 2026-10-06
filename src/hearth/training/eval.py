@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -87,13 +88,33 @@ class GoldenExample:
 
 
 def normalize_prompt(prompt: str) -> str:
-    """The identity of a prompt for duplicate detection: whitespace collapsed, case-folded.
+    """The identity of a prompt for duplicate detection (B-080, B-125).
 
     Deliberately coarser than what the model sees: ``"Q 1"`` and ``"q  1 "`` are near
     certain to get correlated answers, so counting them as two independent items would
     overstate ``n``. Erring towards "duplicate" makes the gate stricter, never looser.
+
+    Whitespace + casefold alone was bypassed by characters that change the bytes and not
+    the text (B-125): a zero-width space, word joiner or soft hyphen (category Cf), a
+    fullwidth ``Ｑ１`` (NFKC folds it to ``Q1``), a decomposed ``é`` (NFD) beside a composed
+    one, or a trailing ``?``/``.``. So, in order:
+
+    1. drop every format character (Unicode category Cf);
+    2. casefold, then NFKC — compatibility forms (fullwidth, ligatures, superscripts) and
+       composed/decomposed accents agree (NFKC last, because casefolding can denormalise);
+    3. collapse every run of whitespace to one space;
+    4. strip trailing punctuation (category P*). Decision: "What is 2+2?" and "What is
+       2+2" are one question to a model, and a set that differs only there is a
+       near-duplicate that inflates ``n``. Refusing it is the fail-closed side: the
+       operator edits the set. Inner and leading punctuation is kept — it can change the
+       meaning ("3-1" vs "31") and stripping it would be guessing.
     """
-    return " ".join(prompt.split()).casefold()
+    text = "".join(ch for ch in prompt if unicodedata.category(ch) != "Cf")
+    text = unicodedata.normalize("NFKC", text.casefold())
+    text = " ".join(text.split())
+    while text and unicodedata.category(text[-1]).startswith("P"):
+        text = text[:-1].rstrip()
+    return text
 
 
 def require_distinct(golden: GoldenSet) -> None:

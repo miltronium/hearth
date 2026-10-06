@@ -68,7 +68,19 @@ def _read(path: Path, key: bytes) -> list[dict]:
         return []
     records: list[dict] = []
     prev = ""
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    # Records are separated by "\n" and by nothing else (B-124). str.splitlines() also
+    # breaks on U+2028/U+2029/U+0085 (and \r, \v, \f, \x1c-\x1e): one such character in
+    # an adapter id tore its record in two and bricked every later measurement and
+    # promotion. Records are written ASCII-only, so no separator can appear raw in one; a
+    # ledger written before that is still read correctly.
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LedgerError(f"{path}: not UTF-8, so not an intact ledger ({exc})") from None
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()  # the newline that terminates the last record
+    for lineno, line in enumerate(lines, start=1):
         try:  # a blank or torn line is not JSON, and so not an intact record
             record = json.loads(line)
             if not isinstance(record, dict):
@@ -105,7 +117,9 @@ def append(home: Path, entry: dict, key: bytes) -> dict:
         body = {**entry, "schema": LEDGER_SCHEMA, "seq": len(records),
                 "prev": _mac(records[-1]) if records else ""}
         signed = attest.sign(body, key)
-        line = json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        # ensure_ascii: every non-ASCII character is a \u escape, so no line separator
+        # (U+2028, U+2029, U+0085) can appear raw inside a record (B-124).
+        line = json.dumps(signed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
@@ -124,16 +138,23 @@ def find(records: list[dict], mac: object) -> dict | None:
     return next((r for r in records if _mac(r) == mac), None)
 
 
-def first_measurement(records: list[dict], *, adapter_id: str, weights_sha: str) -> dict | None:
-    """The earliest record of this adapter — matched by id OR by weights digest.
+def first_measurement(
+    records: list[dict], *, adapter_id: str, weights_sha: str, served_sha: str = ""
+) -> dict | None:
+    """The earliest record of this adapter — matched by id, weights digest OR served digest.
 
     Matching the weights too means registering the same weights under a fresh id does not
-    produce a fresh, "never measured" adapter.
+    produce a fresh, "never measured" adapter. ``weights_sha`` hashes every file in the
+    adapter directory, names included, so the same weights plus a README were "new" (B-121);
+    ``served_sha`` (:func:`hearth.registry.adapters.adapter_served_sha`) covers only what
+    mlx_lm loads, so a junk file, a renamed checkpoint or reformatted config metadata does
+    not reset the first measurement.
     """
     return next(
         (r for r in records
          if r.get("adapter_id") == adapter_id
-         or (weights_sha and r.get("weights_sha") == weights_sha)),
+         or (weights_sha and r.get("weights_sha") == weights_sha)
+         or (served_sha and r.get("served_sha") == served_sha)),
         None,
     )
 

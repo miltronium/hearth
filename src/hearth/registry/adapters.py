@@ -23,7 +23,9 @@ import fcntl
 import hashlib
 import json
 import os
+import struct
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -50,6 +52,30 @@ class GateNotPassedError(AdapterError):
 
 class IncumbentChangedError(AdapterError):
     """The incumbent a promotion was measured against is no longer the incumbent (B-082)."""
+
+
+# Unicode categories an adapter id may not contain (B-124): control (Cc — includes NEL
+# U+0085), format (Cf — zero-width space/joiners, bidi overrides, soft hyphen), surrogate
+# (Cs), private-use (Co), unassigned (Cn), and the line / paragraph separators (Zl U+2028,
+# Zp U+2029). An id is written into the measurement ledger, logs and terminal output; a
+# separator in it split a ledger line for every reader that treats it as a line break
+# (Python's str.splitlines does), and the install could no longer measure or promote
+# anything. Invisible characters also make two different ids look identical.
+_FORBIDDEN_ID_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
+def validate_adapter_id(adapter_id: object) -> str:
+    """Return ``adapter_id`` if it is a usable id, else raise :class:`AdapterError`."""
+    if not isinstance(adapter_id, str) or not adapter_id.strip():
+        raise AdapterError(f"invalid adapter id {adapter_id!r}: it must be a non-empty string")
+    bad = sorted({f"U+{ord(ch):04X} ({unicodedata.category(ch)})" for ch in adapter_id
+                  if unicodedata.category(ch) in _FORBIDDEN_ID_CATEGORIES})
+    if bad:
+        raise AdapterError(
+            f"invalid adapter id {adapter_id!r}: it contains control, format or separator "
+            f"characters ({', '.join(bad)}) — use printable characters only"
+        )
+    return adapter_id
 
 
 def adapter_weights_sha(adapter_path: str | Path) -> str:
@@ -87,6 +113,89 @@ def adapter_weights_sha(adapter_path: str | Path) -> str:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 digest.update(chunk)
     return digest.hexdigest()
+
+
+# The files serving actually loads from an adapter directory. mlx_lm (0.29.1,
+# ``mlx_lm/tuner/utils.py:load_adapters``) opens exactly two, by fixed name:
+# ``adapter_config.json`` — of which it reads ``fine_tune_type`` (default "lora"),
+# ``num_layers`` and ``lora_parameters`` — and ``adapters.safetensors``, via
+# ``model.load_weights(..., strict=False)``. Nothing else in the directory (checkpoints,
+# README, training logs) reaches the model.
+SERVED_ADAPTER_FILES = ("adapter_config.json", "adapters.safetensors")
+_SERVED_CONFIG_KEYS = ("fine_tune_type", "num_layers", "lora_parameters")
+
+
+def _served_config_bytes(raw: bytes) -> bytes:
+    """``adapter_config.json`` reduced to what mlx_lm reads, canonically serialised."""
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return b"raw\x00" + raw
+    if not isinstance(obj, dict):
+        return b"raw\x00" + raw
+    used = {k: obj.get(k) for k in _SERVED_CONFIG_KEYS}
+    used["fine_tune_type"] = used["fine_tune_type"] or "lora"
+    return b"cfg\x00" + json.dumps(used, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _served_tensor_digest(raw: bytes) -> bytes:
+    """The tensors of a safetensors file — name, dtype, shape, bytes — sorted by name.
+
+    The ``__metadata__`` block, the header's key order and its padding do not reach the
+    model, so they do not change the identity. A file that does not parse as safetensors is
+    hashed as raw bytes (mlx_lm could not load it; it is still a fixed identity).
+    """
+    digest = hashlib.sha256()
+    try:
+        (size,) = struct.unpack("<Q", raw[:8])
+        header = json.loads(raw[8:8 + size])
+        if not isinstance(header, dict):
+            raise ValueError("header is not an object")
+        data = memoryview(raw)[8 + size:]
+        for name in sorted(k for k in header if k != "__metadata__"):
+            info = header[name]
+            begin, end = info["data_offsets"]
+            digest.update(json.dumps([name, info["dtype"], info["shape"]]).encode() + b"\x00")
+            digest.update(data[begin:end])
+        return b"st\x00" + digest.digest()
+    except (struct.error, ValueError, KeyError, TypeError):
+        return b"raw\x00" + hashlib.sha256(raw).digest()
+
+
+def adapter_served_sha(adapter_path: str | Path) -> str:
+    """SHA-256 of what SERVING loads from an adapter — "" when it would load nothing (B-121).
+
+    :func:`adapter_weights_sha` hashes every file and every file NAME, which is right for
+    "are these still the bytes that were measured" but wrong for "is this the same adapter":
+    the same weights plus a README under a new id hashed differently, so they were a "fresh,
+    never-measured" adapter and the first-measurement rule (B-079) did not apply. This
+    digest covers only :data:`SERVED_ADAPTER_FILES`, by role (never by what else is in the
+    directory): the config keys mlx_lm reads, canonically serialised, and the safetensors
+    tensors (name, dtype, shape, bytes), ignoring metadata and header layout. Each file
+    present is labelled by its role, so a missing config differs from any present one. A
+    single-file adapter hashes its bytes.
+
+    What it cannot establish (residual, docs/BUGS.md B-121): behavioural identity. A weight
+    nudged by one ulp, or an extra tensor that ``load_weights(strict=False)`` ignores, is a
+    different digest for an effectively identical adapter.
+    """
+    root = Path(adapter_path).expanduser() if str(adapter_path) else None
+    if root is None or not root.exists():
+        return ""
+    digest = hashlib.sha256(b"hearth.served-adapter/1\x00")
+    if root.is_file():
+        digest.update(b"file\x00" + root.read_bytes())
+        return digest.hexdigest()
+    found = False
+    for name in SERVED_ADAPTER_FILES:
+        path = root / name
+        if not path.is_file():  # absent contributes nothing; each present file is labelled
+            continue
+        found = True
+        raw = path.read_bytes()
+        part = _served_config_bytes(raw) if name.endswith(".json") else _served_tensor_digest(raw)
+        digest.update(name.encode() + b"\x00" + str(len(part)).encode() + b"\x00" + part)
+    return digest.hexdigest() if found else ""
 
 
 @dataclass
@@ -162,6 +271,7 @@ class AdapterStore:
         eval_scores: dict[str, float] | None = None,
     ) -> AdapterEntry:
         """Register a newly-trained adapter as a **candidate** (ADR-006)."""
+        validate_adapter_id(adapter_id)
         with self._locked():
             entries = self._load()
             if adapter_id in entries:
@@ -361,6 +471,9 @@ __all__ = [
     "IncumbentChangedError",
     "STATUS_CANDIDATE",
     "STATUS_PROMOTED",
+    "SERVED_ADAPTER_FILES",
     "STATUS_RETIRED",
+    "adapter_served_sha",
     "adapter_weights_sha",
+    "validate_adapter_id",
 ]

@@ -148,7 +148,13 @@ class World:
             env=self.env,
         )
 
-    def eval_report(self, adapter_id: str = "extract-1", *extra: str) -> dict:
+    def eval_report(self, adapter_id: str = "extract-1", *extra: str,
+                    exploratory: bool = False) -> dict:
+        """``eval --report-json``, under the world's prereg when one is on disk (B-122: an
+        adapter is promotable only under the prereg its FIRST measurement was made under).
+        ``exploratory=True`` measures with no prereg."""
+        if not exploratory and self.prereg.exists() and "--prereg" not in extra:
+            extra = (*extra, "--prereg", str(self.prereg))
         result = self.eval(adapter_id, "--report-json", str(self.report), *extra)
         assert result.exit_code == 0, result.output
         return json.loads(self.report.read_text())

@@ -21,6 +21,7 @@ HEAD records (``git rev-parse HEAD:<path>``) — a comparison a reviewer can rep
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -136,20 +137,35 @@ class PreRegistration:
         drifted from the plan — a different golden set, a different metric, different
         decode parameters — and the gate must not treat it as the registered test.
         """
+        return self.run_mismatches(task=report.task, golden_sha=report.golden_sha,
+                                   metric=report.metric,
+                                   config_fingerprint=report.config_fingerprint)
+
+    def run_mismatches(
+        self, *, task: str, golden_sha: str, metric: str, config_fingerprint: str
+    ) -> tuple[str, ...]:
+        """:meth:`mismatches` for a run that has not been scored yet (B-122).
+
+        Everything the comparison needs is fixed before the first generation, so ``hearth
+        eval --prereg`` checks it BEFORE recording the measurement: a run recorded as "made
+        under" a prereg is then always the experiment that prereg registered.
+        """
         problems: list[str] = []
-        if report.task and report.task != self.task:
-            problems.append(f"task {report.task!r} != registered {self.task!r}")
-        if report.golden_sha != self.golden_sha:
+        if task and task != self.task:
+            problems.append(f"task {task!r} != registered {self.task!r}")
+        if golden_sha != self.golden_sha:
             problems.append(
-                f"golden_sha {report.golden_sha[:12] or '<unknown>'} != registered "
+                f"golden_sha {golden_sha[:12] or '<unknown>'} != registered "
                 f"{self.golden_sha[:12]}"
             )
         expected_metric = _metric_name(self.metric)
-        if report.metric != expected_metric:
-            problems.append(f"metric {report.metric!r} != registered {expected_metric!r}")
-        if report.config_fingerprint != self.generation.fingerprint:
+        if _metric_name(metric) != expected_metric:
             problems.append(
-                f"decode config {report.config_fingerprint or '<unknown>'} != registered "
+                f"metric {_metric_name(metric)!r} != registered {expected_metric!r}"
+            )
+        if config_fingerprint != self.generation.fingerprint:
+            problems.append(
+                f"decode config {config_fingerprint or '<unknown>'} != registered "
                 f"{self.generation.fingerprint}"
             )
         return tuple(problems)
@@ -292,7 +308,9 @@ def _checked_bar(bar: dict) -> dict[str, object]:
     }
 
 
-def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatus:
+def verify_committed(
+    path: Path | str, *, data: bytes | None = None, role: str = "pre-registration"
+) -> GitStatus:
     """Are ``path``'s bytes exactly the blob committed at HEAD? (B-061, B-078)
 
     Compares the bytes on disk (or ``data``, the bytes a caller already read and will use)
@@ -306,7 +324,9 @@ def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatu
     rewrites on commit (LFS, eol conversion) is refused, which is the fail-closed side.
 
     An untracked file, a file absent from HEAD, edited bytes, no git, no repository, or
-    any git error are all reported as *not committed*: the gate fails closed.
+    any git error are all reported as *not committed*: the gate fails closed. ``role``
+    names the file in the reasons ("golden set", "pre-registration"), so the operator is
+    told which file to commit (B-128).
     """
     path = Path(path)
     if data is None:
@@ -328,12 +348,20 @@ def verify_committed(path: Path | str, *, data: bytes | None = None) -> GitStatu
         rel = resolved.relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         return GitStatus(committed=False, reason=f"{path} is not inside {root}", repo_root=root)
+    rewrites = _history_rewrites(root)
+    if rewrites:
+        return GitStatus(
+            committed=False,
+            reason=f"the repository {root} cannot vouch for when {path} was committed: "
+            + "; ".join(rewrites),
+            repo_root=root,
+        )
     try:
         _git(["ls-files", "--error-unmatch", "--", rel], cwd=root)
     except _GitError:
         return GitStatus(
             committed=False,
-            reason=f"{path} is not tracked by git — commit the pre-registration first",
+            reason=f"{path} is not tracked by git — commit the {role} first",
             repo_root=root,
         )
     try:
@@ -466,6 +494,9 @@ def check_provenance(
        (:func:`committed_golden_problems`).
     4. **That repository is the anchored evals repository** recorded in the ledger at the
        first measurement (:func:`resolve_anchor`, B-081).
+    5. **The first measurement was made under THIS prereg** (its ``prereg_sha``, B-122):
+       a bar merely committed before the first measurement can be one of several, picked
+       after the score was seen.
     """
     status = verify_committed(registration.path)
     if not status.committed:
@@ -524,6 +555,24 @@ def check_provenance(
             "or in another repository — an adapter measured before its bar existed cannot be "
             "promoted under it"
         )
+    # The bar is the one the adapter was FIRST measured under — not merely one committed
+    # before that measurement (B-122). Two bars committed up front (two golden sets, or one
+    # strict and one loose) let the operator measure under one, see the verdict, and promote
+    # under the other: the choice of bar was made after seeing a score. Each measurement
+    # records the prereg it was made under (none for an exploratory run), so an adapter
+    # first measured exploratory, or under another prereg, is not promotable under this one.
+    first_prereg = str(first_measurement.get("prereg_sha") or "")
+    if first_prereg != registration.sha:
+        under = (f"under another pre-registration (sha {first_prereg[:12]}, "
+                 f"{first_measurement.get('prereg_path') or 'path not recorded'})"
+                 if first_prereg else "with no pre-registration (an exploratory run)")
+        raise PreRegError(
+            f"{adapter!r} was first measured at {first_at} (ledger record "
+            f"{first_measurement.get('seq')}) {under}, not under {registration.path} (sha "
+            f"{registration.sha[:12]}): an adapter is promotable only under the bar it was "
+            "FIRST measured under, so that the bar cannot be picked after seeing a score — "
+            "run the first `hearth eval` of an adapter with --prereg"
+        )
     problems = committed_golden_problems(golden_git, task=registration.task,
                                          golden_sha=golden_sha)
     if problems:
@@ -562,7 +611,7 @@ def golden_git_status(path: Path | str, *, data: bytes | None = None) -> dict[st
     Pass ``data`` — the bytes the eval actually parsed and scored — so the status is about
     those bytes, not a second read of the file that could differ.
     """
-    status = verify_committed(path, data=data)
+    status = verify_committed(path, data=data, role="golden set")
     head = ""
     if status.repo_root:
         try:  # the repository's HEAD at measurement time, committed file or not (B-079)
@@ -712,14 +761,91 @@ class _GitError(RuntimeError):
     """A git invocation returned non-zero."""
 
 
+# Every question the gate asks git is about content-addressed history: "is this blob in
+# that commit", "is that commit an ancestor of this one". Content addressing is what makes
+# the answers unforgeable — a commit id fixes its parents — so anything that lets git answer
+# from somewhere OTHER than the objects themselves turns the gate back into a configuration
+# check (CLAUDE.md §3, B-120). Three such mechanisms exist, and each is neutralised here:
+#
+# * ``refs/replace/*`` (``git replace``): git silently substitutes one object for another,
+#   so a fabricated, backdated commit can be grafted under the HEAD recorded at a first
+#   measurement. Off via ``GIT_NO_REPLACE_OBJECTS=1`` (config can only further disable
+#   replace refs, never re-enable them over the environment variable).
+# * ``info/grafts`` / ``GIT_GRAFT_FILE``: rewrites a commit's parents by fiat. git has no
+#   switch to ignore a grafts file, so the gate refuses a repository that has one
+#   (:func:`_history_rewrites`) and strips the env var.
+# * the commit-graph cache (``objects/info/commit-graph``): parents, trees and dates are
+#   read from it instead of from the commit objects, and its checksum is not verified on
+#   read — a hand-edited graph makes ``git log`` report a parent the commit does not have.
+#   Off via ``core.commitGraph=false`` (slower history walks; the gate walks one file).
+#
+# ``-c`` on the command line outranks every config file, so repository-local config cannot
+# turn these back on. System and global config are skipped outright (``GIT_CONFIG_NOSYSTEM``
+# / ``GIT_CONFIG_GLOBAL``): the gate's reads must not depend on ambient per-user settings.
+# Repository-local config cannot be skipped (git offers no switch for it); the keys in it
+# that change how objects or parents are read are exactly the ones overridden above, and
+# the rest (aliases, hooks, fsmonitor) do not run for these plumbing reads. Every other
+# ``GIT_*`` variable is dropped too — ``GIT_DIR``, ``GIT_OBJECT_DIRECTORY``,
+# ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_REPLACE_REF_BASE``, ``GIT_INDEX_FILE`` all
+# redirect what is read. ``protocol.allow=never`` / ``GIT_NO_LAZY_FETCH`` keep a
+# partial clone from fetching a missing object over the network mid-check.
+_GIT_OVERRIDES = (
+    "-c", "core.commitGraph=false",
+    "-c", "protocol.allow=never",
+)
+
+
+def _git_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    return env
+
+
+def _history_rewrites(root: str) -> list[str]:
+    """Every mechanism in the repository at ``root`` that rewrites history by fiat (B-120).
+
+    Replace refs are already ignored by :func:`_git`; they are refused as well because a
+    repository that carries them is one where a human reviewer running plain ``git log``
+    sees a different history from the one the gate checked. A grafts file cannot be ignored
+    at all, so it must be refused.
+    """
+    problems = []
+    try:
+        refs = _git(["for-each-ref", "--format=%(refname)", "refs/replace/"], cwd=root)
+        common = _git(["rev-parse", "--git-common-dir"], cwd=root)
+    except (_GitError, FileNotFoundError, NotADirectoryError) as exc:
+        return [f"cannot inspect the repository for history rewrites ({exc})"]
+    if refs:
+        problems.append(
+            f"it carries replace refs ({refs.splitlines()[0]}…): `git replace` substitutes "
+            "one commit for another, so its history is not the committed history — "
+            "remove them (`git replace -d`)"
+        )
+    if (Path(root) / common / "info" / "grafts").exists():
+        problems.append(
+            "it has an info/grafts file, which rewrites commit parents by fiat — remove it"
+        )
+    return problems
+
+
 def _git(args: list[str], *, cwd: str, strip: bool = True) -> str:
-    """Run ``git <args>`` in ``cwd`` and return its stdout (stripped); raise on failure."""
+    """Run ``git <args>`` in ``cwd`` and return its stdout (stripped); raise on failure.
+
+    Always with history rewriting neutralised (see ``_GIT_OVERRIDES``).
+    """
     proc = subprocess.run(
-        ["git", *args],
+        ["git", *_GIT_OVERRIDES, *args],
         cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
     if proc.returncode != 0:
         raise _GitError((proc.stderr or proc.stdout).strip() or f"git {args[0]} failed")

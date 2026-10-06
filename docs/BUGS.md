@@ -1739,6 +1739,70 @@ must fail when the fix is reverted.
 - **Acceptance test:** `tests/test_parser_error_containment.py` (message + formatted traceback,
   both readers, three hostile workbooks); live MCP check.
 
+### B-120
+**H2 (P0 gate) — round-4 review**
+
+- **Priority:** P0 · **Status:** **FIXED** in `deffc2c` · **Effort:** S
+- **Summary:** `git replace` / grafts could fake "prereg committed before the first measurement". Every gate git call runs with GIT_NO_REPLACE_OBJECTS=1, system/global git config ignored; a repo with replace refs or a grafts file is refused. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-121
+**H3 (P0 gate) — round-4 review**
+
+- **Priority:** P0 · **Status:** **FIXED** in `aeb1b62` · **Effort:** S
+- **Summary:** adding any non-dot file beside identical weights made a "fresh" adapter. The ledger matches on the digest of the files mlx_lm actually loads. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-122
+**M1 (P1 gate) — round-4 review**
+
+- **Priority:** P1 · **Status:** **FIXED** in `b5fed3d` · **Effort:** S
+- **Summary:** a menu of preregs committed before measuring let the bar be picked after seeing scores. Each measurement records the prereg it was made under; promotion requires the prereg of the adapter's FIRST measurement. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-124
+**M4 (P1) — round-4 review**
+
+- **Priority:** P1): · **Status:** **FIXED** in `280f02c` · **Effort:** S
+- **Summary:** U+2028/2029/0085 in an adapter id tore a ledger line and bricked every eval/promotion. ensure_ascii + newline-only split; ids validated. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-125
+**M5 (P1 gate) — round-4 review**
+
+- **Priority:** P1 · **Status:** **FIXED** in `038091e` · **Effort:** S
+- **Summary:** zero-width / soft-hyphen / fullwidth / NFC-vs-NFD variants passed as distinct prompts. NFKC + Cf stripping before duplicate detection. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-127
+**L2 (P2 serving) — round-4 review**
+
+- **Priority:** P2 · **Status:** **FIXED** in `c9c1df1` · **Effort:** S
+- **Summary:** transient adapter-load failures were memoized and the fingerprint missed same-size mtime-preserving overwrites. Transient errors not memoized; inode + ctime in the fingerprint. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-128
+**L3 (P3) — round-4 review**
+
+- **Priority:** P3): · **Status:** **FIXED** in `cf52524` · **Effort:** S
+- **Summary:** an untracked golden set was reported as an untracked prereg. The message names the right file. (Agent G3; it stopped at the daily API budget before writing this entry — integrator verified: suite at c9c1df1 1785 passed; replay refuses; removing GIT_NO_REPLACE_OBJECTS fails the H2 test.)
+
+### B-123
+**Unledgered measurement paths (round-4 M2) — residual trust assumptions not yet documented**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Evidence:** an alternate `HEARTH_HOME` gives a full, unledgered PASS (CONFIRMED by the
+  round-4 review); the gateway serves candidate adapters on explicit request
+  (`router/route.py` ~583/619); a library call to `score_candidate` writes no ledger record.
+- **Next:** decide what can be closed (e.g. record gateway candidate traffic, or require an
+  explicit A/B flag) and document the rest in RUNBOOK_training.md as trust assumptions
+  (the gate guards against self-deception by an operator using this install, not against a
+  deliberate operator with filesystem access).
+
+### B-126
+**Round-4 L1 test gaps still open (G3 stopped before finishing them)**
+
+- **Priority:** P3 · **Status:** open (in progress when the agent stopped; its uncommitted
+  draft is in worktree agent-ac83996e6c19c8912, tests/test_training_ledger.py) · **Effort:** S
+- **Evidence:** surviving mutants: each ledger chain clause alone (seq / prev), ledger flock
+  removal (no concurrency test), the committed-blob duplicate_prompts check (prereg.py ~431),
+  `find(records, ledger_mac)` → `records[-1]` in adapters promote, removing measured_at /
+  backend ledger-binding fields. None is an exploit; each is a guard no test protects.
+
 ---
 
 ## Fixed recently, do not re-open
@@ -1836,3 +1900,10 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `e1102b9` | **B-111.** Tests kill the surviving `policy_rungs`-defaults and agent `on_close` mutants. |
 | `132fe0e` | **B-112.** Unknown-model 404s (chat, stream, agent route) are recorded as failed requests. |
 | `0aa9b46` | **B-115.** No parser message reaches a caller: lazily-raised openpyxl errors quoting cell text are replaced (type only, from None). |
+| `deffc2c` | **B-120.** `git replace` / grafts could fake "prereg committed before the first measurement". Every gate git call runs with GIT_NO_REPLACE_OBJECTS=1, system/glob |
+| `aeb1b62` | **B-121.** adding any non-dot file beside identical weights made a "fresh" adapter. The ledger matches on the digest of the files mlx_lm actually loads. |
+| `b5fed3d` | **B-122.** a menu of preregs committed before measuring let the bar be picked after seeing scores. Each measurement records the prereg it was made under; promoti |
+| `280f02c` | **B-124.** U+2028/2029/0085 in an adapter id tore a ledger line and bricked every eval/promotion. ensure_ascii + newline-only split; ids validated. |
+| `038091e` | **B-125.** zero-width / soft-hyphen / fullwidth / NFC-vs-NFD variants passed as distinct prompts. NFKC + Cf stripping before duplicate detection. |
+| `c9c1df1` | **B-127.** transient adapter-load failures were memoized and the fingerprint missed same-size mtime-preserving overwrites. Transient errors not memoized; inode + |
+| `cf52524` | **B-128.** an untracked golden set was reported as an untracked prereg. The message names the right file. |

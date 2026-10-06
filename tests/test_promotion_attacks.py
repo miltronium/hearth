@@ -566,11 +566,45 @@ def test_C_unset_the_anchor_is_hearths_own_repository(tmp_path):
 def test_gap_a_report_that_is_not_the_registered_experiment_is_refused(world, flags, text):
     """`adapters promote` must compare the report with the prereg (registration.mismatches)."""
     world.registered()
-    world.eval_report("extract-1", *flags)  # measured AFTER the bar, but not under it
+    world.eval_report("extract-1", *flags, exploratory=True)  # after the bar, not under it
     result = world.promote()
     assert result.exit_code == 1, _flat(result)
     assert "not the registered experiment" in _flat(result) and text in _flat(result)
     assert world.status() == "candidate"
+
+
+@pytest.mark.parametrize(
+    ("flags", "text"),
+    [
+        (("--max-tokens", "32"), "decode config"),
+        (("--metric", "f1"), "metric 'token_f1' != registered 'exact_match'"),
+    ],
+)
+def test_B122_eval_refuses_a_run_that_is_not_the_registered_experiment_before_recording(
+    world, flags, text
+):
+    """A ledger record says which prereg a run was made under, so --prereg with a different
+    golden set / metric / decode config is refused BEFORE anything is measured or recorded."""
+    from hearth.training.ledger import ledger_path
+
+    world.registered()
+    result = world.eval("extract-1", *flags, "--prereg", str(world.prereg))
+    assert result.exit_code == 1, _flat(result)
+    assert "nothing was measured" in _flat(result) and text in _flat(result)
+    assert "PASS" not in _flat(result) and "FAIL" not in _flat(result)
+    assert not ledger_path(world.home).exists()
+
+
+def test_B122_a_prereg_for_another_task_is_not_this_experiment(world):
+    """Same golden content (the sha does not include the task), registered for another task."""
+    from hearth.training.ledger import ledger_path
+
+    world.write_prereg(task="classify")
+    world.commit("golden.jsonl", "prereg.yaml")
+    result = world.eval("extract-1", "--prereg", str(world.prereg))
+    assert result.exit_code == 1, _flat(result)
+    assert "task 'extract' != registered 'classify'" in _flat(result)
+    assert not ledger_path(world.home).exists()
 
 
 def test_gap_the_proof_names_the_commit_that_last_changed_the_bar(world):
