@@ -1229,7 +1229,11 @@ def probe_environment(*, environ: dict[str, str] | None = None) -> Section:
 # The docs that carry institutional memory — the ones a new session reads first, and so
 # the ones whose rot costs the most.
 KEY_DOCS = (
+    "docs/RESUME.md",  # the resume-here handoff a new session reads first (B-016)
+    "docs/GUIDE.md",
+    "docs/BUGS.md",
     "docs/RESULTS.md",
+    "docs/HANDOFF.md",
     "docs/cmux/HANDOFF.md",
     "docs/cmux/TODO.md",
     "docs/TIERS.md",

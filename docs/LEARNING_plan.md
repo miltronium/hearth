@@ -1,6 +1,9 @@
 # HEARTH — Learning Subsystem: Assessment & Improvement Plan
 
-**Status:** Design/analysis only. Nothing in this document has been implemented.
+**Status:** Design/analysis written 2026-09-02. Much of it has since been implemented and
+superseded (the eval gate, pre-registration, the signed measurement ledger — see
+`docs/BUGS.md` "Fixed recently" and `docs/RUNBOOK_training.md`). **Code line numbers cited
+below are as of 2026-09-02 and have moved (B-017)** — search for the named function instead.
 **Date:** 2026-09-02.
 **Scope:** `src/hearth/training/`, `src/hearth/registry/adapters.py`, the eval gate, the
 correction-signal loop that does not yet exist, and the router's learnable surfaces.

@@ -1,5 +1,12 @@
 # HEARTH — Handoff to a Real-Hardware Claude Code
 
+> **Historical record (B-016).** Written 2026-07; superseded for current state by
+> `docs/RESUME.md` (resume-here), `docs/GUIDE.md` (how to use HEARTH) and
+> `uv run --no-sync python scripts/hearth_status.py` (measured state). Commands below
+> may use flags or workflows that have since changed (e.g. bare `uv run`, typed-score
+> promotion) — do not copy them without checking the GUIDE.
+
+
 **Who this is for.** A Claude Code instance running on the user's **personal Apple-Silicon
 machine** — one that *has* the resources a sandboxed/cloud instance does not: a real GPU,
 the ability to download model weights from Hugging Face, a live CAMBOT app, and a live

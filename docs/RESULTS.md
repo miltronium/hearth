@@ -1,5 +1,12 @@
 # HEARTH — Real-Hardware Validation Results
 
+> **Historical record (B-016).** Written 2026-07; superseded for current state by
+> `docs/RESUME.md` (resume-here), `docs/GUIDE.md` (how to use HEARTH) and
+> `uv run --no-sync python scripts/hearth_status.py` (measured state). Commands below
+> may use flags or workflows that have since changed (e.g. bare `uv run`, typed-score
+> promotion) — do not copy them without checking the GUIDE.
+
+
 **Runner:** Claude Code on the user's personal Apple-Silicon machine.
 **Date:** 2026-07-10.
 **Hardware:** Apple **M3 Pro**, **36 GB** unified memory, macOS (arm64).
