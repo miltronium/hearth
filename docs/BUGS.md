@@ -1784,7 +1784,7 @@ must fail when the fix is reverted.
 ### B-123
 **Unledgered measurement paths (round-4 M2) — residual trust assumptions not yet documented**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **DOCUMENTED** (residual trust assumptions in RUNBOOK_training.md §6, 'Measurements the ledger cannot see'; closing them would block legitimate A/B serving) · **Effort:** S
 - **Evidence:** an alternate `HEARTH_HOME` gives a full, unledgered PASS (CONFIRMED by the
   round-4 review); the gateway serves candidate adapters on explicit request
   (`router/route.py` ~583/619); a library call to `score_candidate` writes no ledger record.
@@ -1796,7 +1796,7 @@ must fail when the fix is reverted.
 ### B-126
 **Round-4 L1 test gaps still open (G3 stopped before finishing them)**
 
-- **Priority:** P3 · **Status:** open (in progress when the agent stopped; its uncommitted
+- **Priority:** P3 · **Status:** **FIXED** in `a372aaf` (measured_at/backend binding mutants accepted as equivalent: the HMAC-signed report's ledger_mac already pins the record) 
   draft is in worktree agent-ac83996e6c19c8912, tests/test_training_ledger.py) · **Effort:** S
 - **Evidence:** surviving mutants: each ledger chain clause alone (seq / prev), ledger flock
   removal (no concurrency test), the committed-blob duplicate_prompts check (prereg.py ~431),
@@ -1907,3 +1907,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `038091e` | **B-125.** zero-width / soft-hyphen / fullwidth / NFC-vs-NFD variants passed as distinct prompts. NFKC + Cf stripping before duplicate detection. |
 | `c9c1df1` | **B-127.** transient adapter-load failures were memoized and the fingerprint missed same-size mtime-preserving overwrites. Transient errors not memoized; inode + |
 | `cf52524` | **B-128.** an untracked golden set was reported as an untracked prereg. The message names the right file. |
+| `a372aaf` | **B-126.** Ledger chain clauses, append flock, MAC lookup and committed-blob duplicate check each killed by a test. **B-123** documented as residual trust. |

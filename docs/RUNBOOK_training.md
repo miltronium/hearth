@@ -377,6 +377,21 @@ Committer timestamps are settable, which is why the ancestry rule exists — but
 committed *before* the first measurement and never looked at again is what is enforced,
 not that nobody peeked at a sibling adapter trained the same way.
 
+**Measurements the ledger cannot see (B-123).** The ledger records every `hearth eval` on
+*this* install. It does not record, and cannot stop you learning from:
+
+- **another install** — a second `HEARTH_HOME` has its own key and ledger, so a full PASS
+  measured there never appears here. Measure only on the install you promote from.
+- **serving the candidate** — `/v1/chat/completions` with `hearth.adapter=<candidate id>` (the
+  A/B path) answers with the candidate; chatting with it is an informal measurement.
+- **library calls** — `hearth.training.eval.score_candidate` scores without writing the ledger.
+
+These are deliberate: closing them would block legitimate A/B serving and testing. The gate
+guards against *self-deception by an operator using this install the normal way*; it is not a
+defence against a determined operator with filesystem access. If you have looked at a
+candidate by any of these routes, treat it as measured: retrain or register a fresh adapter
+before committing a bar for it.
+
 ---
 
 ## 7. Serve the promoted adapter *(hardware)*
