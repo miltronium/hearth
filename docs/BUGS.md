@@ -495,7 +495,7 @@ must fail when the fix is reverted.
 ### B-013
 **Agent: no search tool, an unmeasured step cap, and no tool-calling eval set**
 
-- **Priority:** P2 · **Status:** open · **Effort:** M
+- **Priority:** P2 · **Status:** partly fixed — search tool added in `cb5bb84` (live: 2 steps instead of reading files in order); step cap still unmeasured, no tool-calling eval set yet · **Effort:** M
 - **Evidence:** The built-in tools are `read_file`, `list_files` (a glob over *names*,
   `agent/builtins.py:119`), `rag_search`, and the three `finance_*` tools
   (`builtins.py:87, 153, 232, 324-344`). None searches file contents.
@@ -1908,3 +1908,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `c9c1df1` | **B-127.** transient adapter-load failures were memoized and the fingerprint missed same-size mtime-preserving overwrites. Transient errors not memoized; inode + |
 | `cf52524` | **B-128.** an untracked golden set was reported as an untracked prereg. The message names the right file. |
 | `a372aaf` | **B-126.** Ledger chain clauses, append flock, MAC lookup and committed-blob duplicate check each killed by a test. **B-123** documented as residual trust. |
+| `cb5bb84` | **B-013 (part).** `search_files` agent tool; the gateway reachability check derives from one FILE_TOOLS set. |
