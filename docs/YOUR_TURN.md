@@ -62,7 +62,8 @@ errors with a network message, that is a real egress bug — file it in `docs/BU
 **What this does not cover: DNS.** The profile allows Unix sockets, and macOS name lookups go
 through mDNSResponder over one. In (a) the sandboxed `huggingface.co` lookup *succeeded*; only
 the `connect` was refused. So §1 proves no outbound connection, not no outbound packet: a
-lookup can still leak a hostname. §8's capture is what would show one.
+lookup can still leak a hostname. §8's capture is what shows one: DNS replies there are
+attributed to the process that asked, and on 2026-10-06 none went to HEARTH.
 
 **Done 2026-10-06 (operator):** (a) `PermissionError: [Errno 1] Operation not permitted`, then
 `net ok`; (b) `SAFE offline`, `exit=0`, profile `config/routing.yaml` with 0 remotes; (c)
@@ -277,33 +278,97 @@ evidence; anything that fails is a real bug to fix.
 ## 8. Watch the wire during a real session (optional, 15 min) — *needs sudo*
 
 §1 proves HEARTH *cannot* reach the network (kernel sandbox). This shows what *did* happen while
-you used it, attributed per process — useful as independent evidence, and the right tool for
-cmux panes, where containment is still open (B-002). A quiet capture only covers what you did
-during the window; it is not a substitute for §1.
+you used it, attributed per process — independent evidence, and the right tool for cmux panes,
+where containment is still open (B-002). A quiet capture only covers what you did during the
+window; it is not a substitute for §1.
 
-Start the capture. macOS pktap tags every packet with the sending process; loopback (HEARTH's
-own API) is excluded:
+**What pktap attribution can and cannot see (measured 2026-10-06).** On this Mac, packets that
+receive a reply carry the process: `eproc nc:86598` on the inbound SYN-ACK. Many *outbound*
+packets carry no metadata, `()`. A send that is never answered (an unanswered SYN, one-way UDP)
+can therefore go unattributed. DNS is better than expected: the query is unattributed, but the
+reply is tagged with the requester (`proc mDNSResponder:441, eproc Safari:24038`). So the
+capture proves "no *answered* traffic from HEARTH, including DNS lookups", not "no packet".
+The old check (`grep 'proc (python…'`) only worked because `proc nc` is a substring of
+`eproc nc`.
+
+Run HEARTH **unsandboxed** here: §1 already showed the sandbox blocks; this measures what HEARTH
+does on its own. Strip proxy variables. Otherwise HEARTH talks to a local proxy over loopback,
+the filter below hides that, and the proxy egresses under its own name.
+
+**Window 1.** Start the server, then note the PID in `Started server process [NNNN]`:
 
 ```sh
-sudo tcpdump -i pktap,all -k NP -w ~/hearth.pcap 'not (host 127.0.0.1 or host ::1)' &
+env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy HEARTH_FILE_ROOTS=$HOME/Claude/apps/HEARTH/docs uv run --no-sync hearth serve &
 ```
 
-Now use HEARTH normally — serve, `/chat`, an agent run over a folder, a file summary. Then
-stop the capture:
+**Window 3. Validate the instrument first.** This waits for 5 packets to or from example.com
+and prints each one with its process. `-n` stops tcpdump making DNS lookups of its own:
 
 ```sh
-sudo kill %1
+sudo tcpdump -i pktap,all -k NP -n -c 5 'tcp port 443 and host example.com'
 ```
 
-Check for HEARTH's packets — expect `no packets from HEARTH`:
+In window 2, while it waits. Window 3 should print lines naming `eproc nc:<pid>`:
 
 ```sh
-tcpdump -r ~/hearth.pcap -k NP 2>/dev/null | grep -iE 'proc (python|hearth|uv)' || echo "no packets from HEARTH"
+nc -z -w 5 example.com 443
 ```
 
-For detail, open `~/hearth.pcap` in Wireshark (DNS queries count: a lookup leaks a hostname).
+**Window 3. Start the real capture** in the foreground (stop it later with Ctrl-C):
 
-Live views: `nettop -m tcp` (per-process, live) and LuLu alerts (already installed). **Done when**
-no packet in the capture comes from `python`/`hearth`/`uv`. For cmux, run the same capture while
-a pane runs `curl https://example.com`: today it WILL show egress (that is B-002), and it is the
-measurement any containment fix must turn silent.
+```sh
+sudo tcpdump -i pktap,all -n -w ~/hearth.pcap 'not (host 127.0.0.1 or host ::1)'
+```
+
+**Window 2. A control inside the window**, with a fresh hostname so its lookup is visible too:
+
+```sh
+nc -z -w 5 example.org 443
+```
+
+Now use HEARTH: in `/chat`, one plain message and one agent-mode question. Then a CLI run:
+
+```sh
+env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy uv run --no-sync hearth run "Say hello in five words."
+```
+
+Stop the capture with Ctrl-C in window 3. Then, in window 2, list attributed traffic from the
+processes that matter. Expect `eproc nc:` and no `python`/`hearth` line:
+
+```sh
+tcpdump -r ~/hearth.pcap -n -k NP 2>/dev/null | grep -oE 'e?proc [^,)]+' | grep -iE 'python|hearth|nc:' | sort | uniq -c | sort -rn
+```
+
+List the relevant hostnames looked up. Expect `example.org` and nothing else. A missing
+`example.org` means lookups are not visible (e.g. encrypted DNS), so that half is unmeasured:
+
+```sh
+tcpdump -r ~/hearth.pcap -n 'port 53' 2>/dev/null | grep -oiE '(example\.org|huggingface[a-z.]*|hf\.co|pypi[a-z.]*|github[a-z.]*|openai[a-z.]*|anthropic[a-z.]*)' | sort | uniq -c
+```
+
+If a `python` line or a hostname shows up, identify it before concluding anything. Show where a
+process connected (put its `Name:PID` from the first list in place of `Python:94611`):
+
+```sh
+tcpdump -r ~/hearth.pcap -n -k NP 2>/dev/null | grep 'Python:94611' | head -4
+```
+
+A DNS reply does not repeat the hostname. Find the query line, then grep its numeric ID (here
+42211) to get the reply, which names the requester as `eproc`:
+
+```sh
+tcpdump -r ~/hearth.pcap -n -k NP 'port 53' 2>/dev/null | grep -E ' 42211[ +]'
+```
+
+**Done when** the control appears in both lists, and nothing attributed belongs to the server's
+PID or the CLI run. For cmux, run the same capture while a pane runs `curl https://example.com`:
+today it WILL show egress (that is B-002), and it is the measurement any containment fix must
+turn silent.
+
+**Done 2026-10-06 (operator).** Instrument: outbound packets `()`, the reply `eproc nc:86598`.
+Capture: 20,965 packets. Attributed traffic among the relevant names: `eproc nc:93913` (the
+control) and `Python:94611`, a different program's client connecting to a third-party API on
+443 (host deliberately not recorded here). It is not HEARTH: the server was PID 94602 (port
+8080's listener). DNS: `example.org`
+(the control) and `glb-…github.com`, whose replies went to `eproc Safari:24038`. Nothing
+attributed to the HEARTH server or the CLI run, DNS replies included.
