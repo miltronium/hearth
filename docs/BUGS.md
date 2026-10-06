@@ -40,7 +40,7 @@ must fail when the fix is reverted.
 
 **P2: quality / UX**
 - [B-011](#b-011) The MLX embedder cannot work: default id 404s and mlx-lm has no BERT
-- [B-012](#b-012) Gateway agent route: no finance tools, and `rag_search` is not pinned to a collection
+- ~~[B-012](#b-012) Gateway agent route: no finance tools, and `rag_search` is not pinned to a collection~~ — fixed in `bccd7f3`
 - [B-013](#b-013) Agent: no search tool, an unmeasured step cap, no tool-calling eval set
 - [B-014](#b-014) Untested end to end: a cmux open-tier launch; the `/chat` agent toggle in a browser
 
@@ -474,7 +474,7 @@ must fail when the fix is reverted.
 ### B-012
 **Gateway agent route: no finance tools, and `rag_search` is not pinned to a collection**
 
-- **Priority:** P2 · **Status:** open · **Effort:** S
+- **Priority:** P2 · **Status:** **FIXED** in `bccd7f3` · **Effort:** S
 - **Evidence:** `gateway/agent_route.py:93-97` builds the toolset with
   `finance=getattr(state, "finance", None)`, and nothing assigns `app.state.finance`
   (`grep -rn "\.finance\s*=" src/hearth`: no hits). The same call passes no `collection`,
@@ -1909,3 +1909,4 @@ message carries its own WHAT / WHY / HOW VERIFIED.
 | `cf52524` | **B-128.** an untracked golden set was reported as an untracked prereg. The message names the right file. |
 | `a372aaf` | **B-126.** Ledger chain clauses, append flock, MAC lookup and committed-blob duplicate check each killed by a test. **B-123** documented as residual trust. |
 | `cb5bb84` | **B-013 (part).** `search_files` agent tool; the gateway reachability check derives from one FILE_TOOLS set. |
+| `bccd7f3` | **B-012.** HTTP agent gets the ledger tools when a ledger exists, and a request `collection` pins rag_search. |
