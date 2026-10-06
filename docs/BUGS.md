@@ -154,6 +154,9 @@ must fail when the fix is reverted.
 - ~~[B-085](#b-085) The incumbent adapter was scored on the candidate's base, not its own (P2)~~ — fixed in `8bc10f0`
 - ~~[B-086](#b-086) Four promotion guards could be deleted with no test failing (P2)~~ — fixed in `07b6e81`, `0f27170`
 
+**Added 2026-10-06 (operator run of `docs/YOUR_TURN.md` §1–§4)**
+- [B-129](#b-129) `hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind (P3)
+
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
 ---
@@ -412,8 +415,11 @@ must fail when the fix is reverted.
 ### B-010
 **A promoted adapter with no significance proof is served by default; golden sets are below the gate's floor**
 
-- **Priority:** P1 · **Status:** open · **Effort:** M
-- **Evidence:** `scripts/hearth_status.py --section learning`:
+- **Priority:** P1 · **Status:** open (adapter half done) · **Effort:** M
+- **Update 2026-10-06:** the operator retired the classify adapter
+  (`hearth adapters retire classify-20260710T020135Z`); `hearth_status.py --section learning`
+  now reports it `retired`. The two golden sets are still n=6 and n=5 — that half stays open.
+- **Evidence (original):** `scripts/hearth_status.py --section learning`:
   ```
   [warn ] data/extract_golden.jsonl: n=6 — gates only in the near-degenerate case (best p=0.0156)
   [warn ] data/route_golden.jsonl: n=5 — gates only in the near-degenerate case (best p=0.0312)
@@ -519,8 +525,18 @@ must fail when the fix is reverted.
 ### B-014
 **Untested end to end: an actual cmux open-tier launch; the `/chat` agent toggle in a browser**
 
-- **Priority:** P2 · **Status:** blocked (needs cmux.app plus a `tiers.yaml` `open` rule;
-  needs a browser) · **Effort:** S each
+- **Priority:** P2 · **Status:** blocked (needs cmux.app plus a `tiers.yaml` `open` rule);
+  `/chat` half done 2026-10-06 · **Effort:** S each
+- **Update 2026-10-06, `/chat` in a real browser (operator):** the server ran under the
+  `sandbox-exec` deny-egress profile with `HEARTH_FILE_ROOTS=docs/`. Load models listed the
+  4 servable models. Plain chat: the server log shows generations from Coder-7B, Coder-14B
+  and Qwen2.5-14B (lazy-loaded, resident 22.5/24.0 GB), and the operator saw each reply
+  labelled with the model picked. Agent mode on with Coder-7B, asked "Which file mentions pktap?": banner
+  `readable roots: 1`, step 1 `search_files` (two hits, both `docs/YOUR_TURN.md`), step 2
+  answer `docs/YOUR_TURN.md`. Correct. 2 steps, 1808 tok, 32.3 s (27.7 s of it in the step-1
+  model call). Each step rendered as its own turn. Toggle, at the server-log layer: the three
+  toggle-off messages are `POST /v1/chat/completions` only, and the two agent runs are
+  `POST /v1/hearth/agent`.
 - **Evidence:** Commit `816d824`: "Not verified: an actual open-tier launch (needs a
   tiers.yaml 'open' rule and cmux.app)". `tests/test_gateway_chat_ui.py` (15 tests) asserts
   on served markup, e.g. a regex for the `agentmode` input at `:93-102`. No test executes
@@ -1802,6 +1818,31 @@ must fail when the fix is reverted.
   removal (no concurrency test), the committed-blob duplicate_prompts check (prereg.py ~431),
   `find(records, ledger_mac)` → `records[-1]` in adapters promote, removing measured_at /
   backend ledger-binding fields. None is an exploit; each is a guard no test protects.
+
+### B-129
+**`hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind**
+
+- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Evidence:** operator run, 2026-10-06, with port 8080 already held by an older process:
+  ```
+  Serving on http://127.0.0.1:8080  (OpenAI-compatible /v1)
+  ERROR:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 8080): address already in use
+  INFO:     Application shutdown complete.
+  ... INFO hearth.serving: loaded mlx-community/Qwen2.5-Coder-7B-Instruct-4bit (4.5 GB)
+  ... INFO hearth.gateway: warmed mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+  ```
+  The process then exited 3. `cli.py:451` prints the banner unconditionally before
+  `uvicorn.run` (line 452) attempts the bind. B-053 moved `create_app` above the banner, but
+  the bind is the other way startup fails after it. Warmup kept running after shutdown and
+  logged `warmed` for a server that never served.
+- **Impact:** The banner reports an outcome (serving) that has not happened, the CLAUDE.md §3
+  shape. If anything else on the machine holds 8080, an operator who reads only the first
+  lines will send requests to that process instead.
+- **Fix outline:** Print the banner from the app's startup hook only after the socket is bound
+  (or bind the socket first and pass it to uvicorn). Cancel warmup on shutdown.
+- **Acceptance test:** With a listener already on the port, `hearth serve` prints no
+  "Serving on", exits non-zero with the bind error, and logs no `loaded`/`warmed` lines. A
+  healthy start still prints the banner.
 
 ---
 
