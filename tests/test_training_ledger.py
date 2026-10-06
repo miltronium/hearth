@@ -103,3 +103,67 @@ def test_binding_problems_name_each_disagreement(tmp_path):
     assert binding_problems(record, {"adapter_id": "a", "golden_sha": "g"}) == []
     assert binding_problems(record, {"golden_sha": "h"})
     assert "not in the measurement ledger" in binding_problems(None, {})[0]
+
+
+# -- B-126: each chain clause, and the append lock, on its own ------------------------------
+
+
+def _forge_second(tmp_path, key, *, seq, prev_ok):
+    r0 = append(tmp_path, _entry(), key)
+    forged = attest.sign({**_entry(adapter="b"), "schema": "hearth.measurement/1", "seq": seq,
+                          "prev": r0["signature"]["mac"] if prev_ok else ""}, key)
+    with ledger_path(tmp_path).open("a") as fh:
+        fh.write(json.dumps(forged) + "\n")
+
+
+def test_a_right_prev_with_a_wrong_seq_is_refused(tmp_path):
+    """The seq clause alone: prev links correctly, seq repeats (what an unlocked race writes)."""
+    key = _key(tmp_path)
+    _forge_second(tmp_path, key, seq=0, prev_ok=True)
+    with pytest.raises(LedgerError, match="chain is broken"):
+        read(tmp_path, key)
+
+
+def test_a_right_seq_with_a_wrong_prev_is_refused(tmp_path):
+    """The prev clause alone: seq is in order, but the record does not chain to its
+    predecessor (a record spliced in from another ledger signed with the same key)."""
+    key = _key(tmp_path)
+    _forge_second(tmp_path, key, seq=1, prev_ok=False)
+    with pytest.raises(LedgerError, match="chain is broken"):
+        read(tmp_path, key)
+
+
+_APPENDER = """
+import sys, time
+from pathlib import Path
+from hearth.training import attest
+from hearth.training.ledger import append
+home, tag, start = Path(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+key = attest.load_key(home)
+while time.time() < start:
+    pass
+for i in range(25):
+    append(home, {"adapter_id": f"{tag}-{i}", "weights_sha": "w", "golden_sha": "g",
+                  "measured_at": "2026-01-01T00:00:00+00:00"}, key)
+"""
+
+
+def test_concurrent_appends_from_many_processes_keep_one_intact_chain(tmp_path):
+    """Without the flock, two processes read the same tail and write the same seq: the
+    chain forks and the whole install refuses every measurement afterwards."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    key = _key(tmp_path)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    start = time.time() + 1.5
+    procs = [subprocess.Popen([sys.executable, "-c", _APPENDER, str(tmp_path), f"p{n}",
+                               str(start)], env=env, stderr=subprocess.PIPE)
+             for n in range(8)]
+    errors = [p.communicate(timeout=120)[1].decode() for p in procs]
+    assert all(p.returncode == 0 for p in procs), errors
+    records = read(tmp_path, key)  # LedgerError here = a forked chain
+    assert len(records) == 8 * 25
+    assert [r["seq"] for r in records] == list(range(8 * 25))
