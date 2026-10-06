@@ -137,3 +137,24 @@ them (CLAUDE.md §4). Commit them in the repo (the evals anchor).
 
 When you have done §1–§3, tell Claude the outcome (or paste the output) and it will record the
 evidence; anything that fails is a real bug to fix.
+
+## 8. Watch the wire during a real session (optional, 15 min) — *needs sudo*
+
+§1 proves HEARTH *cannot* reach the network (kernel sandbox). This shows what *did* happen while
+you used it, attributed per process — useful as independent evidence, and the right tool for
+cmux panes, where containment is still open (B-002). A quiet capture only covers what you did
+during the window; it is not a substitute for §1.
+
+```sh
+# macOS pktap tags every packet with the sending process; loopback (HEARTH's own API) excluded.
+sudo tcpdump -i pktap,all -k NP -w ~/hearth.pcap 'not (host 127.0.0.1 or host ::1)' &
+# ... now use HEARTH normally: serve, /chat, an agent run over a folder, a file summary ...
+sudo kill %1
+tcpdump -r ~/hearth.pcap -k NP 2>/dev/null | grep -iE 'proc (python|hearth|uv)' || echo "no packets from HEARTH"
+# open ~/hearth.pcap in Wireshark for detail (DNS queries count: a lookup leaks a hostname)
+```
+
+Live views: `nettop -m tcp` (per-process, live) and LuLu alerts (already installed). **Done when**
+no packet in the capture comes from `python`/`hearth`/`uv`. For cmux, run the same capture while
+a pane runs `curl https://example.com`: today it WILL show egress (that is B-002), and it is the
+measurement any containment fix must turn silent.
