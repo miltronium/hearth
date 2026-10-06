@@ -255,17 +255,23 @@ them (CLAUDE.md §4). Commit them in the repo (the evals anchor).
 
 ## 7. Decisions that are yours
 
-- **Push / PR.** Nothing is pushed; ~150 commits sit on local `cmux/integration`. Earlier
-  pushes were blocked by LuLu (ssh→github:22). When ready: allow it, then
-  `git push origin cmux/integration`, and open a PR to `main` only after the graduation gate
+- **Push / PR.** **Pushed 2026-10-06** (`950f3ce..a50d2be`, fast-forward), after a scan of the
+  175 unpushed commits for internal hostnames, secrets and non-synthetic data found none. Push
+  again after later commits. Open a PR to `main` only after the graduation gate
   (`docs/cmux/TODO.md`).
 - **cmux (B-002, P0).** Sealing a cmux workspace does not contain pane child processes. Until
   that is solved, do not run confidential work through cmux; plain `hearth` is fine.
 - **Remote escalation (B-009).** The confidence score that decides escalation is a stub, but it
-  only matters under the opt-in `config/routing.remote.yaml`. If you never use remote
-  escalation, ignore it; if you will, it needs a real design.
-- **Agent eval set (rest of B-013).** To measure the agent's step cap and tool use, it needs a
-  small set of tasks you actually care about with known answers. Your examples, your call.
+  only matters under the opt-in `config/routing.remote.yaml`. **Decided 2026-10-06: "maybe"**,
+  so B-009 stays open as a design task. Do not run that profile until it has a real signal.
+- **Agent eval set (rest of B-013).** **Smoke set built 2026-10-06:** `data/agent_eval.yaml`,
+  10 questions you vouched for, over `docs/` pinned at `a50d2be`. Run it with the command
+  below. First result: 9/10 with Coder-7B at 6 steps; the miss is a tool limit (B-130). Grow
+  it to ≥ 30 before claiming anything about the step cap.
+
+  ```sh
+  uv run --no-sync python scripts/agent_eval.py --max-iterations 6 --out /tmp/agent_eval.json
+  ```
 - **A real training run end to end**, when you have ≥ 30 golden examples:
   commit a prereg first, then
   `scripts/train_lora_real.sh --data data/extract.jsonl --task extract --promote --golden data/extract_golden.jsonl --prereg prereg/extract.yaml`.

@@ -156,6 +156,7 @@ must fail when the fix is reverted.
 
 **Added 2026-10-06 (operator run of `docs/YOUR_TURN.md` §1–§4)**
 - [B-129](#b-129) `hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind (P3)
+- [B-130](#b-130) Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context (P2)
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
 
@@ -395,6 +396,9 @@ must fail when the fix is reverted.
 **Router confidence is a prompt-length stub; under `routing.remote.yaml` short messages escalate**
 
 - **Priority:** P1 · **Status:** open · **Effort:** M (a real signal), S (a doc warning)
+- **Operator decision 2026-10-06:** "maybe". Remote escalation may be used, so this stays
+  open as a design task. A real confidence signal is needed before `routing.remote.yaml` can be
+  trusted. Not won't-fix.
 - **Evidence:** `router/route.py:425-437`: `min(1.0, 0.4 + length / 300.0)` over the last user
   message. The `task_class` argument is unused. `config/routing.remote.yaml:47-50` sets
   thresholds draft 0.6, code 0.7, chat 0.65, so a user message shorter than 60 / 90 / 75
@@ -501,7 +505,16 @@ must fail when the fix is reverted.
 ### B-013
 **Agent: no search tool, an unmeasured step cap, and no tool-calling eval set**
 
-- **Priority:** P2 · **Status:** partly fixed — search tool added in `cb5bb84` (live: 2 steps instead of reading files in order); step cap still unmeasured, no tool-calling eval set yet · **Effort:** M
+- **Priority:** P2 · **Status:** partly fixed — search tool added in `cb5bb84` (live: 2 steps instead of reading files in order); a smoke eval set exists (n=10, below n ≥ 30); step cap still unmeasured · **Effort:** M
+- **Update 2026-10-06: smoke eval set.** `data/agent_eval.yaml`: 10 questions (5 find, 3 read,
+  2 two-step), answers vouched for by the operator, over `docs/` **pinned** at `a50d2be`. The
+  runner `scripts/agent_eval.py` extracts that tree with `git archive`, so live edits cannot
+  change the key. It verifies the key before any model runs, and its scorer refuses shotgun
+  answers. `tests/test_agent_eval.py` (11 tests) were mutation-checked: dropping the
+  number-boundary rule or the "names other files" rule each fails a test. First run, Coder-7B,
+  `--max-iterations 6`: **9/10** correct, 10/10 answered, 0 hit the cap, correct runs took 2–3
+  steps. The failure, `read-require-answer`, reproduced twice and is B-130, not the step cap.
+  n=10 cannot license a step-cap claim; grow it to ≥ 30 for that.
 - **Evidence:** The built-in tools are `read_file`, `list_files` (a glob over *names*,
   `agent/builtins.py:119`), `rag_search`, and the three `finance_*` tools
   (`builtins.py:87, 153, 232, 324-344`). None searches file contents.
@@ -1869,6 +1882,31 @@ must fail when the fix is reverted.
 - **Acceptance test:** With a listener already on the port, `hearth serve` prints no
   "Serving on", exits non-zero with the bind error, and logs no `loaded`/`warmed` lines. A
   healthy start still prints the banner.
+
+### B-130
+**Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context**
+
+- **Priority:** P2 · **Status:** open · **Effort:** S–M
+- **Evidence:** `scripts/agent_eval.py` item `read-require-answer` ("In AGENT.md, which method
+  raises AgentIncompleteError?"). It failed twice with the same steps:
+  `list_files > read_file > search_files`. `read_file(path)` returned
+  `[... truncated: showing the first 4000 of 37562 characters. Narrow the request if you need
+  the rest.]`, while the fact is at character 10,617. `read_file` takes only `path`
+  (`agent/builtins.py:89`), so nothing can be narrowed; the cap is the loop's
+  `max_observation_chars = 4_000` (`agent/loop.py:155`). `search_files` then returned only
+  ``AGENT.md:195: `AgentIncompleteError` naming the stop reason.``, and the method is on line 194.
+  The model answered "not explicitly stated".
+- **Impact:** Anything past the first 4,000 characters of a file is reachable only if the model
+  guesses a search string that is *on the same line* as the fact. The truncation message tells
+  the model to do something its tools cannot do. That is the CLAUDE.md §3 shape: the message
+  implies a capability that does not exist.
+- **Fix outline:** Give `read_file` an optional line range (`start_line`, `max_lines`) and make
+  the truncation message name it. And/or give `search_files` a small context window (±2
+  lines). Keep the root confinement and the AST no-network test.
+- **Acceptance test:** On a scripted fake model, a fact on line N of a >4,000-char file is
+  reachable by a ranged read, and by a search hit whose context includes line N−1. The
+  truncation message names a parameter `read_file` really accepts. `read-require-answer` passes
+  in a real-model eval run.
 
 ---
 

@@ -1,0 +1,82 @@
+# Agent tool-use eval (B-013): questions over a PINNED corpus, answers vouched for by the
+# operator on 2026-10-06. Run with scripts/agent_eval.py.
+#
+# The corpus is `docs/` as it was at `corpus.commit`, extracted with `git archive` into a
+# temporary directory for every run. Live docs/ drifts (agents edit it daily: "which file
+# mentions pktap?" had one answer at noon and two by evening), so a question answered against
+# the working tree would silently change meaning. Never re-pin without re-verifying every item.
+#
+# Each item:
+#   kind      find (name the one file) | read (a fact from a named file) | two-step (find, then read)
+#   answer    what a correct final answer must contain (case-insensitive substring)
+#   evidence  term + file the runner checks in the pinned corpus BEFORE any model runs: the
+#             term must occur in that file, and for `find` in no other file. A bad pin or a
+#             wrong answer key fails loudly instead of scoring the model against a broken key.
+#
+# n = 10 is a smoke set. It is below the promotion gate's min_n = 30 (CLAUDE.md §7), so no
+# claim about the step cap or tool-calling style may rest on it alone.
+
+corpus:
+  commit: a50d2be0b667f020f5d2f31a2b3131271633f8f8
+  path: docs
+
+items:
+  - id: find-agent-incomplete
+    kind: find
+    question: "Which file mentions AgentIncompleteError?"
+    answer: "AGENT.md"
+    evidence: {term: "AgentIncompleteError", file: "AGENT.md"}
+
+  - id: find-cpu-and-ne
+    kind: find
+    question: "Which file mentions the cpuAndNeuralEngine compute unit?"
+    answer: "HANDOFF.md"
+    evidence: {term: "cpuAndNeuralEngine", file: "HANDOFF.md"}
+
+  - id: find-hello-provider
+    kind: find
+    question: "Which file describes the HelloProvider example plugin?"
+    answer: "PLUGINS.md"
+    evidence: {term: "HelloProvider", file: "PLUGINS.md"}
+
+  - id: find-www-authenticate
+    kind: find
+    question: "Which file says an authentication failure comes with a WWW-Authenticate: Bearer header?"
+    answer: "API.md"
+    evidence: {term: "WWW-Authenticate", file: "API.md"}
+
+  - id: find-allow-escalation
+    kind: find
+    question: "Which file mentions allowEscalation?"
+    answer: "RUNBOOK_consumer_wiring.md"
+    evidence: {term: "allowEscalation", file: "RUNBOOK_consumer_wiring.md"}
+
+  - id: read-gpu-ceiling
+    kind: read
+    question: "According to MODELS_local.md, what is the GPU working-set ceiling?"
+    answer: "30.15"
+    evidence: {term: "30.15 GB", file: "MODELS_local.md"}
+
+  - id: read-min-n
+    kind: read
+    question: "According to RUNBOOK_training.md, what is the default min_n of the promotion gate?"
+    answer: "30"
+    evidence: {term: "`min_n` (30)", file: "RUNBOOK_training.md"}
+
+  - id: read-require-answer
+    kind: read
+    question: "In AGENT.md, which method raises AgentIncompleteError?"
+    answer: "require_answer"
+    evidence: {term: "`require_answer()` raises", file: "AGENT.md"}
+
+  - id: two-step-embed-dim
+    kind: two-step
+    question: "Find the doc that lists HEARTH_EMBED_DIM. What is its default value?"
+    answer: "256"
+    evidence: {term: "| `HEARTH_EMBED_DIM` | `256` |", file: "GUIDE.md"}
+
+  - id: two-step-allow-escalation
+    kind: two-step
+    question: "Find the file that mentions allowEscalation. What value do summarize and classify set it to?"
+    answer: "false"
+    evidence: {term: "HearthOptions(allowEscalation: false)", file: "RUNBOOK_consumer_wiring.md"}
