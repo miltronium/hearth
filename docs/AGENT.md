@@ -225,6 +225,7 @@ than acquiring a second copy of it.
 | --- | --- | --- |
 | `read_file(path)` | `hearth.mcp.files.read_text_file` | `HEARTH_FILE_ROOTS`, deny-by-default, symlink resolution, size cap, format table |
 | `list_files(root, pattern)` | `allowed_roots` + `resolve_under_roots` | the same allowlist, re-checked on every resolved path |
+| `search_files(text, root, pattern)` | the `list_files` walk + `read_text_file` per file | case-insensitive literal match; returns `path:line: text`; at most 500 files opened, 40 matches, 200 chars per line; unreadable files counted, never quoted (B-013) |
 | `rag_search(query, collection, k)` | the caller's `RagIndex` | whatever that index was built over |
 | `finance_total / finance_explain / finance_rows` | the caller's `FinanceStore` | Decimal arithmetic, the two-sum integrity check, exclusion reporting |
 
@@ -494,7 +495,7 @@ nothing — eight turns of refusals, and a fluent apology at the end. The comman
 roots up front and says so, naming the variable:
 
 ```
-No readable file roots. read_file and list_files are deny-by-default and will refuse every
+No readable file roots. read_file, list_files and search_files are deny-by-default and will refuse every
 path: HEARTH_FILE_ROOTS is unset, and there is no implicit root — not the current directory,
 not $HOME.
 ```
@@ -508,7 +509,7 @@ stated in the header.
 ### 8.5 What the toolset was is printed
 
 ```
-HEARTH agent — backend=mlx model=…Qwen2.5-3B-Instruct-4bit tools=list_files, read_file
+HEARTH agent — backend=mlx model=…Qwen2.5-3B-Instruct-4bit tools=list_files, read_file, search_files
 rag_search not offered — no --collection named
 finance tools not offered — no ledger at ~/.hearth/finance/ledger.db
 ```

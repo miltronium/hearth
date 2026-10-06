@@ -782,7 +782,8 @@ def agent(
     roots = allowed_roots(settings)
     if not roots:
         console.print(
-            "[red]No readable file roots.[/red] read_file and list_files are deny-by-default "
+            "[red]No readable file roots.[/red] read_file, list_files and search_files are "
+            "deny-by-default "
             "and will refuse every path: "
             + (
                 f"HEARTH_FILE_ROOTS is set to {settings.file_roots!r}, but none of those are "
@@ -800,7 +801,7 @@ def agent(
                 "ledger, this agent has nothing it can reach — it could only assert."
             )
             raise typer.Exit(code=2)
-        notes.append("read_file/list_files will refuse every path — no roots resolved")
+        notes.append("read_file/list_files/search_files will refuse every path — no roots resolved")
 
     tools = local_toolset(settings=settings, rag=rag, finance=store, collection=collection)
     with _backend_required():

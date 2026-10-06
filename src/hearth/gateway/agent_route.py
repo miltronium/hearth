@@ -255,7 +255,11 @@ def _is_reachable(tool_names: list[str], roots: list[Any]) -> bool:
     """
     if roots:
         return True
-    return bool(set(tool_names) - {"read_file", "list_files"})
+    from ..agent.builtins import FILE_TOOLS
+
+    # Derived from the one definition of "file tools", so adding one (search_files) cannot
+    # silently make a run with no roots look reachable.
+    return bool(set(tool_names) - FILE_TOOLS)
 
 
 #: Every agent run executes on ONE long-lived worker thread, not a fresh thread per request.

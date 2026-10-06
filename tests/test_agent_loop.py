@@ -547,7 +547,7 @@ def test_the_built_in_toolset_passes_the_vetting_gate(local_policy, settings):
     provider = ScriptedProvider([])
     router = Router(local_provider=provider, policy=local_policy)
     agent = Agent(router, local_toolset(settings=settings))  # must not raise
-    assert set(agent.registry.names) == {"read_file", "list_files"}
+    assert set(agent.registry.names) == {"read_file", "list_files", "search_files"}
 
 
 @pytest.mark.parametrize(

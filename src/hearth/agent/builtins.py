@@ -35,12 +35,18 @@ import datetime
 from pathlib import Path
 from typing import Any
 
-from ..mcp.files import allowed_roots, read_text_file, resolve_under_roots
+from ..mcp.files import FileAccessError, allowed_roots, read_text_file, resolve_under_roots
 from .tools import Tool, ToolParam, ToolRegistry
 
 #: Cap on how many paths ``list_files`` will return. A listing is orientation, not data: a
 #: model handed nine thousand paths spends its whole budget reading the listing.
 DEFAULT_LIST_LIMIT = 200
+# The tools gated by HEARTH_FILE_ROOTS: with no roots, every one of them refuses every call.
+FILE_TOOLS = frozenset({"read_file", "list_files", "search_files"})
+# search_files bounds: files opened, matches returned, characters per matching line.
+DEFAULT_SEARCH_FILES = 500
+DEFAULT_SEARCH_MATCHES = 40
+SEARCH_SNIPPET_CHARS = 200
 
 #: Cap on how many ledger rows ``finance_rows`` will return in one call.
 DEFAULT_ROW_LIMIT = 50
@@ -104,6 +110,120 @@ def read_file_tool(*, settings: Any | None = None) -> Tool:
     )
 
 
+def _walk(root: str, pattern: str, settings: Any | None):
+    """Yield resolved file paths under the allowed roots (or one root inside them).
+
+    The one place containment is enforced for directory walks: every yielded path is
+    re-checked after resolution, so a symlink inside a root pointing outside it is skipped
+    whatever ``rglob`` does with symlinks on this Python version.
+    """
+    if root.strip():
+        roots = [resolve_under_roots(_under_roots(root, settings), settings=settings)]
+    else:
+        roots = allowed_roots(settings)
+    if not roots:
+        raise ValueError(
+            "file access is disabled: HEARTH_FILE_ROOTS names no readable directory, so "
+            "there is nothing this agent may list or read"
+        )
+    allowed = allowed_roots(settings)
+    for base in roots:
+        if not base.is_dir():
+            continue
+        for entry in sorted(base.rglob(pattern)):
+            try:
+                if not entry.is_file():
+                    continue
+                resolved = entry.resolve()
+            except OSError:
+                continue  # a dangling symlink or an unreadable directory entry
+            if any(resolved == r or resolved.is_relative_to(r) for r in allowed):
+                yield str(resolved)
+
+
+def search_files_tool(
+    *,
+    settings: Any | None = None,
+    max_files: int = DEFAULT_SEARCH_FILES,
+    max_matches: int = DEFAULT_SEARCH_MATCHES,
+) -> Tool:
+    """A tool that finds which files (and lines) mention some text — B-013.
+
+    Without it, finding a fact meant ``read_file`` on one file after another under the step
+    cap; a live run read files 1, 2, 3, 4 in order and would never have reached file 9. Each
+    file is read through :func:`hearth.mcp.files.read_text_file` — the same allowlist, size
+    cap and format table as ``read_file`` — so this can reach nothing ``read_file`` cannot.
+    Matching is a case-insensitive literal substring (predictable for a small model; no regex
+    to get wrong). Files that cannot be read are counted, never quoted.
+    """
+
+    def search_files(text: str, root: str = "", pattern: str = "*") -> list[str]:
+        needle = text.strip().casefold()
+        if not needle:
+            raise ValueError("text must not be empty: say what to look for")
+        hits: list[str] = []
+        scanned = skipped = 0
+        for path in _walk(root, pattern, settings):
+            if scanned >= max_files:
+                hits.append(
+                    f"[... stopped after {max_files} files. Use a narrower root or pattern.]"
+                )
+                break
+            scanned += 1
+            try:
+                body = read_text_file(path, settings=settings)
+            except FileAccessError:
+                skipped += 1
+                continue
+            for number, line in enumerate(body.splitlines(), start=1):
+                if needle in line.casefold():
+                    snippet = line.strip()
+                    if len(snippet) > SEARCH_SNIPPET_CHARS:
+                        snippet = snippet[:SEARCH_SNIPPET_CHARS] + "…"
+                    hits.append(f"{path}:{number}: {snippet}")
+                    if len(hits) >= max_matches:
+                        hits.append(f"[... truncated at {max_matches} matches. Search for "
+                                    "something more specific.]")
+                        return hits
+        if not hits:
+            hits.append(f"[no match in {scanned} file(s)"
+                        + (f"; {skipped} could not be read" if skipped else "") + "]")
+        elif skipped:
+            hits.append(f"[{skipped} file(s) could not be read and were skipped]")
+        return hits
+
+    return Tool(
+        name="search_files",
+        description=(
+            "Find which readable files mention some text, and on which lines. Use this "
+            "instead of reading files one by one when you are looking for something."
+        ),
+        call=search_files,
+        params=(
+            ToolParam(
+                name="text",
+                type="string",
+                description="Text to look for (case-insensitive, matched literally).",
+            ),
+            ToolParam(
+                name="root",
+                type="string",
+                description="Directory to search, or leave empty to search every allowed root.",
+                required=False,
+                default="",
+            ),
+            ToolParam(
+                name="pattern",
+                type="string",
+                description="Glob for file names to search, e.g. '*.txt'. '*' for everything.",
+                required=False,
+                default="*",
+            ),
+        ),
+        returns=f"'path:line: text' for each matching line, at most {max_matches} of them",
+    )
+
+
 def list_files_tool(*, settings: Any | None = None, limit: int = DEFAULT_LIST_LIMIT) -> Tool:
     """A tool that lists files under the allowed roots, so the agent can find a path.
 
@@ -117,36 +237,12 @@ def list_files_tool(*, settings: Any | None = None, limit: int = DEFAULT_LIST_LI
     """
 
     def list_files(root: str = "", pattern: str = "*") -> list[str]:
-        if root.strip():
-            roots = [resolve_under_roots(_under_roots(root, settings), settings=settings)]
-        else:
-            roots = allowed_roots(settings)
-        if not roots:
-            raise ValueError(
-                "file access is disabled: HEARTH_FILE_ROOTS names no readable directory, so "
-                "there is nothing this agent may list or read"
-            )
         found: list[str] = []
-        for base in roots:
-            if not base.is_dir():
-                continue
-            for entry in sorted(base.rglob(pattern)):
-                if len(found) >= limit:
-                    found.append(
-                        f"[... truncated at {limit} paths. Use a narrower root or pattern.]"
-                    )
-                    return found
-                try:
-                    if not entry.is_file():
-                        continue
-                    resolved = entry.resolve()
-                except OSError:
-                    continue  # a dangling symlink or an unreadable directory entry
-                if not any(
-                    resolved == r or resolved.is_relative_to(r) for r in allowed_roots(settings)
-                ):
-                    continue
-                found.append(str(resolved))
+        for path in _walk(root, pattern, settings):
+            if len(found) >= limit:
+                found.append(f"[... truncated at {limit} paths. Use a narrower root or pattern.]")
+                break
+            found.append(path)
         return found
 
     return Tool(
@@ -380,9 +476,11 @@ def local_toolset(
     only when their object is passed, so an agent's reach is decided by what the caller
     constructed, not by what happens to be installed.
     """
-    registry = ToolRegistry(
-        (read_file_tool(settings=settings), list_files_tool(settings=settings))
-    )
+    registry = ToolRegistry((
+        read_file_tool(settings=settings),
+        list_files_tool(settings=settings),
+        search_files_tool(settings=settings),
+    ))
     if rag is not None:
         registry.register(rag_search_tool(rag, collection=collection))
     if finance is not None:

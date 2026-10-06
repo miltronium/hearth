@@ -268,7 +268,7 @@ def test_json_emits_the_whole_run_and_nothing_else(env, script):
     assert payload["stopped_reason"] == "answered"
     assert payload["answer"] == "There are 2 CSV files."
     assert payload["task"] == "count the CSV files"
-    assert payload["tools"] == ["list_files", "read_file"]
+    assert payload["tools"] == ["list_files", "read_file", "search_files"]
     assert payload["iterations"] == len(payload["steps"]) == 2
     assert payload["total_tokens"] == payload["prompt_tokens"] + payload["completion_tokens"]
     assert payload["budget"]["max_iterations"] == 8

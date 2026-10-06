@@ -167,7 +167,7 @@ HEARTH_FILE_ROOTS=/tmp/hearth-demo uv run --no-sync hearth agent "how many CSV f
 ```
 
 ```text
-HEARTH agent — backend=mlx model=auto tools=list_files, read_file
+HEARTH agent — backend=mlx model=auto tools=list_files, read_file, search_files
 rag_search not offered — no --collection named
 finance tools not offered — no ledger at /Users/…/.hearth/finance/ledger.db
                        agent steps
@@ -796,7 +796,7 @@ bound. Every generation is local, and it **never** escalates.
 
 | Tool | Offered when | Governed by |
 |---|---|---|
-| `list_files(root, pattern)`, `read_file(path)` | always (refuse everything without roots) | `HEARTH_FILE_ROOTS`, `HEARTH_FILE_MAX_BYTES`, the format table |
+| `list_files(root, pattern)`, `read_file(path)`, `search_files(text, root, pattern)` | always (refuse everything without roots) | `HEARTH_FILE_ROOTS`, `HEARTH_FILE_MAX_BYTES`, the format table |
 | `rag_search(query, …)` | `--collection NAME` given (and it is non-empty) | the RAG index |
 | `finance_total / finance_explain / finance_rows` | a ledger exists at `~/.hearth/finance/ledger.db` (disable with `--no-finance`) | Decimal arithmetic, integrity checks |
 
@@ -1266,7 +1266,7 @@ fields.
 | `HEARTH_VECTOR_STORE` | `sqlite` | `memory/store.py:select_vector_store` | `sqlite-vec` (`--extra vec`) or a plugin name |
 | `HEARTH_RAM_CEILING_GB` | `24.0` | `ModelPool` / `ModelManager` (`serving/`) | resident-model budget; LRU eviction above it (§3.5) |
 | `HEARTH_WARMUP` | `true` | `gateway/app.py` | load the default model in the background at `serve` start; no-op on echo. Off: nothing loads until the first request, and `/ready` is 200 (`loaded: false`) while the default's weights resolve on disk (§4.7) |
-| `HEARTH_FILE_ROOTS` | `""` (deny all) | `mcp/files.py:allowed_roots`: MCP `*_file` tools, agent `read_file`/`list_files` (CLI and HTTP), finance `read_table`, `scripts/hearth_peek.py` | colon-separated directories; `~` is expanded; non-existent entries are dropped |
+| `HEARTH_FILE_ROOTS` | `""` (deny all) | `mcp/files.py:allowed_roots`: MCP `*_file` tools, agent `read_file`/`list_files`/`search_files` (CLI and HTTP), finance `read_table`, `scripts/hearth_peek.py` | colon-separated directories; `~` is expanded; non-existent entries are dropped |
 | `HEARTH_FILE_MAX_BYTES` | `2000000` | `mcp/files.py` | larger files are refused, not truncated |
 | `HEARTH_ALLOW_DOWNLOADS` | `false` | `providers/mlx.py:resolve_local_model`; doctor | `1` lets loads fetch missing models; makes doctor UNSAFE |
 | `HEARTH_HOME` | `~/.hearth` | `config.py` (token, `models/`, `rag/`, `adapters.json`, `train/`, `finance/ledger.db`); also read directly by `handoff/store.py`, `finance/store.py` and the status probes | point at a scratch directory for experiments |

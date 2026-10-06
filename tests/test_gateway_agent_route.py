@@ -336,7 +336,7 @@ def test_the_warning_is_emitted_before_the_agent_is_even_constructed():
         task="read my statements",
         start=AgentStartEvent(
             task="read my statements",
-            tools=["list_files", "read_file"],
+            tools=["list_files", "read_file", "search_files"],
             budget=applied,
             file_roots=0,
             warnings=[_NO_ROOTS_WARNING],

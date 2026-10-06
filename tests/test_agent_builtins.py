@@ -271,6 +271,7 @@ def test_the_default_toolset_has_no_shell_write_or_network_tool(rooted):
     assert set(registry.names) == {
         "read_file",
         "list_files",
+        "search_files",
         "rag_search",
         "finance_total",
         "finance_explain",
@@ -282,7 +283,7 @@ def test_the_default_toolset_has_no_shell_write_or_network_tool(rooted):
 
 def test_collaborators_a_caller_did_not_pass_produce_no_tools(rooted):
     registry = local_toolset(settings=rooted.settings)
-    assert set(registry.names) == {"read_file", "list_files"}
+    assert set(registry.names) == {"read_file", "list_files", "search_files"}
 
 
 def test_the_rendered_toolset_tells_the_model_what_each_tool_returns(rooted):
@@ -330,3 +331,57 @@ def test_the_relative_convenience_does_not_widen_the_boundary(tmp_path, monkeypa
 
     with pytest.raises(FileAccessError):
         resolve_under_roots(_under_roots(escape))
+
+
+# -- search_files (B-013) --------------------------------------------------------------------
+
+
+def _search(rooted, **kwargs):
+    from hearth.agent.builtins import search_files_tool
+
+    tool = search_files_tool(settings=rooted.settings, **{k: v for k, v in kwargs.items()
+                                                          if k in ("max_files", "max_matches")})
+    args = tool.validate({k: v for k, v in kwargs.items() if k in ("text", "root", "pattern")})
+    return tool.call(**args)
+
+
+def test_search_files_finds_the_file_and_line_case_insensitively(rooted):
+    hits = _search(rooted, text="MARCH TOTAL")
+    assert hits == [f"{(rooted.root / 'march.txt').resolve()}:1: March total was 120."]
+
+
+def test_search_files_never_reaches_outside_the_roots(rooted):
+    (rooted.root / "escape.txt").symlink_to(rooted.outside / "secrets.txt")
+    hits = _search(rooted, text=SECRET)
+    assert not any(SECRET in h for h in hits), hits  # neither the outside file nor its link
+    assert hits[-1].startswith("[no match")
+
+
+def test_search_files_counts_unreadable_files_without_quoting_them(rooted):
+    (rooted.root / "blob.bin").write_bytes(b"\xff\xfe" + SECRET.encode() + b"\x00\x01")
+    hits = _search(rooted, text=SECRET)
+    assert not any(SECRET in h for h in hits)
+    assert "could not be read" in hits[-1]
+
+
+def test_search_files_bounds_its_output(rooted):
+    for i in range(30):
+        (rooted.root / f"f{i:02d}.txt").write_text("needle here\n" * 3)
+    assert len(_search(rooted, text="needle", max_matches=5)) == 6  # 5 hits + truncation note
+    hits = _search(rooted, text="nothing-matches", max_files=4)
+    assert "stopped after 4 files" in hits[-1]
+
+
+def test_search_files_refuses_an_empty_query(rooted):
+    with pytest.raises(ValueError, match="must not be empty"):
+        _search(rooted, text="   ")
+
+
+def test_a_run_with_only_file_tools_and_no_roots_is_still_unreachable():
+    """Adding search_files must not make a no-roots run look reachable (the gateway refuses
+    such a run before it spends anything)."""
+    from hearth.agent.builtins import FILE_TOOLS
+    from hearth.gateway.agent_route import _is_reachable
+
+    assert _is_reachable(sorted(FILE_TOOLS), roots=[]) is False
+    assert _is_reachable(["read_file", "list_files", "search_files", "rag_search"], roots=[])
