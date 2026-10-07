@@ -1,17 +1,24 @@
-# HEARTH — RESUME HERE (handoff, 2026-10-06)
+# HEARTH — RESUME HERE (handoff, parked 2026-10-06)
 
-Read this first, then CLAUDE.md. Written for a human or an agent picking up mid-stream. Every
-claim was measured on 2026-10-05; re-verify with §2 before trusting it.
+Read this first, then CLAUDE.md. Written for a human or an agent picking up mid-stream. §1–§3
+were measured on 2026-10-05; the RESUME HERE block and §4 on 2026-10-06. Re-verify with §2.
 
 ## ⏩ RESUME HERE
 
-- **Branch:** `cmux/integration` (local only — **nothing has been pushed**). See `git log -1`.
-- **State:** HEARTH is no-egress and disk-only by default, model selection is real, the
-  promotion gate has been hardened through two adversarial review rounds, and the operator
-  docs (guide, man page, `--help`) are complete and drift-tested.
-- **Learn it:** `docs/GUIDE.md` ("Learn HEARTH in 15 minutes" at the top), `man ./man/hearth.1`,
-  `uv run --no-sync hearth --help`.
-- **Do next:** see §4.
+- **Branch:** `cmux/integration`. Pushed through `17c2559`. **`1ec3b60` (B-129) is local,
+  not pushed.** Suite: 1840 passed, 2 skipped.
+- **Parked 2026-10-06 mid-verification of B-129.** The fix is in. One real-socket test was not
+  runnable from the Claude sandbox (no `bind()`). Next, the operator runs, in their terminal:
+  `uv run --no-sync pytest -v -p no:cacheprovider tests/test_cli_startup_errors.py -k real_port_conflict`
+  (expect `1 passed`, not `skipped`). Then, with a server holding 8080,
+  `uv run --no-sync hearth serve; echo "exit=$?"` should print `Cannot listen on 127.0.0.1:8080`,
+  no `Serving on`, no `loaded`, and `exit=1`. Record the result in BUGS B-129, then ask
+  before pushing `1ec3b60`.
+- **Operator verification done 2026-10-06:** YOUR_TURN §1–§4, §6, §7 and §8 all passed or were
+  decided. Results are recorded in `docs/YOUR_TURN.md` ("Done 2026-10-06") and `docs/BUGS.md`.
+- **Next after that:** grow `data/agent_eval.yaml` toward n ≥ 30 (B-013); §5 golden sets
+  (operator's examples); B-002 cmux containment (P0, design first).
+- **Learn it:** `docs/GUIDE.md`, `man ./man/hearth.1`, `uv run --no-sync hearth --help`.
 
 ## 1. What is true now
 
@@ -96,7 +103,15 @@ gets ledger tools + a pinnable RAG collection (B-012); train_lora_real.sh --prom
 real gate (B-015); dead constant removed (B-022); stale docs marked historical and monitored
 (B-016/B-017).
 
-Open (10 of 112 in `docs/BUGS.md`): P0 **B-002** (cmux pane containment — no confidential work
+Done 2026-10-06 (with the operator): kernel-sandbox no-egress proof (§1); real-TCP model
+selection, 404 and disconnect (§2); `/chat` incl. agent mode in a browser (§3, B-014 half);
+classify adapter retired (§4, B-010 half); httpx2 (B-020); 0.5B weights kept (B-019); pktap
+capture, no HEARTH traffic (§8); branch pushed; agent smoke eval `data/agent_eval.yaml`
+(B-013); `read_file` ranges and truthful truncation hints (B-130); serve binds before the
+banner and warmup (B-129, real-socket test pending). B-009: operator said "maybe", so it stays
+open.
+
+Open as of 2026-10-05 (superseded in part by the line above): P0 **B-002** (cmux pane containment — no confidential work
 through cmux); P1 B-009 (confidence stub, remote profile only), B-010 (promoted classify
 adapter — operator decision, YOUR_TURN §4); P2 B-014 (browser check — YOUR_TURN §3); P3
 B-019, B-020 (operator), B-021, B-023, B-028, B-030 (environment / minor). Remaining agent work
@@ -118,12 +133,25 @@ agent tool-calling eval set once the operator supplies tasks (B-013 remainder).
   `TERMINAL_WIDTH` once at import so an "80-column" test ran at 300).
 - **Validate the instrument**: several "results" were artifacts (zsh not word-splitting `$VAR`;
   `pip` missing so a package count read 0; `"$c"` passing `run hi` as one argument).
+- **2026-10-06:**
+  - The agent eval extracted its corpus to a random temp path. The path is in every
+    observation, so identical code scored 9/10 and then 8/10. It now uses a fixed path; keep
+    eval prompts byte-stable.
+  - pktap tags many *outbound* packets `()`; only replies carry `eproc`.
+  - `-W error::<dotted class>` is ignored by plain `python` (resolved only by pytest).
+  - `StarletteDeprecationWarning` is a `UserWarning`.
+- **Never run `uv add`/`uv lock` from a Claude session.** The session sets `UV_DEFAULT_INDEX`
+  to an internal mirror and rewrites `uv.lock`. The repo is public, so the operator runs
+  lockfile changes.
+- **Commands for the operator must be paste-ready.** zsh treats a pasted `# comment` as an
+  error or as extra arguments, so put expectations in prose.
 
 ## 6. Security note for the operator
 
-`~/.claude/apple/tool_allowlist.csv` contains `acc,contains_match`: **any** shell command
-containing the letters "acc" (accept, access, accuracy…) runs outside the Claude Code sandbox.
-Found by an agent; nothing was edited and it was not used deliberately. Consider narrowing it.
+`~/.claude/apple/tool_allowlist.csv` has 31 `contains_match` entries (as of 2026-10-06),
+including `python3`, `bash`, `sudo`, `curl`, `git` and `acc`. Any command *containing* one of
+them runs outside the Claude Code sandbox. It is the operator's config; agents must not edit
+it. See YOUR_TURN §6.
 
 ## 7. Operator's standing instructions
 
