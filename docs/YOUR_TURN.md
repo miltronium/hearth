@@ -78,10 +78,10 @@ Every `curl` below uses `--noproxy '*'`: if your shell has `HTTP_PROXY` set, cur
 falsely pass.
 
 Start the server in the same window as §1 (needs the `sb` alias), then wait for
-`Uvicorn running on http://127.0.0.1:8080`. The earlier `Serving on` line prints before the
-port is bound (B-129), so it does not mean the server is up. If you see
-`address already in use`, something else holds 8080: find it with
-`lsof -nP -iTCP:8080 -sTCP:LISTEN` before going on, or every request below tests the wrong
+`Uvicorn running on http://127.0.0.1:8080`. Since B-129 was fixed, `Serving on` prints only
+once the port is bound. If something else holds 8080, serve exits 1 with
+`Cannot listen on 127.0.0.1:8080` and the `lsof` command that finds the holder, before
+loading any weights. Deal with that before going on, or every request below tests the wrong
 process.
 
 ```sh

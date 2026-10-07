@@ -283,7 +283,7 @@ HEARTH_ROUTING_YAML=config/routing.finance.yaml hearth serve
 .PP
 Env: HEARTH_HOST, HEARTH_PORT, HEARTH_BACKEND, HEARTH_ROUTING_YAML, HEARTH_DEFAULT_MODEL, HEARTH_MODELS_YAML, HEARTH_REQUIRE_AUTH, HEARTH_WARMUP, HEARTH_RAM_CEILING_GB, HEARTH_FILE_ROOTS, HEARTH_HOME.
 .PP
-Exit: runs until interrupted (Ctrl\-C). Exits non\-zero without serving when the selected routing profile does not exist.
+Exit: runs until interrupted (Ctrl\-C). Exits 1 without serving, and without loading any weights, when the address cannot be bound (e.g. another process holds the port); exits non\-zero when the selected routing profile does not exist.
 .PP
 Arguments and options:
 .RS 4

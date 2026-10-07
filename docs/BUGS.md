@@ -155,7 +155,7 @@ must fail when the fix is reverted.
 - ~~[B-086](#b-086) Four promotion guards could be deleted with no test failing (P2)~~ — fixed in `07b6e81`, `0f27170`
 
 **Added 2026-10-06 (operator run of `docs/YOUR_TURN.md` §1–§4)**
-- [B-129](#b-129) `hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind (P3)
+- ~~[B-129](#b-129) `hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind (P3)~~ — fixed 2026-10-06
 - ~~[B-130](#b-130) Agent `read_file` truncates at 4,000 chars and says "narrow the request", but has no way to narrow; `search_files` hits have no context (P2)~~ — fixed 2026-10-06
 
 [Fixed recently, do not re-open](#fixed-recently--do-not-re-open)
@@ -1867,7 +1867,21 @@ must fail when the fix is reverted.
 ### B-129
 **`hearth serve` prints "Serving on" before the port is bound; warmup loads weights after a failed bind**
 
-- **Priority:** P3 · **Status:** open · **Effort:** S
+- **Priority:** P3 · **Status:** **FIXED 2026-10-06** · **Effort:** S
+- **Fix:** `serve` validates the routing profile (the router's own cached `get_policy()`),
+  then binds (`cli._bind`), then builds the app, and only then prints the banner. It hands the
+  bound socket to uvicorn (`cli._run_uvicorn`, `Server.run(sockets=[sock])`). A bind failure
+  exits 1 with `Cannot listen on HOST:PORT: <reason>.` plus, for EADDRINUSE, the `lsof`
+  command that names the holder. That happens before `create_app`, so the warmup thread never
+  starts. A profile error still exits 2 whatever holds the port. A `create_app` failure
+  closes the socket.
+- **Verified:** `tests/test_cli_startup_errors.py`: port in use → exit 1, no banner, and
+  `create_app` never called; a broken profile is reported before any bind; the socket is
+  closed when the app fails; uvicorn gets the bound socket. Mutation-checked: banner before
+  bind (3 tests fail), app built before bind (2), no socket close (1). Full suite green.
+  `test_a_real_port_conflict_in_a_real_process` holds a real listener and runs a real
+  `hearth serve` on that port. It skips where sockets cannot be bound, as in the Claude
+  sandbox, so it was not run here: it needs a run on the operator's machine.
 - **Evidence:** operator run, 2026-10-06, with port 8080 already held by an older process:
   ```
   Serving on http://127.0.0.1:8080  (OpenAI-compatible /v1)

@@ -55,16 +55,28 @@ def fresh_process_caches():
 
 @pytest.fixture
 def no_server(monkeypatch):
-    """Record `uvicorn.run` instead of binding; restore the `hearth` logger serve touches."""
-    import uvicorn
+    """Record serving instead of binding; restore the `hearth` logger serve touches."""
+    import hearth.cli as cli
 
     log = logging.getLogger("hearth")
     handlers, level = list(log.handlers), log.level
     calls: list = []
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls.append((a, k)))
+    # serve binds first (B-129), then hands the socket to uvicorn: fake both seams, so no
+    # port is bound (this sandbox cannot bind at all) and serving is only recorded.
+    monkeypatch.setattr(cli, "_bind", lambda host, port: _FakeSocket())
+    monkeypatch.setattr(cli, "_run_uvicorn", lambda *a, **k: calls.append((a, k)))
     yield calls
     log.handlers[:] = handlers
     log.setLevel(level)
+
+
+class _FakeSocket:
+    """Stands in for the listening socket serve binds; records being closed."""
+
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _write_models(tmp_path):

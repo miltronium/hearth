@@ -18,6 +18,8 @@ Phase 0/1 commands:
 
 from __future__ import annotations
 
+import errno
+import socket
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -425,11 +427,10 @@ def serve(
     HEARTH_DEFAULT_MODEL, HEARTH_MODELS_YAML, HEARTH_REQUIRE_AUTH, HEARTH_WARMUP,
     HEARTH_RAM_CEILING_GB, HEARTH_FILE_ROOTS, HEARTH_HOME.
 
-    Exit: runs until interrupted (Ctrl-C). Exits non-zero without serving when the
-    selected routing profile does not exist.
+    Exit: runs until interrupted (Ctrl-C). Exits 1 without serving, and without loading
+    any weights, when the address cannot be bound (e.g. another process holds the port);
+    exits non-zero when the selected routing profile does not exist.
     """
-    import uvicorn
-
     from .gateway import create_app
 
     settings = get_settings()
@@ -442,14 +443,58 @@ def serve(
 
     bind_host = host or settings.host
     bind_port = port or settings.port
+    # Configuration first: a broken routing profile is reported as itself (exit 2) whatever
+    # holds the port. get_policy() is the router's own (cached) loader, not a re-check of it.
+    from .router.policy import get_policy
+
     with _routing_profile_required():
-        gateway = create_app(provider=provider, settings=settings)
+        get_policy()
+    # Then bind, before the app exists (B-129). The banner used to print before uvicorn tried
+    # the port, so "Serving on" appeared above "address already in use" — and create_app had
+    # already started warmup, which loaded 4.5 GB of weights for a server that never served.
+    # Now a bind failure exits here, before the app (and its warmup thread) exist, and the
+    # banner is printed only while this process holds the listening socket.
+    try:
+        sock = _bind(bind_host, bind_port)
+    except OSError as exc:
+        console.print(
+            f"[red]Cannot listen on {bind_host}:{bind_port}: {exc.strerror or exc}.[/red]"
+        )
+        if exc.errno == errno.EADDRINUSE:
+            console.print(
+                f"Another process holds the port. Find it with "
+                f"`lsof -nP -iTCP:{bind_port} -sTCP:LISTEN`, or pick another with --port."
+            )
+        raise typer.Exit(code=1) from None
+    try:
+        with _routing_profile_required():
+            gateway = create_app(provider=provider, settings=settings)
+    except BaseException:
+        sock.close()
+        raise
     console.print(
         f"[bold]HEARTH[/bold] {__version__} — backend=[cyan]{provider.name}[/cyan] "
         f"model=[cyan]{get_registry().default_id}[/cyan]"
     )
     console.print(f"Serving on http://{bind_host}:{bind_port}  (OpenAI-compatible /v1)")
-    uvicorn.run(gateway, host=bind_host, port=bind_port)
+    _run_uvicorn(gateway, sock, bind_host, bind_port)
+
+
+def _bind(host: str, port: int) -> socket.socket:
+    """A listening TCP socket on ``host:port`` (IPv4 or IPv6, whichever ``host`` names).
+
+    ``create_server`` sets SO_REUSEADDR as uvicorn does, which permits reusing a port in
+    TIME_WAIT but still refuses one another process is listening on (EADDRINUSE).
+    """
+    family = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0][0]
+    return socket.create_server((host, port), family=family)
+
+
+def _run_uvicorn(gateway: Any, sock: socket.socket, host: str, port: int) -> None:
+    """Serve ``gateway`` on the already-bound ``sock`` until interrupted."""
+    import uvicorn
+
+    uvicorn.Server(uvicorn.Config(gateway, host=host, port=port)).run(sockets=[sock])
 
 
 def _log_hearth_to_stderr() -> None:
