@@ -1,19 +1,15 @@
-# HEARTH — RESUME HERE (handoff, parked 2026-10-06)
+# HEARTH — RESUME HERE (handoff, updated 2026-10-15)
 
 Read this first, then CLAUDE.md. Written for a human or an agent picking up mid-stream. §1–§3
 were measured on 2026-10-05; the RESUME HERE block and §4 on 2026-10-06. Re-verify with §2.
 
 ## ⏩ RESUME HERE
 
-- **Branch:** `cmux/integration`. Pushed through `17c2559`. **`1ec3b60` (B-129) is local,
-  not pushed.** Suite: 1840 passed, 2 skipped.
-- **Parked 2026-10-06 mid-verification of B-129.** The fix is in. One real-socket test was not
-  runnable from the Claude sandbox (no `bind()`). Next, the operator runs, in their terminal:
-  `uv run --no-sync pytest -v -p no:cacheprovider tests/test_cli_startup_errors.py -k real_port_conflict`
-  (expect `1 passed`, not `skipped`). Then, with a server holding 8080,
-  `uv run --no-sync hearth serve; echo "exit=$?"` should print `Cannot listen on 127.0.0.1:8080`,
-  no `Serving on`, no `loaded`, and `exit=1`. Record the result in BUGS B-129, then ask
-  before pushing `1ec3b60`.
+- **Branch:** `cmux/integration`, fully pushed through `e51dbdd` (includes B-129 `1ec3b60`).
+  Suite: 1840 passed, 2 skipped (last full run 2026-10-06; re-verify with §2).
+- **B-129 verified 2026-10-15 on the operator's machine:** the real-socket test passed
+  (`1 passed`, not skipped), and a manual `hearth serve` against a held 8080 printed
+  `Cannot listen on 127.0.0.1:8080`, no `Serving on`, no `loaded`, `exit=1`. Recorded in BUGS B-129.
 - **Operator verification done 2026-10-06:** YOUR_TURN §1–§4, §6, §7 and §8 all passed or were
   decided. Results are recorded in `docs/YOUR_TURN.md` ("Done 2026-10-06") and `docs/BUGS.md`.
 - **Next after that:** grow `data/agent_eval.yaml` toward n ≥ 30 (B-013); §5 golden sets
