@@ -21,12 +21,13 @@ It enforces the HEARTH \(mu cmux sealed\-tier invariant (see
 if it cannot prove that a workspace has no path to leave the machine, it does not launch.
 .PP
 The structural guarantee is an OS\-level, loopback\-only egress firewall (pf), because cmux's in\-app
-browser and iroh peer\-to\-peer transport have no in\-code off switch. Two further mandatory gates are
+browser and iroh peer\-to\-peer transport have no in\-code off switch. Three further mandatory gates are
 that the target
 .I REPO
 classifies to the sealed tier (ADR\-C003,
 .BR config/cmux/tiers.yaml )
-and that HEARTH itself resolves no remote. Telemetry, auto\-update, and signed\-out state are checked
+and that HEARTH itself resolves no remote, and that a probe run from a child of a sealed pane cannot leave the machine
+(the outcome, not the configuration). Telemetry, auto\-update, and signed\-out state are checked
 as defense\-in\-depth.
 .PP
 If
@@ -68,6 +69,16 @@ passes (0 remotes, all classes local/never).
 the pf anchor
 .B cmux-sealed
 is loaded with a block rule (loopback\-only egress).
+.IP \(bu 3
+.B workspace-containment:
+.B scripts/cmux/pane_containment.py
+reports CONTAINED: six attempts (curl, TCP and UDP to an IP literal, ICMP, IPv6 literal, DNS) fail
+from a child of the sealed pane and succeed in a control, and the probe ran as the sealed uid.
+LEAKS and INCONCLUSIVE both fail. With no pane or uid configured
+.RB ( CMUX_SEALED_SURFACE ,
+.BR CMUX_SEALED_UID )
+the result is INCONCLUSIVE and the gate fails closed; containment is not built yet. See
+.BR docs/cmux/DESIGN_C7_containment.md .
 .SH "EXIT STATUS"
 .TP
 .B 0

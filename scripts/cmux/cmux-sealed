@@ -138,6 +138,32 @@ else
   mandatory_ok=0
 fi
 
+# 4) MANDATORY: workspace containment — what a CHILD OF A PANE can reach (B-002, FINDING_pane_egress).
+#    Gate 3 inspects configuration (rules, anchors); on 2026-08-19 every one of those said SEALED while
+#    a pane's curl returned http=200. This gate asserts on the OUTCOME via scripts/cmux/pane_containment.py:
+#    six attempts in the pane, the same six in a control, uid + loopback identity checks. Only CONTAINED
+#    passes. LEAKS, INCONCLUSIVE (incl. "no pane/uid configured"), and a crashed verifier all FAIL.
+#    Configure with CMUX_SEALED_SURFACE (pane surface id) and CMUX_SEALED_UID. Not built yet: with
+#    neither set this reports INCONCLUSIVE and fails closed. (Verdict exit codes must not trip `set -e`.)
+contain_out=""
+if contain_out="$(python3 "$REPO_ROOT/scripts/cmux/pane_containment.py" 2>&1)"; then contain_rc=0; else contain_rc=$?; fi
+if [ "$contain_rc" = 0 ]; then
+  pass "workspace-containment: CONTAINED — pane attempts blocked, control reached (measured this run only)"
+elif [ "$contain_rc" = 3 ]; then
+  fail "workspace-containment: LEAKS — a pane child reached the network"
+  echo "$contain_out" | sed 's/^/         /'
+  mandatory_ok=0
+elif [ "$contain_rc" = 4 ]; then
+  fail "workspace-containment: INCONCLUSIVE — containment cannot be shown (fails closed)"
+  echo "$contain_out" | sed 's/^/         /'
+  echo "         Design and what to configure: docs/cmux/DESIGN_C7_containment.md"
+  mandatory_ok=0
+else
+  fail "workspace-containment: verifier error (exit $contain_rc) — failing closed; see docs/cmux/DESIGN_C7_containment.md"
+  echo "$contain_out" | sed 's/^/         /'
+  mandatory_ok=0
+fi
+
 # --- advisory (defense-in-depth; C0 §4 #1-#4). WARN by default; FAIL under --strict. -----------
 adv() { if [ "$STRICT" = 1 ]; then fail "$1"; advisory_ok=0; else warn "$1"; fi; }
 
