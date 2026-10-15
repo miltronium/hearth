@@ -1,19 +1,32 @@
-# HEARTH — RESUME HERE (handoff, updated 2026-10-15)
+# HEARTH — RESUME HERE (handoff, updated 2026-10-15, B-002 design + gate)
 
 Read this first, then CLAUDE.md. Written for a human or an agent picking up mid-stream. §1–§3
 were measured on 2026-10-05; the RESUME HERE block and §4 on 2026-10-06. Re-verify with §2.
 
 ## ⏩ RESUME HERE
 
-- **Branch:** `cmux/integration`, fully pushed through `e51dbdd` (includes B-129 `1ec3b60`).
-  Suite: 1840 passed, 2 skipped (last full run 2026-10-06; re-verify with §2).
+- **Branch:** `cmux/integration`, pushed through `a66c631`. Suite: 1885 passed, 1 skipped
+  (2026-10-15).
+- **B-002 (cmux C7 containment), agent side done 2026-10-15; nothing proven on hardware.**
+  Posture: loopback-only. Design: `docs/cmux/DESIGN_C7_containment.md`. Built and unit-tested with
+  fakes only: `scripts/cmux/pane_containment.py` (CONTAINED / LEAKS / INCONCLUSIVE with a paired
+  control), `pane_egress_probe.sh`, a mandatory `workspace-containment` gate in `cmux-sealed`
+  (fails closed until configured), and D1 (`cmux-sealed --print-rules`: pass loopback, then
+  `block return out quick all user <uid>`). An adversarial review found stale-marker and
+  exit-code bugs in the runner; fixed in `7c8be1f`. `CmuxPaneRunner` has never run against a real pane.
+- **Next for B-002 (operator, throwaway account, design §6):** first answer whether DNS from the
+  sealed uid leaves via `mDNSResponder` (a different uid). If `dns_lookup` is REACHED, candidate A
+  (sealed uid + pf) alone cannot reach CONTAINED and the choice moves to B (Docker panes). Then
+  the pane-child, sudo/setuid and loopback-forwarder checks. Open decisions: where the surface id
+  and sealed uid live (env vars now), the cold-launch order (gate runs before `open -a`), a config
+  field naming the pane agent (needed for the `pane-agent` gate).
 - **B-129 verified 2026-10-15 on the operator's machine:** the real-socket test passed
   (`1 passed`, not skipped), and a manual `hearth serve` against a held 8080 printed
   `Cannot listen on 127.0.0.1:8080`, no `Serving on`, no `loaded`, `exit=1`. Recorded in BUGS B-129.
 - **Operator verification done 2026-10-06:** YOUR_TURN §1–§4, §6, §7 and §8 all passed or were
   decided. Results are recorded in `docs/YOUR_TURN.md` ("Done 2026-10-06") and `docs/BUGS.md`.
-- **Next after that:** grow `data/agent_eval.yaml` toward n ≥ 30 (B-013); §5 golden sets
-  (operator's examples); B-002 cmux containment (P0, design first).
+- **Other next:** grow `data/agent_eval.yaml` toward n ≥ 30 (B-013); §5 golden sets
+  (operator's examples).
 - **Learn it:** `docs/GUIDE.md`, `man ./man/hearth.1`, `uv run --no-sync hearth --help`.
 
 ## 1. What is true now
