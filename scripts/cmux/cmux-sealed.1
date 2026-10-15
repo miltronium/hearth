@@ -10,6 +10,8 @@ cmux-sealed \- launch or verify a cmux workspace in the sealed (no\-egress) tier
 .B cmux-sealed --install-firewall
 .br
 .B cmux-sealed --remove-firewall
+.br
+.B CMUX_SEALED_UID=UID cmux-sealed --print-rules
 .SH DESCRIPTION
 .B cmux-sealed
 is the cmux\-side analog of
@@ -49,9 +51,16 @@ warn.
 .B --install-firewall
 Load the pf anchor
 .B cmux-sealed
-from
-.B scripts/cmux/cmux-sealed.pf.conf
-(requires sudo). This is the structural egress seal.
+(requires sudo): pass loopback, then
+.B block return
+every protocol for the uid in
+.BR CMUX_SEALED_UID ,
+which must be numeric. Loading is not enforcing; only the pane probe shows that.
+.TP
+.B --print-rules
+Print the exact rule text for
+.B CMUX_SEALED_UID
+and exit. Needs no sudo and loads nothing.
 .TP
 .B --remove-firewall
 Flush the pf anchor (requires sudo).

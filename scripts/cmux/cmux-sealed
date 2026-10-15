@@ -31,6 +31,7 @@ while [ $# -gt 0 ]; do
     --check) CHECK_ONLY=1; shift ;;
     --strict) STRICT=1; shift ;;
     --install-firewall) MODE="install-fw"; shift ;;
+    --print-rules) MODE="print-rules"; shift ;;
     --remove-firewall) MODE="remove-fw"; shift ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 64 ;;
@@ -44,14 +45,29 @@ fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
 warn() { printf '  \033[33mWARN\033[0m  %s\n' "$1"; }
 
 # --- firewall install/remove (structural egress seal; needs sudo) ------------------------------
+# The sealed-uid rule set. ALL protocols and both address families, not just tcp/udp: the earlier
+# `proto { tcp udp }` rules left ICMP (a tunnel) open (DESIGN_C7 §3). `block return` answers a TCP SYN with
+# an RST and a UDP datagram with ICMP unreachable, so a block is fast and distinguishable from a dead
+# network; other protocols are dropped. Loopback is passed first and `quick`, so 127.0.0.0/8 and ::1 work.
+# This is a rule TEXT only: whether pf enforces it, and whether it catches a pane child's sockets, is
+# measured by scripts/cmux/pane_egress_probe.sh, never by this file (ADR-C008).
+sealed_rules() {
+  printf 'pass quick on lo0 all\nblock return out quick all user %s\n' "$1"
+}
+if [ "$MODE" = "print-rules" ]; then
+  uid="${CMUX_SEALED_UID:-}"
+  case "$uid" in ''|*[!0-9]*) echo "--print-rules needs CMUX_SEALED_UID set to a numeric uid" >&2; exit 64 ;; esac
+  sealed_rules "$uid"; exit 0
+fi
 if [ "$MODE" = "install-fw" ]; then
   SEALED_UID="${CMUX_SEALED_UID:-$(id -u)}"
+  case "$SEALED_UID" in ''|*[!0-9]*) echo "CMUX_SEALED_UID must be a numeric uid, got '$SEALED_UID'" >&2; exit 64 ;; esac
   echo "==> pf egress seal: loopback-only for uid $SEALED_UID. Needs sudo."
   echo "    WARNING: this blocks NON-loopback traffic for that uid — the login user's browser/apps lose"
   echo "    internet until '$0 --remove-firewall'. To scope to cmux ONLY, run cmux as a dedicated user"
   echo "    and set CMUX_SEALED_UID to its uid."
   rules="$(mktemp)"
-  printf 'pass quick on lo0 all\nblock drop out proto { tcp udp } from any to ! 127.0.0.0/8 user %s\nblock drop out proto { tcp udp } from any to ! ::1 user %s\n' "$SEALED_UID" "$SEALED_UID" > "$rules"
+  sealed_rules "$SEALED_UID" > "$rules"
   if sudo pfctl -a "$PF_ANCHOR" -f "$rules"; then
     sudo pfctl -e 2>/dev/null || true   # enable pf (ignore 'already enabled')
     rm -f "$rules"

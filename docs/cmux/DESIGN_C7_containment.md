@@ -47,6 +47,13 @@ every descendant is covered whatever binary it is.
   operator's login uid is a natural **control** for the paired probe (§2).
 - **Against:** needs a second account, a launch path (`sudo -u` / `launchctl asuser`) and shared
   file access to the repo being worked on. Nothing but the probe proves it works.
+- **Probable hole (reasoned, not measured):** name resolution on macOS is done by `mDNSResponder`,
+  a different uid, reached over a unix socket. A pf rule on the sealed uid cannot see those lookups,
+  so DNS leaves the machine on the sealed uid's behalf, and a hostname is a data channel. If §6
+  shows `dns_lookup` REACHED, the gate will correctly report `LEAKS`, and candidate A alone cannot
+  reach `CONTAINED`. The remedies are to resolve nothing from the sealed uid (no resolver
+  reachable, which needs a pf rule on the resolver's egress that is not keyed to the uid) or to
+  prefer candidate B. Settle this first in §6; it decides A versus B.
 - **UNKNOWN, must be measured:**
   1. Does cmux start and keep state under another `$HOME`? (session store, socket path)
   2. Does pf attribute a pane child's socket to the sealed uid? (setuid binaries, `sudo`, and
@@ -180,7 +187,7 @@ seal and found to reach the internet — the "can tell the two apart" requiremen
 | `pane_egress_probe.sh` and the verdict logic, with fake-runner tests and mutation checks | agent (isolated worktree) | no sockets |
 | `workspace-containment` and `pane-agent` gates wired into `cmux-sealed --check` | agent | no sockets |
 | §6 measurement on a throwaway account | operator | pf, a second user, cmux.app |
-| D1: change the `--install-firewall` generator and `cmux-sealed.pf.conf` to `block return out all` for the sealed uid with a loopback pass; tcp/udp-only is the cause of an open ICMP | agent writes, operator validates in §6 | pf to validate |
+| D1 (DONE 2026-10-15, text only): `--install-firewall` now emits `block return out quick all user <uid>` after a loopback pass, via `cmux-sealed --print-rules`; tests assert the text and that `pfctl -n` parses it. Whether pf enforces it is §6. Original: change the `--install-firewall` generator and `cmux-sealed.pf.conf` to `block return out all` for the sealed uid with a loopback pass; tcp/udp-only is the cause of an open ICMP | agent writes, operator validates in §6 | pf to validate |
 | Pane-agent gate: needs a config field naming the pane agent first; without it a refusal would be a guess | decision, then agent | operator decision |
 | ADR-C009 follow-up, AUDIT §4 sixth condition, PRIVACY.md rewrite, RESULTS §1.8 | agent, after §6 | measured results |
 
