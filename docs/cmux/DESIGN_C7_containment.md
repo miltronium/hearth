@@ -31,7 +31,8 @@ states are three, never two: `CONTAINED`, `LEAKS`, `INCONCLUSIVE`. Only `CONTAIN
 | Rule is keyed on the cmux bundle id | FINDING §3.1 | Demote to defense-in-depth; never the primary control |
 | LuLu is allow-by-default | FINDING §3.2 | Do not build on LuLu rules |
 | The pf reference rules match `proto { tcp udp }` only | `scripts/cmux/cmux-sealed.pf.conf` | **ICMP and other IP protocols are not blocked.** The new rule must be `block drop out all` with an explicit loopback pass, and the probe must try ICMP |
-| `block drop` gives a timeout, not a refusal | pf semantics, UNKNOWN on this host | A blocked probe and a dead network look identical. Prefer `block return` for the sealed uid so denial is fast and distinguishable, and rely on the paired control for the rest |
+| `block drop` gives a timeout, not a refusal | pf semantics, UNKNOWN on this host | A blocked probe and a dead network look identical. Prefer `block return` for the sealed uid so denial is fast and distinguishable. For TCP the refusal is visible; for UDP and ICMP a returned block is still only partly distinguishable from silence, so those attempts lean on the paired control. A UDP attempt that "fails" in the pane and also fails in the control is `INCONCLUSIVE`, never evidence of containment |
+| `--install-firewall` in `cmux-sealed` generates the same tcp/udp-only rules | `scripts/cmux/cmux-sealed` | **Still unchanged.** Until the generator emits `block return out all` for the sealed uid plus a loopback pass, ICMP is open, and the probe's ICMP attempt will report `LEAKS`. That is the intended outcome of the gate, not a bug in it. Changing the generator is deliverable D1 in §8 and needs §6 to validate it |
 | Anchor rules are dormant unless `/etc/pf.conf` references the anchor | pf conf comment | "Anchor loaded" proves nothing; only the probe does |
 | `cmux_egress_probe.sh` greps processes matching `-c cmux` | script header | Cannot see a pane's `curl`. Replace with a probe that runs *inside* the pane |
 
@@ -89,14 +90,31 @@ New mandatory gate in `cmux-sealed --check`, and a standalone `scripts/cmux/pane
 2. **Sealed probe.** From inside the pane, attempt each of: `curl` (Apple-signed), a non-Apple
    interpreter doing TCP to an IP literal, UDP to an IP literal, ICMP, an IPv6 literal, and a
    DNS lookup. Every attempt must fail. IP literals keep the result independent of DNS.
-3. **Unsealed control.** Run the same probe set from the control context (candidate A: the
-   operator's uid; candidate B: a container with a normal network). Every attempt that failed in
+3. **Unsealed control.** Run the same probe set from the control context. Candidate A: the
+   operator's own uid, outside any pane. Candidate B: a throwaway container on the default
+   bridge network (`docker run` without `--network none`), same image and probe, so the only
+   difference from the sealed pane is the network. Every attempt that failed in
    step 2 must **succeed** here. If any also fails, the network or target is down →
    `INCONCLUSIVE`, never `CONTAINED`.
-4. **Identity check.** Record `id -u` and the process tree root of the probe, and assert the uid
-   is the sealed one and the parent chain reaches the cmux pane. This stops the probe running in
-   the wrong pane and certifying a different context.
+4. **Identity check.** Record `id -u` from inside the pane and assert it equals the expected
+   sealed uid. Then assert the probe's parent chain reaches the pane: the probe walks its own
+   `ppid` chain (`ps -o ppid= -p`) and the gate requires it to hit the pane shell's pid. **How the
+   gate learns the pane shell's pid is UNKNOWN** (does the cmux CLI expose it?); §6 step 4
+   measures it. Until it is measured the ancestry assertion is weak, and the implementation
+   (`CmuxPaneRunner.identity()`) only confirms the surface answered. The uid half is real, and
+   with candidate A it is the stronger check, because the pf rule is keyed on the uid. Do not
+   describe the gate as verifying ancestry until §6 step 4 has an answer.
 5. **Verdict.** `CONTAINED` only if 1 passes, 2 all fail, 3 all succeed, 4 matches.
+
+**Where the gate gets its inputs.** The gate must be told which pane to probe and which uid is
+sealed, and it must not guess either (a default of "the current uid" would make the check
+describe the configuration, not the workspace). For now both are environment variables read by
+`cmux-sealed`: `CMUX_SEALED_SURFACE` (the pane surface id) and `CMUX_SEALED_UID`. If either is
+unset the gate reports `INCONCLUSIVE` and fails closed, which is the true state today. Note that
+`--install-firewall` already reads `CMUX_SEALED_UID` and defaults it to the caller's uid; that
+default is acceptable for installing a rule but must not carry over to the gate. **Open
+decision:** whether these belong in `config/cmux/tiers.yaml` instead. Environment variables are
+fine for the prototype and wrong for a launcher that should not depend on the operator's shell.
 
 **What it reports if broken the most plausible way**
 
@@ -149,6 +167,8 @@ seal and found to reach the internet — the "can tell the two apart" requiremen
 | `pane_egress_probe.sh` and the verdict logic, with fake-runner tests and mutation checks | agent (isolated worktree) | no sockets |
 | `workspace-containment` and `pane-agent` gates wired into `cmux-sealed --check` | agent | no sockets |
 | §6 measurement on a throwaway account | operator | pf, a second user, cmux.app |
+| D1: change the `--install-firewall` generator and `cmux-sealed.pf.conf` to `block return out all` for the sealed uid with a loopback pass; tcp/udp-only is the cause of an open ICMP | agent writes, operator validates in §6 | pf to validate |
+| Pane-agent gate: needs a config field naming the pane agent first; without it a refusal would be a guess | decision, then agent | operator decision |
 | ADR-C009 follow-up, AUDIT §4 sixth condition, PRIVACY.md rewrite, RESULTS §1.8 | agent, after §6 | measured results |
 
 ## 9. Acceptance (restates B-002)
