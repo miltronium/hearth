@@ -1881,7 +1881,12 @@ must fail when the fix is reverted.
   bind (3 tests fail), app built before bind (2), no socket close (1). Full suite green.
   `test_a_real_port_conflict_in_a_real_process` holds a real listener and runs a real
   `hearth serve` on that port. It skips where sockets cannot be bound, as in the Claude
-  sandbox, so it was not run here: it needs a run on the operator's machine.
+  sandbox, so it was not run here. Operator run, 2026-10-15, on their machine:
+  `pytest -v -p no:cacheprovider tests/test_cli_startup_errors.py -k real_port_conflict` →
+  `1 passed` (not skipped). Manual run, same day, with `python3 -m http.server 8080 --bind
+  127.0.0.1` holding the port: `uv run --no-sync hearth serve` printed `Cannot listen on
+  127.0.0.1:8080: Address already in use ...` plus the `lsof -nP -iTCP:8080 -sTCP:LISTEN`
+  hint, no `Serving on`, no `loaded`/`warmed`, and `exit=1`.
 - **Evidence:** operator run, 2026-10-06, with port 8080 already held by an older process:
   ```
   Serving on http://127.0.0.1:8080  (OpenAI-compatible /v1)
