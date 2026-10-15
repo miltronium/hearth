@@ -190,3 +190,159 @@ def test_cli_usage_errors_exit_2(monkeypatch):
     monkeypatch.delenv("CMUX_SEALED_UID", raising=False)
     assert pc.main(["--bogus"]) == 2
     assert pc.main(["--surface", "S", "--sealed-uid", "abc"]) == 2
+
+
+# --- the operator-run layer: everything except the cmux CLI calls ------------------------------------
+# Review of 320564d found the bug class lives here (stale screen reads, any non-zero exit scored BLOCKED,
+# ancestry == "a marker appeared"). These tests run the real shell fragments against FAKE tools in a temp
+# PATH — no network, no pane, no cmux.
+
+import os
+import subprocess
+import tempfile
+
+
+def _run_wrapped(name, tool_rcs, nonce="n0nce"):
+    """Execute _wrap(name) in sh with fake curl/ping/python3 that exit with the given codes."""
+    with tempfile.TemporaryDirectory() as d:
+        for tool, rc in tool_rcs.items():
+            path = Path(d) / tool
+            path.write_text(f"#!/bin/sh\nexit {rc}\n")
+            path.chmod(0o755)
+        out = subprocess.run(["/bin/sh", "-c", pc._wrap(name, nonce)], capture_output=True, text=True,
+                             env={"PATH": d}, timeout=20).stdout
+    return pc._markers(out, nonce)
+
+
+def test_curl_block_exit_codes_are_blocked_but_cert_and_proxy_errors_are_not():
+    for rc, want in [(0, "REACHED"), (6, "BLOCKED"), (7, "BLOCKED"), (28, "BLOCKED"),
+                     (60, "UNAVAILABLE"), (77, "UNAVAILABLE"), (5, "UNAVAILABLE"), (1, "UNAVAILABLE")]:
+        (m,) = _run_wrapped("curl_https", {"curl": rc})
+        assert m[:2] == ("curl_https", want), (rc, m)
+
+
+def test_a_stub_python_that_exits_1_is_unavailable_not_blocked():
+    (m,) = _run_wrapped("tcp_ip_literal", {"python3": 1})
+    assert m[:2] == ("tcp_ip_literal", "UNAVAILABLE")
+    (m,) = _run_wrapped("tcp_ip_literal", {"python3": pc.EXIT_BLOCKED})
+    assert m[:2] == ("tcp_ip_literal", "BLOCKED")
+    (m,) = _run_wrapped("tcp_ip_literal", {"python3": 0})
+    assert m[:2] == ("tcp_ip_literal", "REACHED")
+
+
+def test_missing_tool_is_unavailable():
+    (m,) = _run_wrapped("icmp", {})  # no ping on PATH
+    assert m[:2] == ("icmp", "UNAVAILABLE")
+
+
+def test_ping_no_reply_is_blocked_other_failures_are_not():
+    assert _run_wrapped("icmp", {"ping": 2})[0][1] == "BLOCKED"
+    assert _run_wrapped("icmp", {"ping": 68})[0][1] == "UNAVAILABLE"
+
+
+def test_every_python_probe_compiles_and_stays_on_one_line():
+    for name, line in pc._PROBES.items():
+        assert "\n" not in line and "\n" not in pc._wrap(name, "x"), name
+    for body in ("socket.getaddrinfo('example.com',443)", f"s.send(b'{pc._UDP_QUERY}')"):
+        compile(pc._py_src(body), "probe", "exec")
+
+
+def test_the_echoed_command_text_never_matches_the_marker_regex():
+    # What the pane echoes back is the command we typed; it must not itself look like a result.
+    assert pc._markers(pc._wrap("curl_https", "abc123"), "abc123") == []
+
+
+def test_classify_control_exit_codes():
+    assert pc._classify(0) is R and pc._classify(pc.EXIT_BLOCKED) is B
+    assert pc._classify(127) is U and pc._classify(1) is U and pc._classify(99) is U
+
+
+class ScreenRunner(pc.CmuxPaneRunner):
+    """CmuxPaneRunner with the cmux CLI replaced by a canned screen."""
+
+    def __init__(self, screen_for):
+        super().__init__("surface-x")
+        self._screen_for, self.nonce = screen_for, "fresh"
+
+    def _nonce(self):
+        return self.nonce
+
+    def _pane(self, shell_line, wait=12.0):
+        return self._screen_for(shell_line)
+
+
+def test_a_stale_marker_from_an_earlier_run_cannot_shadow_this_run():
+    screen = "PCXstale:curl_https:BLOCKED\nPCXfresh:curl_https:REACHED\n"
+    assert ScreenRunner(lambda _l: screen).attempt("pane", "curl_https") is R
+
+
+def test_a_stale_marker_alone_is_unavailable_never_blocked():
+    assert ScreenRunner(lambda _l: "PCXstale:curl_https:BLOCKED\n").attempt("pane", "curl_https") is U
+
+
+def test_the_last_marker_of_this_run_wins():
+    screen = "PCXfresh:curl_https:BLOCKED\nPCXfresh:curl_https:REACHED\n"
+    assert ScreenRunner(lambda _l: screen).attempt("pane", "curl_https") is R
+
+
+def test_garbled_or_unknown_marker_is_unavailable():
+    assert ScreenRunner(lambda _l: "garbage\n").attempt("pane", "icmp") is U
+    assert ScreenRunner(lambda _l: "PCXfresh:icmp:WEIRD\n").attempt("pane", "icmp") is U
+    assert ScreenRunner(lambda _l: "PCXfresh:other:REACHED\n").attempt("pane", "icmp") is U
+
+
+def test_a_stale_loopback_reached_does_not_satisfy_the_loopback_check():
+    assert ScreenRunner(lambda _l: "PCXstale:loopback:REACHED\n").loopback_ok() is False
+    assert ScreenRunner(lambda _l: "PCXfresh:loopback:BLOCKED\n").loopback_ok() is False
+    assert ScreenRunner(lambda _l: "PCXfresh:loopback:REACHED\n").loopback_ok() is True
+
+
+def test_identity_reads_uid_and_a_measured_cmux_ancestor():
+    assert ScreenRunner(lambda _l: "PCXfresh:ident:599:YES\n").identity() == (599, True)
+    assert ScreenRunner(lambda _l: "PCXfresh:ident:599:NO\n").identity() == (599, False)
+    assert ScreenRunner(lambda _l: "").identity() == (-1, False)
+    assert ScreenRunner(lambda _l: "PCXstale:ident:599:YES\n").identity() == (-1, False)
+
+
+def _ancestry_flag(cmux_pid_comm):
+    """Run the real ancestry fragment with a fake `ps`: the shell's chain is $$ -> 500 -> 1.
+    `cmux_pid_comm` is the executable path reported for pid 500."""
+    with tempfile.TemporaryDirectory() as d:
+        ps = Path(d) / "ps"
+        ps.write_text(
+            "#!/bin/sh\n"
+            'for last; do :; done\n'  # POSIX: the pid is the final argument
+            'case "$*" in\n'
+            f'  *comm=*) if [ "$last" = 500 ]; then echo "{cmux_pid_comm}"; else echo zsh; fi;;\n'
+            '  *ppid=*) if [ "$last" = 500 ]; then echo 1; else echo 500; fi;;\n'
+            "esac\n")
+        ps.chmod(0o755)
+        return subprocess.run(["/bin/sh", "-c", pc._ANCESTRY + "; echo $a"], capture_output=True, text=True,
+                              env={"PATH": f"{d}:/usr/bin:/bin"}, timeout=20).stdout.strip()
+
+
+def test_ancestry_fragment_finds_a_cmux_ancestor_and_not_otherwise():
+    assert _ancestry_flag("/Applications/cmux.app/Contents/MacOS/cmux") == "YES"
+    assert _ancestry_flag("/usr/sbin/sshd") == "NO"
+
+
+class _LoopbackRaises(FakeRunner):
+    def loopback_ok(self):
+        raise OSError("screen read failed")
+
+
+class _IdentityRaises(FakeRunner):
+    def identity(self):
+        raise OSError("screen read failed")
+
+
+def test_a_loopback_exception_is_a_failed_check_not_ok():
+    ev = pc.collect(_LoopbackRaises())
+    assert ev.loopback_ok is False
+    assert verdict_of(_LoopbackRaises()) is pc.Verdict.INCONCLUSIVE
+
+
+def test_an_identity_exception_fails_both_uid_and_ancestry():
+    ev = pc.collect(_IdentityRaises())
+    assert ev.uid == -1 and ev.ancestry_ok is False
+    assert verdict_of(_IdentityRaises()) is pc.Verdict.INCONCLUSIVE

@@ -159,6 +159,19 @@ seal and found to reach the internet — the "can tell the two apart" requiremen
   reach its endpoint, so it fails closed on its own — but the gate should say so rather than
   letting the operator discover it at the first prompt.
 
+- **Launch order (found in review, READ in `scripts/cmux/cmux-sealed`).** In run mode the gate runs
+  *before* `open -a`, so it can only probe a surface that already exists, not the workspace being
+  launched; with cmux not running it is always `INCONCLUSIVE`, so the script cannot launch cold. The
+  honest shape is launch → probe the new workspace's pane → keep or close it, which is a launcher
+  redesign. **Open decision** for the implementation phase; until then `--check` against a running
+  pane is the supported use and `cmux-sealed` run mode fails closed.
+- **The runner reads results from a screen scrape.** Each result carries a per-call random nonce,
+  so a marker left in scrollback by an earlier run cannot be read as this run's. An exit code is
+  scored `BLOCKED` only on positive evidence of a block (curl 6/7/28, ping no-reply, python
+  `OSError`); every other failure is `UNAVAILABLE`, so a certificate error, a bad proxy or a stub
+  interpreter cannot read as containment. Ancestry is measured as "an ancestor's executable path
+  contains `cmux`": real, but ssh/su into the same uid still passes.
+
 ## 8. Work split
 
 | Item | Who | Needs |

@@ -7,7 +7,7 @@ a loaded anchor). This one asserts on the OUTCOME: what a probe run as a child o
 compared against the same probe run outside the seal.
 
 Result states are three, never two:
-  CONTAINED     every attempt was blocked in the pane AND reached in the control, identity matched
+  CONTAINED     every attempt was blocked in the pane AND reached in the control, uid matched and a cmux ancestor was seen
   LEAKS         at least one attempt reached the network from the pane
   INCONCLUSIVE  the evidence cannot distinguish "sealed" from "offline / wrong pane / tool missing"
 
@@ -41,8 +41,11 @@ import argparse
 import enum
 import os
 import re
+import secrets
+import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol
 
@@ -54,6 +57,11 @@ CONTEXTS = ("pane", "control")
 EXIT_CONTAINED, EXIT_USAGE, EXIT_LEAKS, EXIT_INCONCLUSIVE = 0, 2, 3, 4
 
 NOT_MEASURED = (
+    "that the probed surface is the workspace being launched (the gate probes a surface it is given)",
+    "ancestry beyond 'an ancestor process's executable path contains cmux' (ssh/su into the same uid passes)",
+    "that results are read back from a screen scrape of the pane, not from the process itself",
+    "that the pane and the control share PATH, proxy and certificate environment (they may not)",
+    "that IPv6, ICMP and DNS are reachable by design on this network (an IPv4-only net is INCONCLUSIVE)",
     "rules flushed or changed after this run (gate runs at launch only)",
     "loopback listeners that forward outward (loopback is trusted)",
     "sudo / setuid / launchd-spawned escapes from the sealed uid",
@@ -98,7 +106,7 @@ def verdict(ev: Evidence, expected_uid: int) -> tuple[Verdict, str]:
     if ev.uid != expected_uid:
         return Verdict.INCONCLUSIVE, f"probe ran as uid {ev.uid}, expected sealed uid {expected_uid}"
     if not ev.ancestry_ok:
-        return Verdict.INCONCLUSIVE, "probe process ancestry does not reach the cmux pane"
+        return Verdict.INCONCLUSIVE, "no ancestor of the probe is a cmux process (wrong pane, or ssh/su out of it)"
     # (b) a positive reach is a leak regardless of the control
     reached = [n for n in ATTEMPTS if ev.pane.get(n) is Outcome.REACHED]
     if reached:
@@ -144,7 +152,7 @@ def render(ev: Evidence, v: Verdict, reason: str) -> str:
     for n in ATTEMPTS:
         p, c = ev.pane.get(n), ev.control.get(n)
         lines.append(f"  {n:<18} {p.value if p else 'MISSING':<12} {c.value if c else 'MISSING'}")
-    lines.append(f"  loopback={ev.loopback_ok} uid={ev.uid} ancestry={ev.ancestry_ok}")
+    lines.append(f"  loopback={ev.loopback_ok} uid={ev.uid} ancestor_is_cmux={ev.ancestry_ok}")
     lines.append(f"{v.value}: {reason}")
     lines.append("NOT MEASURED:")
     lines.extend(f"  - {x}" for x in NOT_MEASURED)
@@ -161,19 +169,65 @@ def run(runner: Runner, expected_uid: int) -> tuple[int, str]:
 
 
 # --- OPERATOR-RUN ONLY ------------------------------------------------------------------------------
-# Nothing below is constructed by any test. It makes real network attempts from a real pane.
-_PY = "command -v python3 >/dev/null || exit 127; python3 -c "
-_PROBES = {  # shell fragment per attempt; exit 0 = reached, 127 = tool missing, other = blocked
-    "curl_https": "command -v curl >/dev/null || exit 127; curl -sS -m 6 -o /dev/null https://example.com",
-    "tcp_ip_literal": _PY + "\"import socket;socket.create_connection(('1.1.1.1',443),5)\"",
-    "udp_ip_literal": _PY + "\"import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(4);"
-                      "s.connect(('1.1.1.1',53));s.send(b'\\x00\\x01\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00"
-                      "\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01');s.recv(512)\"",
-    "icmp": "command -v ping >/dev/null || exit 127; ping -c1 -t4 1.1.1.1 >/dev/null",
-    "tcp_ipv6_literal": _PY + "\"import socket;socket.create_connection(('2606:4700:4700::1111',443),5)\"",
-    "dns_lookup": _PY + "\"import socket;socket.getaddrinfo('example.com',443)\"",
+# CmuxPaneRunner is never constructed by a test. It makes real network attempts from a real pane.
+# The pure helpers around it (_py_src, _probe_line, _wrap, _classify) are tested with fake commands.
+#
+# Exit-code contract for every probe fragment: 0 = reached, 10 = positive evidence of a block
+# (connection refused / unreachable / timeout / no reply), anything else = the instrument failed
+# (missing tool, certificate error, bad proxy, stub binary) and is UNAVAILABLE, never BLOCKED.
+EXIT_BLOCKED = 10
+
+_GUARD = "command -v {tool} >/dev/null || exit 127; "
+_UDP_QUERY = ("\\x00\\x01\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00"
+              "\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01")
+
+
+def _py_src(body: str) -> str:
+    """Python source that exits 0 if `body` completes and 10 if it raises OSError (incl. timeouts, gaierror)."""
+    return f"import socket,sys\ntry:\n {body}\nexcept OSError:\n sys.exit({EXIT_BLOCKED})"
+
+
+def _py_probe(body: str) -> str:
+    # exec(repr(src)) keeps the whole probe on ONE line: a real newline typed into a pane would press Enter.
+    return _GUARD.format(tool="python3") + "python3 -c " + shlex.quote(f"exec({_py_src(body)!r})")
+
+
+def _tool_probe(tool: str, command: str, blocked_codes: str) -> str:
+    return (_GUARD.format(tool=tool) + f"{command}; r=$?; case $r in 0) exit 0;; {blocked_codes}) "
+            f"exit {EXIT_BLOCKED};; *) exit 99;; esac")
+
+
+_PROBES = {
+    # curl 6 = could not resolve, 7 = could not connect, 28 = timed out. Others (60/77 CA bundle, 5 proxy) are NOT a block.
+    "curl_https": _tool_probe("curl", "curl -sS -m 6 -o /dev/null https://example.com", "6|7|28"),
+    "tcp_ip_literal": _py_probe("socket.create_connection(('1.1.1.1',443),5)"),
+    "udp_ip_literal": _py_probe(
+        "s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(4);s.connect(('1.1.1.1',53));"
+        f"s.send(b'{_UDP_QUERY}');s.recv(512)"),
+    "icmp": _tool_probe("ping", "ping -c1 -t4 1.1.1.1 >/dev/null", "2"),
+    "tcp_ipv6_literal": _py_probe("socket.create_connection(('2606:4700:4700::1111',443),5)"),
+    "dns_lookup": _py_probe("socket.getaddrinfo('example.com',443)"),
 }
-_MARK = re.compile(r"PCX:(\w+):(REACHED|BLOCKED|UNAVAILABLE)")
+_LOOPBACK = ("command -v python3 >/dev/null && python3 -c \"import socket;l=socket.socket();l.bind(('127.0.0.1',0));"
+             "l.listen(1);socket.create_connection(l.getsockname(),2)\" >/dev/null 2>&1")
+_ANCESTRY = ('p=$$; a=NO; while [ "$p" -gt 1 ] 2>/dev/null; do case "$(ps -o comm= -p $p)" in *cmux*) a=YES;; esac; '
+             "p=$(ps -o ppid= -p $p | tr -d ' '); done")
+
+
+def _classify(rc: int) -> Outcome:
+    return Outcome.REACHED if rc == 0 else Outcome.BLOCKED if rc == EXIT_BLOCKED else Outcome.UNAVAILABLE
+
+
+def _wrap(name: str, nonce: str) -> str:
+    # The result goes through printf %s with the nonce as an argument, so the echoed command text never
+    # matches the marker regex, and a marker from an earlier run (other nonce) can never be mistaken for this one.
+    return (f"( {_PROBES[name]} ) >/dev/null 2>&1; r=$?; "
+            f"case $r in 0) o=REACHED;; {EXIT_BLOCKED}) o=BLOCKED;; *) o=UNAVAILABLE;; esac; "
+            f"printf 'PCX%s:%s:%s\\n' {nonce} {name} $o")
+
+
+def _markers(screen: str, nonce: str) -> list[tuple[str, ...]]:
+    return re.findall(rf"PCX{re.escape(nonce)}:(\w+):(\w+)(?::(\w+))?", screen)
 
 
 class CmuxPaneRunner:
@@ -184,8 +238,11 @@ class CmuxPaneRunner:
     def __init__(self, surface: str) -> None:
         self.surface = surface
 
+    @staticmethod
+    def _nonce() -> str:
+        return secrets.token_hex(6)
+
     def _pane(self, shell_line: str, wait: float = 12.0) -> str:
-        import time
         subprocess.run([self.CX, "send", "--surface", self.surface, shell_line], check=True, timeout=15)
         subprocess.run([self.CX, "send-key", "--surface", self.surface, "Enter"], check=True, timeout=15)
         time.sleep(wait)
@@ -193,34 +250,29 @@ class CmuxPaneRunner:
                              capture_output=True, text=True, timeout=15, check=True)
         return out.stdout
 
-    @staticmethod
-    def _wrap(name: str) -> str:
-        # The result is printed through %s so the echoed command text never matches the PCX: regex.
-        return (f"( {_PROBES[name]} ) >/dev/null 2>&1; r=$?; "
-                f"case $r in 0) o=REACHED;; 127) o=UNAVAILABLE;; *) o=BLOCKED;; esac; "
-                f"printf 'PCX:%s:%s\\n' {name} $o")
-
     def loopback_ok(self) -> bool:
-        line = ("python3 -c \"import socket;l=socket.socket();l.bind(('127.0.0.1',0));l.listen(1);"
-                "socket.create_connection(l.getsockname(),2)\" >/dev/null 2>&1 && "
-                "printf 'PCX:%s:%s\\n' loopback REACHED || printf 'PCX:%s:%s\\n' loopback BLOCKED")
-        return any(m.group(1) == "loopback" and m.group(2) == "REACHED"
-                   for m in _MARK.finditer(self._pane(line, 4)))
+        n = self._nonce()
+        line = (f"{_LOOPBACK} && printf 'PCX%s:%s:%s\\n' {n} loopback REACHED "
+                f"|| printf 'PCX%s:%s:%s\\n' {n} loopback BLOCKED")
+        found = [m for m in _markers(self._pane(line, 4), n) if m[0] == "loopback"]
+        return bool(found) and found[-1][1] == "REACHED"
 
     def identity(self) -> tuple[int, bool]:
-        out = self._pane("printf 'PCX:uid:%s\\n' $(id -u)", 3)
-        m = re.search(r"PCX:uid:(\d+)", out)
-        # Ancestry beyond "this surface answered" is UNKNOWN until measured (design §6 step 4).
-        return (int(m.group(1)) if m else -1), m is not None
+        n = self._nonce()
+        line = f"{_ANCESTRY}; printf 'PCX%s:%s:%s:%s\\n' {n} ident $(id -u) $a"
+        found = [m for m in _markers(self._pane(line, 4), n) if m[0] == "ident"]
+        if not found or not found[-1][1].isdigit():
+            return -1, False
+        return int(found[-1][1]), found[-1][2] == "YES"
 
     def attempt(self, context: str, name: str) -> Outcome:
         if context == "control":
-            r = subprocess.run(["sh", "-c", _PROBES[name]], capture_output=True, timeout=20).returncode
-            return Outcome.REACHED if r == 0 else Outcome.UNAVAILABLE if r == 127 else Outcome.BLOCKED
-        for m in _MARK.finditer(self._pane(self._wrap(name))):
-            if m.group(1) == name:
-                return Outcome(m.group(2))
-        return Outcome.UNAVAILABLE
+            return _classify(subprocess.run(["sh", "-c", _PROBES[name]], capture_output=True, timeout=20).returncode)
+        n = self._nonce()
+        found = [m for m in _markers(self._pane(_wrap(name, n)), n) if m[0] == name]
+        if not found or found[-1][1] not in Outcome.__members__:
+            return Outcome.UNAVAILABLE
+        return Outcome(found[-1][1])
 
 
 def main(argv: list[str] | None = None) -> int:
